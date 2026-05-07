@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "ccdaf"
+version = "0.1.0"
+description = "Cardiac Clinical Data Analysis Framework"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.10",
+    "vtk>=9.2",
+    "pyvista>=0.43",
+    "pyvistaqt>=0.11",
+    "PyQt5>=5.15",
+    "matplotlib>=3.7",
+    "SimpleITK>=2.4",
+    "trimesh>=4.0",
+]
+
+[project.scripts]
+ccdaf = "ccdaf.app.ccdaf:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

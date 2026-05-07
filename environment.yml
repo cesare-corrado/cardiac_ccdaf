@@ -1,0 +1,18 @@
+name: ccdaf
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - numpy>=1.23
+  - scipy>=1.10
+  - vtk>=9.2
+  - pyvista>=0.43
+  - pyvistaqt>=0.11
+  - pyqt>=5.15
+  - matplotlib>=3.7
+  - simpleitk>=2.4
+  - trimesh>=4.0
+  - pip
+  - pip:
+    - -e .
