@@ -29,14 +29,14 @@ import numpy as np
 import pyvista as pv
 
 
-from seed_state_machine import (
+from ccdaf.core.seed_state_machine import (
     SEED_ORDER,
     PV_NAMES,
     Seed,
     SeedStateMachine,
     CommitResult,
 )
-from seed_geometry import SeedGeometryResolver, GeometryError
+from ccdaf.core.seed_geometry import SeedGeometryResolver, GeometryError
 
 
 # Picker tolerance as a fraction of the render window (VTK convention).
