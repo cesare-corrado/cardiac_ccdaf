@@ -40,7 +40,7 @@ import numpy as np
 import pyvista as pv
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra
-from mesh_loader import BODY_LABEL, UNASSIGNED
+from ccdaf.core.mesh_loader import BODY_LABEL, UNASSIGNED
 
 # ---------------------------------------------------------------------------
 # Label conventions (from Claude.md)

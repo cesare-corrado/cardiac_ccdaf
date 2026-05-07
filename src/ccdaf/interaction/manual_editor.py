@@ -27,7 +27,7 @@ from scipy.spatial import cKDTree
 import numpy as np
 import pyvista as pv
 
-from mesh_loader import BODY_LABEL, UNASSIGNED
+from ccdaf.core.mesh_loader import BODY_LABEL, UNASSIGNED
 
 
 ALLOWED_LABELS = (11, 13, 15, 17, 19, BODY_LABEL)

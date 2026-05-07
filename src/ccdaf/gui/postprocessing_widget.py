@@ -20,7 +20,7 @@ from typing import Callable, Optional
 import pyvista as pv
 from PyQt5 import QtCore, QtWidgets
 
-from mesh_postprocessor import PostprocessOptions, apply as postprocess_apply
+from ccdaf.core.mesh_postprocessor import PostprocessOptions, apply as postprocess_apply
 
 
 class PostprocessingWidget(QtWidgets.QGroupBox):
