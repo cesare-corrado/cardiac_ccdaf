@@ -17,3 +17,10 @@ dependencies:
   - pip
   - pip:
     - -e .
+
+variables:
+  # conda-forge's vtk/pyqt combo can crash inside libfontconfig when the
+  # shared ~/.cache/fontconfig directory holds cache files written by other
+  # fontconfig versions (system fontconfig, other conda envs). Isolate this
+  # env's font cache to avoid cross-version corruption.
+  XDG_CACHE_HOME: ~/.cache/ccdaf-fontconfig
