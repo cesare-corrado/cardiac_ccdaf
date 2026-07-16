@@ -11,6 +11,8 @@ Mesh quality post-processing routines usable at any stage of the pipeline:
                   non-manifold / degenerate cells, orient normals, and
                   smooth low-quality triangles while preserving labelled
                   surfaces
+* ``fill_holes``- close boundary loops below a radius threshold, leaving
+                  larger (anatomical) openings open
 
 All routines return a fresh ``pyvista.PolyData`` with the point / cell
 data from the input mesh transferred onto the new topology via nearest-
@@ -53,6 +55,26 @@ def _transfer_arrays(src: pv.PolyData, dst: pv.PolyData) -> None:
                 continue
             arr = np.asarray(src.cell_data[name])
             dst.cell_data[name] = arr[cid]
+
+
+def _strip_new_arrays(mesh: pv.PolyData,
+                      keep_point: Set[str],
+                      keep_cell: Set[str]) -> None:
+    """Drop every point / cell array whose name is not in the keep sets.
+
+    Intermediate VTK filters attach bookkeeping arrays to their output
+    (``RegionId`` from ``connectivity()``, ``vtkOriginalPointIds`` /
+    ``vtkOriginalCellIds`` from ``extract_surface()``). Those must not
+    reach a caller, who would otherwise see them as selectable fields.
+    The keep sets are snapshotted from the input mesh, so an array the
+    input already carried is retained rather than mistaken for one an
+    intermediate filter introduced."""
+    for name in list(mesh.point_data.keys()):
+        if name not in keep_point:
+            del mesh.point_data[name]
+    for name in list(mesh.cell_data.keys()):
+        if name not in keep_cell:
+            del mesh.cell_data[name]
 
 
 # =====================================================================
@@ -696,6 +718,40 @@ def _earclip_triangulate(loop_pts: np.ndarray,
     return loop_arr[tri_local], residual
 
 
+def _projected_loop_is_simple(proj: np.ndarray) -> bool:
+    """True when the projected loop polygon has no self-crossing edges.
+
+    A loop non-planar enough to cross itself once flattened cannot be
+    triangulated by ``vtkDelaunay2D``: the crossing leaves at least one
+    constraint edge unrecoverable, which the filter reports as "Edge not
+    recovered, polygon fill suspect" and then returns a fill the caller has
+    to reject anyway. Testing first skips the doomed call and its warning.
+
+    Only proper crossings count. Loops that merely touch at a vertex are
+    pinches, and are split upstream by :func:`_split_loop_at_pinches`.
+    """
+    n = proj.shape[0]
+    if n < 4:
+        return True
+
+    def side(a, b, c) -> float:
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    for i in range(n):
+        p1, p2 = proj[i], proj[(i + 1) % n]
+        for j in range(i + 1, n):
+            # Edges sharing a vertex legitimately touch.
+            if (j + 1) % n == i or (i + 1) % n == j:
+                continue
+            p3, p4 = proj[j], proj[(j + 1) % n]
+            d1, d2 = side(p3, p4, p1), side(p3, p4, p2)
+            d3, d4 = side(p1, p2, p3), side(p1, p2, p4)
+            if (((d1 > 0) and (d2 < 0)) or ((d1 < 0) and (d2 > 0))) and \
+               (((d3 > 0) and (d4 < 0)) or ((d3 < 0) and (d4 > 0))):
+                return False
+    return True
+
+
 def _delaunay_triangulate(loop_pts: np.ndarray,
                           loop_arr: np.ndarray) -> Optional[np.ndarray]:
     """Constrained Delaunay triangulation of a single loop. Project the
@@ -715,6 +771,8 @@ def _delaunay_triangulate(loop_pts: np.ndarray,
     e1, e2 = Vt[0], Vt[1]
     proj = np.column_stack([centred @ e1, centred @ e2])
     if not np.all(np.isfinite(proj)):
+        return None
+    if not _projected_loop_is_simple(proj):
         return None
     pts3d = np.zeros((n, 3), dtype=np.float64)
     pts3d[:, :2] = proj
@@ -1020,6 +1078,106 @@ def _fill_small_holes(mesh: pv.PolyData, max_size: float) -> pv.PolyData:
     return oriented
 
 
+SMOOTH_TAUBIN = "taubin"
+SMOOTH_LAPLACIAN = "laplacian"
+
+
+def smooth(mesh: pv.PolyData,
+           method: str = SMOOTH_TAUBIN,
+           iterations: int = 40,
+           passband: float = 0.001,
+           relaxation: float = 0.1,
+           feature_angle: float = 180.0) -> pv.PolyData:
+    """Smooth the whole surface, stripping acquisition noise.
+
+    Unlike :func:`clean`'s quality smoothing — which only nudges vertices of
+    badly-shaped triangles and leaves the anatomy alone — this moves every
+    vertex, and so reshapes the surface.
+
+    * ``taubin`` (``vtkWindowedSincPolyDataFilter``) alternates a shrinking
+      and an inflating pass, so it removes roughness without deflating the
+      shell (~+0.1% volume on a Carto atrium). ``passband`` sets how much is
+      removed; smaller is smoother. The filter is only stable for modest
+      ``iterations`` relative to mesh density: 40 is right for a ~13k-point
+      Carto surface, costs ~4% of the volume on the same surface decimated
+      to 4k, and runs away on a very coarse one — so lower it when smoothing
+      a decimated mesh.
+    * ``laplacian`` (``vtkSmoothPolyDataFilter``) moves each vertex toward
+      its neighbours' average. Simpler, but it shrinks progressively with
+      ``iterations`` (~-2.5% volume at 100), which matters when the shell is
+      later measured.
+
+    Topology, point count and point order are preserved, so the caller can
+    read the displacement off as ``out.points - mesh.points`` — that vertex
+    correspondence is what lets electrodes follow the surface. Point and cell
+    arrays are copied across by index.
+    """
+    if method == SMOOTH_TAUBIN:
+        flt = vtk.vtkWindowedSincPolyDataFilter()
+        flt.SetInputData(mesh)
+        flt.SetNumberOfIterations(int(iterations))
+        flt.SetPassBand(float(passband))
+        flt.SetFeatureAngle(float(feature_angle))
+        flt.FeatureEdgeSmoothingOn()
+        flt.BoundarySmoothingOn()
+        flt.NonManifoldSmoothingOn()
+        flt.NormalizeCoordinatesOn()
+    elif method == SMOOTH_LAPLACIAN:
+        flt = vtk.vtkSmoothPolyDataFilter()
+        flt.SetInputData(mesh)
+        flt.SetNumberOfIterations(int(iterations))
+        flt.SetRelaxationFactor(float(relaxation))
+        flt.SetFeatureAngle(float(feature_angle))
+        flt.FeatureEdgeSmoothingOn()
+        flt.BoundarySmoothingOn()
+        flt.SetConvergence(0.0)
+    else:
+        raise ValueError(f"unknown smoothing method: {method!r}")
+    flt.Update()
+
+    out = pv.wrap(flt.GetOutput())
+    if out.n_points != mesh.n_points:
+        raise RuntimeError(
+            f"{method} smoothing changed the point count "
+            f"({mesh.n_points} -> {out.n_points}); the vertex correspondence "
+            "callers rely on is gone"
+        )
+    for name in list(mesh.point_data.keys()):
+        out.point_data[name] = np.asarray(mesh.point_data[name])
+    for name in list(mesh.cell_data.keys()):
+        if name == "render_idx":
+            continue
+        out.cell_data[name] = np.asarray(mesh.cell_data[name])
+    return out
+
+
+def fill_holes(mesh: pv.PolyData, max_size: float) -> pv.PolyData:
+    """Close boundary loops whose bounding-sphere radius is ≤ ``max_size``.
+
+    ``max_size`` is an absolute length in mesh units (mm for Carto
+    exports), measured as the maximum distance from a loop's vertices to
+    their centroid. Openings larger than it stay open — that is how
+    genuine anatomical openings (PV ostia, mitral valve) keep their
+    identity, so the threshold must sit well below their radius. A
+    ``max_size`` above the largest loop radius therefore closes
+    everything.
+
+    Topology cleanup (isolated / duplicate / degenerate / non-manifold
+    cell removal) runs regardless, and the result is consistently
+    oriented. Point and cell arrays are transferred onto the repaired
+    topology by nearest-neighbour lookup, so integer cell arrays such as
+    ``elemTag`` survive — ``_fill_small_holes`` alone does not carry
+    cell data.
+    """
+    if max_size <= 0:
+        raise ValueError("max_size must be positive")
+    out = _fill_small_holes(mesh, max_size)
+    if out is mesh:            # nothing to do (no faces) — never alias the input
+        return mesh.copy()
+    _transfer_arrays(mesh, out)
+    return out
+
+
 # =====================================================================
 # REFINE (vtkAdaptiveSubdivisionFilter-like)
 # =====================================================================
@@ -1082,7 +1240,8 @@ def clean(mesh: pv.PolyData,
           preserve_labels: Optional[Iterable[int]] = None,
           quality_threshold: float = 0.2,
           quality_relaxation: float = 0.1,
-          smooth_iterations: int = 20) -> pv.PolyData:
+          smooth_iterations: int = 20,
+          merge_tol: float = 0.0) -> pv.PolyData:
     """Apply the full cleaning pipeline.
 
     * merge duplicate points, drop unused / non-connected points
@@ -1092,19 +1251,41 @@ def clean(mesh: pv.PolyData,
       freezing vertices belonging to cells whose ``elemTag`` is listed in
       ``preserve_labels``
 
+    ``merge_tol`` is the absolute welding distance of the deduplication
+    step, in mesh units (mm for Carto exports). The default ``0.0`` is
+    geometry-safe: it merges only exactly coincident points and moves no
+    vertex. A positive value welds near-duplicates — useful on exports
+    whose seams are stitched to within a fraction of a millimetre rather
+    than exactly.
+
     When ``preserve_labels`` is non-empty the "provided surfaces" are
     treated as inviolable:
 
     * their vertices are never moved (frozen during smoothing, never
-      merged by the deduplication step — ``merge_tol=0`` only touches
-      coincident points);
+      merged by the deduplication step — the default ``merge_tol=0``
+      only touches coincident points);
     * their cells are never dropped by the non-manifold or
       connectivity passes;
     * a final restoration step re-appends any protected cell that still
       went missing and removes duplicate triangles.
+
+    Raising ``merge_tol`` above ``0`` weakens the first of those
+    guarantees: near-coincident protected vertices become weldable, so
+    protected geometry can shift by up to ``merge_tol``. The restoration
+    step still re-appends protected cells at their original coordinates.
+
+    Bookkeeping arrays introduced by the intermediate filters
+    (``RegionId``, ``vtkOriginalPointIds``, ``vtkOriginalCellIds``) are
+    stripped from the result; arrays carried by ``mesh`` itself are kept
+    with the input's values.
     """
     src = mesh.copy()
     preserve_labels = tuple(preserve_labels or ())
+
+    # Snapshot the caller's array names before any filter runs: anything
+    # else present at the end was introduced on the way and is stripped.
+    input_point_arrays = set(src.point_data.keys())
+    input_cell_arrays = set(src.cell_data.keys())
 
     # Snapshot the protected cells verbatim (original coordinates + tags);
     # this is what we use to guarantee surface preservation at the end.
@@ -1115,10 +1296,11 @@ def clean(mesh: pv.PolyData,
         if pres_idx.size:
             protected_snapshot = _extract_cells(src, pres_idx)
 
-    # 1. merge duplicates + drop unused points (geometry-safe: tol=0)
+    # 1. merge duplicates + drop unused points (geometry-safe at tol=0).
+    #    merge_tol is absolute (pyvista's clean defaults to absolute=True).
     cleaned = src.clean(
         point_merging=True,
-        merge_tol=0.0,
+        merge_tol=merge_tol,
         lines_to_points=False,
         polys_to_lines=False,
         strips_to_polys=False,
@@ -1175,6 +1357,12 @@ def clean(mesh: pv.PolyData,
     #    upstream VTK pass silently dropped a protected triangle.
     if protected_snapshot is not None:
         cleaned = _restore_protected(cleaned, protected_snapshot)
+
+    # 9. drop bookkeeping arrays the intermediate filters attached. Arrays
+    #    the input carried survive with the input's values: the
+    #    _transfer_arrays passes above re-seeded them from ``src`` after
+    #    connectivity() had overwritten any same-named array.
+    _strip_new_arrays(cleaned, input_point_arrays, input_cell_arrays)
 
     return cleaned
 
@@ -1392,11 +1580,17 @@ class PostprocessOptions:
     do_decimate: bool = False
     do_refine: bool = False
     do_clean: bool = False
+    do_fill_holes: bool = False
+    do_smooth: bool = False
 
     # decimate
     decimate_target_points: int = 5000
     decimate_iters: int = 200          # outer-loop iterations
-    decimate_max_hole_size: float = 2.0  # fill holes with radius ≤ this; 0 = off
+    # Shared by decimate's internal pass and the fill_holes step: both mean
+    # "close loops with radius ≤ this" on the same mesh. 0 = off.
+    # 4.0 closes the acquisition gaps a Carto export carries while staying
+    # well under the PV-ostia / mitral-valve radius, which must stay open.
+    max_hole_size: float = 4.0
 
     # refine
     refine_edge_len: float = 0.4   # 0 -> use median edge length
@@ -1406,24 +1600,54 @@ class PostprocessOptions:
     clean_smooth_iterations: int = 20
     clean_quality_relaxation: float = 0.1
     clean_preserve_labels: Sequence[int] = field(default_factory=tuple)
+    clean_merge_tol: float = 0.0   # absolute weld distance; 0 = coincident only
+
+    # smooth
+    smooth_method: str = SMOOTH_TAUBIN
+    smooth_iterations: int = 40
+    smooth_passband: float = 0.001   # taubin only; smaller = smoother
+    smooth_relaxation: float = 0.1   # laplacian only
 
 
 def apply(mesh: pv.PolyData,
           opts: PostprocessOptions,
-          on_decimate_progress: Optional[Callable[[int, int], None]] = None
+          on_decimate_progress: Optional[Callable[[int, int], None]] = None,
+          on_surface_moved: Optional[
+              Callable[["pv.PolyData", "pv.PolyData"], None]] = None
           ) -> pv.PolyData:
-    """Apply decimate -> refine -> clean in that order, skipping any step
-    whose flag is off. Returns a new ``pv.PolyData``.
+    """Apply decimate -> refine -> clean -> fill_holes -> smooth in that
+    order, skipping any step whose flag is off. Returns a new
+    ``pv.PolyData``.
+
+    Hole filling runs last because :func:`clean` is itself a source of
+    holes: its non-manifold and degenerate passes drop cells, which opens
+    boundary loops that were previously hidden behind the bad geometry.
+    Filling before cleaning would leave those newly-exposed loops open.
+    The cost of the ordering is that filler triangles miss clean's
+    quality smoothing — a quality nit, against a topology failure the
+    other way round.
+
+    Smoothing runs last, on the final topology, and is the only step that
+    moves the surface as a whole.
 
     ``on_decimate_progress(i, n_iters)`` is forwarded to :func:`decimate`
     and fires after every outer-loop iteration of the annealing.
+
+    ``on_surface_moved(old_mesh, new_mesh)`` fires after smoothing with the
+    surface either side of it. It exists so a caller can carry other geometry
+    (EAM electrodes) along with the wall. Surfaces rather than vertex arrays,
+    because what rides along is read from the two surfaces as shapes — the
+    vertex correspondence smoothing happens to preserve is over half
+    tangential re-parameterisation, which is not motion anything should
+    follow. No other step reports: decimate/refine/clean/fill_holes
+    re-tessellate the same surface rather than move it.
     """
     out = mesh
     if opts.do_decimate:
         out = decimate(out,
                        target_points=opts.decimate_target_points,
                        n_iters=opts.decimate_iters,
-                       max_hole_size=opts.decimate_max_hole_size,
+                       max_hole_size=opts.max_hole_size,
                        on_progress=on_decimate_progress)
     if opts.do_refine:
         el = opts.refine_edge_len
@@ -1435,7 +1659,24 @@ def apply(mesh: pv.PolyData,
                     preserve_labels=opts.clean_preserve_labels,
                     quality_threshold=opts.clean_quality_threshold,
                     quality_relaxation=opts.clean_quality_relaxation,
-                    smooth_iterations=opts.clean_smooth_iterations)
+                    smooth_iterations=opts.clean_smooth_iterations,
+                    merge_tol=opts.clean_merge_tol)
+    # max_hole_size == 0 means "no hole filling" (as it does for decimate),
+    # so honour that rather than letting fill_holes reject it.
+    if opts.do_fill_holes and opts.max_hole_size > 0.0:
+        out = fill_holes(out, max_size=opts.max_hole_size)
+
+    if opts.do_smooth:
+        # smooth() returns a new surface and leaves its input alone, so the
+        # pre-smoothing mesh needs no copy of its own.
+        before = out
+        out = smooth(out,
+                     method=opts.smooth_method,
+                     iterations=opts.smooth_iterations,
+                     passband=opts.smooth_passband,
+                     relaxation=opts.smooth_relaxation)
+        if on_surface_moved is not None:
+            on_surface_moved(before, out)
 
     return out
 
@@ -1443,7 +1684,11 @@ def apply(mesh: pv.PolyData,
 __all__ = [
     "PostprocessOptions",
     "apply",
+    "smooth",
+    "SMOOTH_TAUBIN",
+    "SMOOTH_LAPLACIAN",
     "decimate",
     "refine",
     "clean",
+    "fill_holes",
 ]
