@@ -19,6 +19,9 @@ dependencies = [
     "matplotlib>=3.7",
     "SimpleITK>=2.4",
     "trimesh>=4.0",
+    # trimesh.fix_normals() needs networkx, which trimesh only declares as an
+    # optional extra — decimate raises ModuleNotFoundError without it.
+    "networkx>=3.0",
 ]
 
 [project.scripts]
