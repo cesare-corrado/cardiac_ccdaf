@@ -10,7 +10,8 @@ Interaction model
 - Picked triangles are highlighted in yellow as a *pending* batch.
 - Pressing **X** commits the batch: every pending triangle receives the
   currently active label, the highlight is cleared, and the mesh is
-  recolored live.
+  recolored live. The key itself is bound by the host, which routes it
+  to :meth:`commit_pending` — clipping shares the key.
 - Changing the active label clears any pending selection (prevents mixed
   batches being committed by accident).
 
@@ -63,17 +64,10 @@ class ManualEditor:
         self._sphere_actor = None
         self._undo_stack: Deque[np.ndarray] = deque(maxlen=3)
 
-        # Bind the commit key; the callback is a no-op while idle. An editor
-        # is remade whenever the mesh or the plotter is, and add_key_event
-        # appends rather than replaces — so drop any earlier binding, or X
-        # also commits into the editors that came before, each holding a mesh
-        # that is no longer on screen.
-        for key in ("x", "X"):
-            try:
-                self.plotter.clear_events_for_key(key)
-            except Exception:
-                pass
-            self.plotter.add_key_event(key, self._commit)
+        # The X key is bound by the host, not here: clipping wants the same
+        # key, and when both tools bound it themselves whoever came last
+        # won — or wiped the other's binding outright. The host owns the
+        # key and routes it to commit_pending().
         self._prepare_search_index(mesh)
     # ------------------------------------------------------------------
     # Public API
@@ -130,7 +124,7 @@ class ManualEditor:
     def accept(self) -> None:
         """Commit any pending batch and exit the editor entirely."""
         if self._pending:
-            self._commit()
+            self.commit_pending()
         # assign body_label to unassigned
         tags = np.asarray(self.mesh.cell_data["elemTag"]).copy()
         idx = (tags == UNASSIGNED)
@@ -237,7 +231,8 @@ class ManualEditor:
     # ------------------------------------------------------------------
     # Commit / highlight
     # ------------------------------------------------------------------
-    def _commit(self) -> None:
+    def commit_pending(self) -> None:
+        """Commit the pending batch; a no-op with nothing pending."""
         if not self._pending:
             return
         # Snapshot current state before modifying (for undo).

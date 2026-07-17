@@ -77,12 +77,20 @@ from ccdaf.gui.eam_load_dialog import (
 )
 from ccdaf.gui.visualisation_widget import VisualisationWidget
 from ccdaf.gui.mapping_select_dialog import MappingSelectDialog
-from ccdaf.gui.save_mesh_dialog import SaveMeshDialog
+from ccdaf.gui.save_mesh_dialog import SaveMeshDialog, FORMAT_PICKLE
 from ccdaf.gui.eam_export_dialog import EAMExportDialog
 from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
 from ccdaf.io.carto_functions import extract_map_list_names
-from ccdaf.core.eam_loader import load_carto_mapping, displace_electrodes_for
+from ccdaf.core.eam_loader import (
+    EAMData, load_carto_mapping, displace_electrodes_for, read_bundle,
+)
 from ccdaf.core.field_transfer import guard_distance, transfer_fields
+from ccdaf.core.segmentation import (
+    binary_mask_image, negate_xy_inplace, segmentation_to_polydata,
+    sync_sitk_from_array, voxelise_polydata,
+)
+from ccdaf.core.seed_io import load_seeds, save_seeds
+from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
 # ---------------------------------------------------------------------------
@@ -137,28 +145,10 @@ EAM_ELECTRODE_COLOR = (100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0)
 EAM_ELECTRODE_RADIUS_FRAC = 0.008     # of the mesh's bounding-box diagonal
 
 
-# Subplot positions for the 2x2 view.
-#   (0,0) Top-Left     Axial    XY
-#   (0,1) Top-Right    Sagittal YZ
-#   (1,1) Bottom-Right Coronal  XZ
-#   (1,0) Bottom-Left  3D
-SUBPLOT_3D = (1, 0)
-SUBPLOT_AXIAL = (0, 0)
-SUBPLOT_SAGITTAL = (0, 1)
-SUBPLOT_CORONAL = (1, 1)
-
+# The three slice orientations of a segmentation volume. Where each one is
+# drawn is not decided here — that is the segmentation view's layout, in
+# ccdaf.app.views.
 ORIENTATIONS = ("axial", "sagittal", "coronal")
-SUBPLOT_FOR = {
-    "axial": SUBPLOT_AXIAL,
-    "sagittal": SUBPLOT_SAGITTAL,
-    "coronal": SUBPLOT_CORONAL,
-}
-TITLE_FOR = {
-    "axial": "Axial (XY)",
-    "sagittal": "Sagittal (YZ)",
-    "coronal": "Coronal (XZ)",
-    "3d": "3D",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +202,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self._seg_idx: Dict[str, int] = {"axial": 0, "sagittal": 0, "coronal": 0}
         self._slice_actors: Dict[str, object] = {}
         self._paint_active: bool = False
-        self._segmentation_mode: bool = False  # True ⇔ 2×2 plotter active
+        # What the live plotter was built for — layout facts (multi-view?
+        # where is each pane?) come from its structure, task identity from
+        # its name. Written only by _build_plotter.
+        self._view: ViewSpec = VIEWS["general"]
         self._splitter: Optional[QtWidgets.QSplitter] = None
         self.plotter: Optional[QtInteractor] = None
         self._seg_3d_actors: list = []
@@ -266,6 +259,12 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_save.setEnabled(False)
         self.act_save.triggered.connect(self._action_save)
         file_menu.addAction(self.act_save)
+
+        self.act_close = QtWidgets.QAction("&Close", self)
+        self.act_close.setShortcut(QtGui.QKeySequence.Close)
+        self.act_close.setEnabled(False)
+        self.act_close.triggered.connect(self._action_close)
+        file_menu.addAction(self.act_close)
 
         file_menu.addSeparator()
         act_quit = QtWidgets.QAction("&Quit", self)
@@ -356,6 +355,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.start_requested.connect(self._action_start_seeds)
         self.seed_widget.undo_requested.connect(self._action_undo_seed)
         self.seed_widget.reset_requested.connect(self._action_reset_seeds)
+        self.seed_widget.save_requested.connect(self._action_save_seeds)
+        self.seed_widget.load_requested.connect(self._action_load_seeds)
         body = self._register_section(v, "seeds", "Seed selection")
         body.addWidget(self.seed_widget)
 
@@ -384,6 +385,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipping_widget.mv_plane_requested.connect(self._action_mv_plane_start)
         self.clipping_widget.clip_apply_requested.connect(self._action_clip_apply)
         self.clipping_widget.clip_revert_requested.connect(self._action_clip_revert)
+        self.clipping_widget.clipping_toggled.connect(self._on_clipping_toggled)
         body = self._register_section(v, "clipping", "Clipping")
         body.addWidget(self.clipping_widget)
 
@@ -403,27 +405,29 @@ class CCDAF(QtWidgets.QMainWindow):
         # --- EAM display (hidden until an EAM mapping is loaded) --------
         self.vis_widget = VisualisationWidget()
         self.vis_widget.settings_changed.connect(self._render_field)
+        self.vis_widget.electrodes_toggled.connect(self._on_electrodes_toggled)
         body = self._register_section(v, "visualisation", "Visualisation")
         body.addWidget(self.vis_widget)
         self._set_section_visible("visualisation", False)
 
         v.addStretch(1)
 
-        # --- Plotter — start in single-renderer (3D) mode --------------
-        self._build_plotter((1, 1))
+        # --- Plotter — start in the general (single 3D) view -----------
+        self._build_plotter("general")
 
         self.statusBar().showMessage("Ready.")
 
     # ------------------------------------------------------------------
     # Plotter (re)construction
     # ------------------------------------------------------------------
-    def _build_plotter(self, shape: Tuple[int, int]) -> None:
-        """Create or replace the plotter widget at the requested shape.
+    def _build_plotter(self, view: str) -> None:
+        """Create or replace the plotter widget for the named view purpose.
 
         Tears down the previous QtInteractor (if any), inserts a fresh one
-        into the splitter, and styles all subplots. Stale actor refs are
-        cleared so callers must re-render after switching.
+        into the splitter, and styles every pane the view defines. Stale
+        actor refs are cleared so callers must re-render after switching.
         """
+        spec = VIEWS[view]
         # Tear down any previous plotter.
         if self.plotter is not None:
             try:
@@ -438,37 +442,71 @@ class CCDAF(QtWidgets.QMainWindow):
                 pass
             self.plotter = None
 
-        self.plotter = QtInteractor(self, shape=shape)
+        kwargs = {} if spec.groups is None else {"groups": spec.groups}
+        self.plotter = QtInteractor(self, shape=spec.shape, **kwargs)
+        # From here the live plotter is the new view — the single write site.
+        self._view = spec
         self.plotter.interactor.setMinimumSize(480, 360)
         self._splitter.addWidget(self.plotter.interactor)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([320, 1000])
 
-        if shape == (1, 1):
+        # The X key has one owner: the app. PV clipping and manual correction
+        # both want it, and when each bound it itself, whoever came last won —
+        # or cleared the other's binding outright. Bound once per plotter
+        # (bindings die with it); _on_x_key routes by state at press time.
+        for key in ("x", "X"):
+            self.plotter.add_key_event(key, self._on_x_key)
+
+        if not spec.is_multiview:
             self.plotter.set_background("black")
             self.plotter.add_axes()
         else:
-            for row in range(shape[0]):
-                for col in range(shape[1]):
-                    self.plotter.subplot(row, col)
-
-                    self.plotter.set_background("black")
-                    self.plotter.add_axes()
-                    title = self._title_for_subplot(row, col)
+            for role, loc in spec.roles.items():
+                self.plotter.subplot(*loc)
+                self.plotter.set_background("black")
+                self.plotter.add_axes()
+                title = spec.titles.get(role)
+                if title:
                     self.plotter.add_text(title, font_size=9, color="white",
-                                          name=f"_title_{row}_{col}")
-                                          
-            self.plotter.subplot(*SUBPLOT_3D)
+                                          name=title_actor_name(loc))
+            self._focus_3d()
 
         # Stale references — old actors lived on the destroyed plotter.
         self._mesh_actor = None
         self._slice_actors = {}
 
     def _focus_3d(self) -> None:
-        """Switch the active subplot to the 3D quadrant when in 2×2 mode."""
-        if self._segmentation_mode and self.plotter is not None:
-            self.plotter.subplot(*SUBPLOT_3D)
+        """Switch the active subplot to the 3D pane, when the view has one."""
+        loc = self._view.roles.get("3d")
+        if self._view.is_multiview and loc is not None and self.plotter is not None:
+            self.plotter.subplot(*loc)
+
+    def _on_x_key(self) -> None:
+        """Route the X key to whichever tool it belongs to right now.
+
+        An in-progress PV contour takes it — but only while the clipping
+        panel's checkbox says clipping is active. Otherwise it commits the
+        manual-correction batch, which is a no-op with nothing pending.
+        """
+        if (self.clipper is not None
+                and self.clipping_widget.is_clipping_enabled()
+                and self.clipper.mode is ClipMode.PV_CONTOUR):
+            self.clipper.pick_at_cursor()
+            return
+        if self.editor is not None:
+            self.editor.commit_pending()
+
+    def _on_clipping_toggled(self, enabled: bool) -> None:
+        """Deactivating the clipping panel abandons any clip in flight."""
+        if enabled or self.clipper is None:
+            return
+        if self.clipper.mode is not ClipMode.NONE:
+            self.clipper.cancel()
+            self.plotter.render()
+            self.statusBar().showMessage(
+                "Clipping deactivated — the clip in progress was cancelled.")
 
     # ------------------------------------------------------------------
     # "Update 3D" overlay button (anchored bottom-left of the QtInteractor)
@@ -511,9 +549,10 @@ class CCDAF(QtWidgets.QMainWindow):
     def _reposition_update3d_overlay(self) -> None:
         """Anchor the overlay to the bottom-left of the 3D quadrant.
 
-        With a 2×2 layout and the 3D viewport at (1, 0), the bottom-left
-        of that subplot coincides with the bottom-left half of the
-        QtInteractor widget.
+        With the segmentation view's 2×2 layout and its 3D pane at (1, 0),
+        the bottom-left of that subplot coincides with the bottom-left of
+        the QtInteractor widget. Only that view creates this overlay; a
+        view placing 3D elsewhere would have to generalise this anchoring.
         """
         if self.btn_update3d_overlay is None or self.plotter is None:
             return
@@ -559,28 +598,26 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.set_undo_enabled(False)
 
     def _enter_segmentation_mode(self) -> None:
-        if self._segmentation_mode:
+        if self._view.name == "segmentation":
             return
         # Force-stop any active mesh-side picker — its callbacks are bound
         # to the plotter we're about to destroy.
         self._teardown_mesh_tools(rebuild_clipper=False)
-        self._segmentation_mode = True
-        self._build_plotter((2, 2))
+        self._build_plotter("segmentation")
         if self.loader.mesh is not None:
             self._render_field()
             self._build_mesh_tools()
         self._create_update3d_overlay()
 
     def _exit_segmentation_mode(self) -> None:
-        if not self._segmentation_mode:
+        if self._view.name != "segmentation":
             return
         self._destroy_update3d_overlay()
         self._uninstall_slice_observers()
         self._teardown_mesh_tools(rebuild_clipper=False)
-        self._segmentation_mode = False
         self._paint_active = False
         self._seg_3d_actors = []
-        self._build_plotter((1, 1))
+        self._build_plotter("general")
         if self.loader.mesh is not None:
             self._render_field()
             self.plotter.reset_camera()
@@ -603,19 +640,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipper = None
         # Reset UI controls that depended on those tools.
         self.seed_widget.set_undo_enabled(False)
+        self.seed_widget.set_save_enabled(False)
         self.tagging_widget.set_seeds_complete(False)
         self.manual_widget.reset_state()
         self.clipping_widget.reset_state()
-
-    @staticmethod
-    def _title_for_subplot(row: int, col: int) -> str:
-        if (row, col) == SUBPLOT_AXIAL:
-            return TITLE_FOR["axial"]
-        if (row, col) == SUBPLOT_SAGITTAL:
-            return TITLE_FOR["sagittal"]
-        if (row, col) == SUBPLOT_CORONAL:
-            return TITLE_FOR["coronal"]
-        return TITLE_FOR["3d"]
 
     @staticmethod
     def _section(text: str) -> QtWidgets.QLabel:
@@ -683,19 +711,25 @@ class CCDAF(QtWidgets.QMainWindow):
     def _action_load(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load mesh", str(self.recent_folder),
-            "Mesh files (*.vtk *.vtp *.ply *.stl *.obj);;All files (*)",
+            "All files (*);;"
+            "Meshes (*.vtk *.vtp *.ply *.stl *.obj);;"
+            "Bundle (*.pkl *.pickle)",
         )
-        if fn:
+        if not fn:
+            return
+        if Path(fn).suffix.lower() in (".pkl", ".pickle"):
+            self._load_bundle(fn)
+        else:
             self._load_mesh(fn)
 
-    def _load_mesh(self, filename: str) -> None:
-        try:
-            mesh = self.loader.load(filename)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
-            return
-        self.recent_folder = Path(filename).resolve().parent
+    def _adopt_mesh(self, mesh: pv.PolyData, source_name: str) -> None:
+        """Common setup once ``mesh`` is the working mesh, whatever its source.
 
+        The loader's ``mesh``/``path`` must already be set. Rebuilds the
+        mesh-side tools against the current plotter, refreshes the panels,
+        and renders — everything a fresh mesh needs and nothing EAM- or
+        seed-specific, which the callers add.
+        """
         self.tagger = RegionTagger(mesh)
         self.editor = None
         self.clipper = ClippingTool(
@@ -714,9 +748,9 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.reset_camera()
         self.mesh_info.update_info(mesh)
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
-        self.statusBar().showMessage(f"Loaded {Path(filename).name}")
-        
-        ################ manual editor active from beginning ######
+        self.statusBar().showMessage(f"Loaded {source_name}")
+
+        # Manual editor live from the start (see the X-key routing).
         self.editor = ManualEditor(
             mesh=self.loader.mesh,
             plotter=self.plotter,
@@ -726,12 +760,124 @@ class CCDAF(QtWidgets.QMainWindow):
         )
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
-        ################ manual editor active from beginning ######
 
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
+        self.seed_widget.set_load_enabled(True)
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
+        self._sync_close_action()
+
+    def _load_mesh(self, filename: str) -> None:
+        try:
+            mesh = self.loader.load(filename)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        self.recent_folder = Path(filename).resolve().parent
+        self._reset_eam_state()
+        self._adopt_mesh(mesh, Path(filename).name)
+
+    def _load_bundle(self, filename: str) -> None:
+        """Load a File → Save pickle bundle: mesh, tagging, seeds, electrodes."""
+        try:
+            mesh, seeds, electrodes = read_bundle(filename)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        self.recent_folder = Path(filename).resolve().parent
+        self.loader.mesh = mesh
+        self.loader.path = filename
+        self._reset_eam_state()
+        self._adopt_mesh(mesh, Path(filename).name)
+
+        # Electrodes, if the bundle carried them: restore the state EAM
+        # export needs and draw them.
+        elec_points = self._electrode_points_from_record(electrodes)
+        if elec_points is not None and len(elec_points):
+            self._eam_data = EAMData(
+                mesh=mesh,
+                field_names=list(mesh.point_data.keys()),
+                electrode_points=elec_points,
+                map_name=Path(filename).stem,
+                electrodes=electrodes,
+            )
+            self._eam_electrode_points = elec_points
+            self.vis_widget.set_electrodes_available(True)
+            self.act_eam_export.setEnabled(True)
+            self._render_field()
+
+        # Seeds last, so their markers land on the final view.
+        if seeds:
+            self._apply_loaded_seeds(seeds, Path(filename).name)
+
+    @staticmethod
+    def _electrode_points_from_record(electrodes):
+        """The (N, 3) electrode coordinates from a raw Carto record, or None."""
+        if not electrodes:
+            return None
+        data = np.asarray(electrodes.get("data"), dtype=float)
+        if data.ndim == 2 and data.shape[0] > 0 and data.shape[1] >= 4:
+            return data[:, 1:4]
+        return None
+
+    def _reset_eam_state(self) -> None:
+        """Drop any loaded mapping's state — a fresh non-EAM mesh has none."""
+        self._eam_data = None
+        self._eam_electrode_points = None
+        self._eam_electrode_actor = None
+        self._eam_bar_title = None
+        self._eam_bar_geom = None
+        self.vis_widget.set_electrodes_available(False)
+        self.act_eam_export.setEnabled(False)
+
+    def _sync_close_action(self) -> None:
+        """File → Close applies whenever a mesh or a segmentation is open."""
+        self.act_close.setEnabled(self.loader.mesh is not None
+                                  or self._seg_array is not None)
+
+    def _action_close(self) -> None:
+        """File → Close: unload everything, back to the startup state."""
+        if self._seg_array is not None:
+            self._action_seg_close()
+
+        # EAM state.
+        self._eam_directory = None
+        self._eam_format = None
+        self._eam_selected_file = None
+        self._eam_data = None
+        self._eam_electrode_points = None
+        self._eam_electrode_actor = None
+        self._eam_bar_title = None
+        self._eam_bar_geom = None
+        self._eam_warp_note = None
+        self.vis_widget.set_electrodes_available(False)
+        self.act_eam_export.setEnabled(False)
+
+        # Mesh state and the tools bound to it.
+        self._teardown_mesh_tools(rebuild_clipper=False)
+        self.tagger = None
+        self.loader.mesh = None
+        self.loader.path = None
+        self._seg_source = None
+        self._transfer_note = None
+
+        # The view and the panels, as the app starts.
+        self._reset_view()
+        self.plotter.render()
+        self.mesh_info.update_info(None)
+        self.vis_widget.set_fields([], [])
+        self._set_section_visible("visualisation", False)
+        self.manual_widget.set_active(False)
+        self.seed_widget.set_start_enabled(False)
+        self.seed_widget.set_reset_enabled(False)
+        self.seed_widget.set_load_enabled(False)
+        self.seed_widget.set_prompt("Load a mesh to begin.")
+        self.seed_widget.set_progress("Seeds: 0 / 6")
+        self.act_save.setEnabled(False)
+        self.act_seg_from_mesh.setEnabled(False)
+        self._sync_close_action()
+        self.statusBar().showMessage("Closed.")
 
     def _action_save(self) -> None:
         if self.loader.mesh is None:
@@ -761,14 +907,48 @@ class CCDAF(QtWidgets.QMainWindow):
                 return
 
         try:
-            binary = dlg.selected_binary()
-            self.loader.save(fn, fields=fields, binary=binary)
-            written = ", ".join(fields) if fields else "no fields"
-            self.statusBar().showMessage(
-                f"Saved to {fn} ({'binary' if binary else 'ASCII'}) "
-                f"— wrote {written}")
+            if dlg.selected_format() == FORMAT_PICKLE:
+                self._save_bundle(fn, fields)
+            else:
+                binary = dlg.selected_binary()
+                self.loader.save(fn, fields=fields, binary=binary)
+                written = ", ".join(fields) if fields else "no fields"
+                self.statusBar().showMessage(
+                    f"Saved to {fn} ({'binary' if binary else 'ASCII'}) "
+                    f"— wrote {written}")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
+
+    def _save_bundle(self, fn: str, fields: "list[str]") -> None:
+        """Write the pickle bundle: surface (chosen point fields), seeds,
+        electrodes and elemTag, so the mesh reloads with all of them."""
+        keep = set(fields)
+        surface = self.loader.mesh.copy(deep=True)
+        # polydata_to_carto_dict turns every 1-D point field into a colour
+        # column, so honour the field selection by dropping the rest first.
+        for name in list(surface.point_data.keys()):
+            if name not in keep:
+                surface.point_data.remove(name)
+
+        seeds = None
+        if self.selector is not None and self.selector.is_complete:
+            seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
+
+        electrodes = self._eam_data.electrodes if self._eam_data else None
+        export_binary(
+            fn, surface,
+            electrodes=electrodes,
+            electrode_points=self._eam_electrode_points,
+            seeds=seeds,
+            include_elem_tag=("elemTag" in keep),
+        )
+        parts = []
+        if seeds:
+            parts.append(f"{len(seeds)} seeds")
+        if electrodes is not None:
+            parts.append("electrodes")
+        extra = f" (+ {', '.join(parts)})" if parts else ""
+        self.statusBar().showMessage(f"Saved bundle to {fn}{extra}")
 
     # ==================================================================
     # EAM actions
@@ -838,6 +1018,9 @@ class CCDAF(QtWidgets.QMainWindow):
         mesh = eam.mesh
         self._eam_data = eam
         self._eam_electrode_points = eam.electrode_points
+        self.vis_widget.set_electrodes_available(
+            self._eam_electrode_points is not None
+            and len(self._eam_electrode_points) > 0)
 
         # Adopt as the working mesh and (re)build the mesh-side tools.
         self.loader.mesh = mesh
@@ -862,6 +1045,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.set_reset_enabled(True)
         self.seed_widget.set_prompt(
             "EAM mapping loaded. Click 'Start seed selection'.")
+        self.seed_widget.set_load_enabled(True)
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
         self.mesh_info.update_info(mesh)
@@ -872,6 +1056,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self.vis_widget.select_field(eam.field_names[0])
         self._set_section_visible("visualisation", True)
         self.act_eam_export.setEnabled(True)
+        self._sync_close_action()
 
         # Render coloured by the first field, with electrode spheres.
         self._reset_view()
@@ -952,15 +1137,46 @@ class CCDAF(QtWidgets.QMainWindow):
         height = EAM_BAR_WIDTH * (win_w / win_h) / EAM_BAR_ASPECT
         return (EAM_BAR_POS_X, EAM_BAR_POS_Y), (EAM_BAR_WIDTH, height)
 
-    def _place_eam_scalar_bar(self, title: str) -> None:
-        """Give an interactive scalar bar our geometry and let the mouse resize it.
+    def _enable_bar_interaction(self, title: str, geometry=None) -> None:
+        """Let the mouse move and freely resize an interactive scalar bar.
 
-        An interactive bar is driven by its widget's representation, which
-        resets the actor to VTK's defaults and ignores the width/height passed
-        to ``add_mesh``. Setting the representation keeps our size *and* the
-        dragging; ``BuildRepresentation`` is what copies the values onto the
-        actor. Orientation is left to the representation's AutoOrient, which
-        follows the bar's aspect — so a bar dragged tall turns vertical.
+        The widget's representation is what interaction drives, and it starts
+        out disagreeing with the actor pyvista placed — until
+        ``BuildRepresentation`` copies the representation onto the actor,
+        resize drags are swallowed. ``geometry`` (``(px, py), (w, h)``) sets
+        the representation explicitly; without it the representation adopts
+        the actor's current position, so the bar does not jump. Orientation
+        is left to the representation's AutoOrient, which follows the bar's
+        aspect — so a bar dragged tall turns vertical.
+        """
+        widget = self._eam_bar_widget(title)
+        if widget is None:      # non-interactive bar: add_mesh's size stands
+            return
+        try:
+            widget.SetResizable(True)
+            widget.SetRepositionable(True)
+            rep = widget.GetRepresentation()
+            rep.ProportionalResizeOff()    # width and height move independently
+            rep.SetShowBorderToActive()    # handles appear on hover, to grab
+            if geometry is None:
+                actor = self.plotter.scalar_bars[title]
+                rep.SetPosition(actor.GetPosition())
+                rep.SetPosition2(actor.GetPosition2())
+            else:
+                (px, py), (w, h) = geometry
+                rep.SetPosition(px, py)
+                rep.SetPosition2(w, h)
+            rep.BuildRepresentation()
+        except Exception:
+            pass
+
+    def _place_eam_scalar_bar(self, title: str) -> None:
+        """Give the field's scalar bar our geometry and mouse interaction.
+
+        The geometry passed to ``add_mesh`` is ignored once the widget's
+        representation takes over, so it is set on the representation —
+        the user's dragged position when there is one, the default corner
+        otherwise.
         """
         self._eam_bar_title = title
         try:
@@ -972,22 +1188,8 @@ class CCDAF(QtWidgets.QMainWindow):
             bar.DrawBelowRangeSwatchOff()
         except Exception:
             pass
-
-        widget = self._eam_bar_widget(title)
-        if widget is None:      # non-interactive bar: add_mesh's size stands
-            return
-        (px, py), (w, h) = self._eam_bar_geom or self._eam_bar_default_geom()
-        try:
-            widget.SetResizable(True)
-            widget.SetRepositionable(True)
-            rep = widget.GetRepresentation()
-            rep.ProportionalResizeOff()    # width and height move independently
-            rep.SetShowBorderToActive()    # handles appear on hover, to grab
-            rep.SetPosition(px, py)
-            rep.SetPosition2(w, h)
-            rep.BuildRepresentation()
-        except Exception:
-            pass
+        self._enable_bar_interaction(
+            title, geometry=self._eam_bar_geom or self._eam_bar_default_geom())
 
     def _populate_fields(self, keep_selection: bool = False) -> None:
         """Offer every field the current mesh carries, point and cell alike."""
@@ -1069,8 +1271,8 @@ class CCDAF(QtWidgets.QMainWindow):
             lut = _eam_lookup_table(self.vis_widget.current_cmap(),
                                     lo, hi, bar_lo, bar_hi, n_bands)
             # Interactive scalar bars are unsupported on multi-renderer
-            # plotters — disable them when in 4-quadrant mode.
-            interactive = not self._segmentation_mode
+            # plotters — disable them on any multi-view layout.
+            interactive = not self._view.is_multiview
             (px, py), (bw, bh) = self._eam_bar_geom or self._eam_bar_default_geom()
             self._mesh_actor = self.plotter.add_mesh(
                 mesh, scalars=field, cmap=lut, clim=(bar_lo, bar_hi),
@@ -1119,6 +1321,8 @@ class CCDAF(QtWidgets.QMainWindow):
         pts = self._eam_electrode_points
         if pts is None or len(pts) == 0 or self.loader.mesh is None:
             return
+        if not self.vis_widget.show_electrodes():
+            return   # the actor is already removed above; stay hidden
         self._focus_3d()
         b = self.loader.mesh.bounds
         diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
@@ -1134,6 +1338,14 @@ class CCDAF(QtWidgets.QMainWindow):
             render_points_as_spheres=True, name="eam_electrodes",
             reset_camera=False, pickable=False,
         )
+
+    def _on_electrodes_toggled(self, _on: bool) -> None:
+        """Show/hide the electrode actor without re-rendering the field.
+
+        A direct redraw works in every view — the actor otherwise lingers
+        across the region view, which never calls _draw_electrodes."""
+        self._draw_electrodes()
+        self.plotter.render()
 
     # ==================================================================
     # Seed actions
@@ -1173,6 +1385,9 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _on_seed_progress(self, next_name: str, done: int, total: int) -> None:
         self.seed_widget.set_progress(f"Seeds: {done} / {total}")
+        # Saving means something only for a complete selection; progress is
+        # emitted on every transition, so this tracks undo and reset too.
+        self.seed_widget.set_save_enabled(done == total)
         if done < total and next_name:
             color = SEED_COLOR.get(next_name, "#ffffff")
             self.seed_widget.set_prompt(
@@ -1185,6 +1400,78 @@ class CCDAF(QtWidgets.QMainWindow):
     def _on_seeds_complete(self, seeds: Dict[str, Seed]) -> None:
         self.tagging_widget.set_seeds_complete(True)
         self.statusBar().showMessage("All seeds collected. Ready to tag.")
+
+    def _action_save_seeds(self) -> None:
+        if self.selector is None or not self.selector.is_complete:
+            return
+        stem = Path(self.loader.path).stem if self.loader.path else "mesh"
+        default = str(Path(self.recent_folder) / f"{stem}.seeds.json")
+        fn, filt = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save seeds", default,
+            "Seeds JSON (*.json);;Surface + seeds pickle (*.pkl)",
+        )
+        if not fn:
+            return
+        if not fn.lower().endswith((".json", ".pkl", ".pickle")):
+            fn += ".pkl" if "pickle" in filt else ".json"
+        self.recent_folder = Path(fn).resolve().parent
+        seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
+        try:
+            save_seeds(fn, seeds, mesh=self.loader.mesh)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Save seeds failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved {len(seeds)} seeds to {fn}")
+
+    def _action_load_seeds(self) -> None:
+        if self.loader.mesh is None:
+            return
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load seeds", str(self.recent_folder),
+            "Seed files (*.json *.pkl *.pickle);;All files (*)",
+        )
+        if not fn:
+            return
+        self.recent_folder = Path(fn).resolve().parent
+        try:
+            positions = load_seeds(fn)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load seeds failed", str(exc))
+            return
+        self._apply_loaded_seeds(positions, Path(fn).name)
+
+    def _apply_loaded_seeds(self, positions: Dict[str, np.ndarray],
+                            source_name: str) -> None:
+        """Rebuild the seed selection from saved coordinates on the live mesh.
+
+        Each coordinate is snapped to the current surface; a validation
+        failure stops there, keeps the earlier seeds and resumes picking.
+        Shared by the seed panel's Load and the pickle-bundle load.
+        """
+        if self.selector is not None:
+            self.selector.stop()
+        self._focus_3d()
+        self.tagging_widget.set_seeds_complete(False)
+        self.selector = SeedSelector(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_progress=self._on_seed_progress,
+            on_complete=self._on_seeds_complete,
+        )
+        problems = self.selector.apply_positions(positions)
+        self.seed_widget.set_undo_enabled(True)
+        if problems:
+            self.selector.resume()
+            QtWidgets.QMessageBox.warning(
+                self, "Seeds partially loaded",
+                "\n".join(problems)
+                + "\n\nThe seeds before the failure are placed — pick the "
+                  "remaining ones in the 3D view.",
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Loaded {len(SEED_ORDER)} seeds from {source_name} "
+                "(snapped to the current surface).")
 
     # ==================================================================
     # Tagging
@@ -1494,7 +1781,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 0, lambda: self.statusBar().showMessage(note, 20000))
 
     def _reset_view(self) -> None:
-        """Clear the 3D viewport — preserves segmentation slice views in 2×2 mode."""
+        """Clear the 3D viewport — other panes (e.g. slice views) survive."""
         self._focus_3d()
         # plotter.clear() forgets the scalar-bar widgets without disabling
         # them, which leaves their representations drawn over the next mesh.
@@ -1502,10 +1789,13 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.clear()
         self.plotter.set_background("black")
         self.plotter.add_axes()
-        if self._segmentation_mode:
+        # clear() also wiped the pane's title — put back the one the view
+        # defines for the 3D role, if any.
+        title = self._view.titles.get("3d")
+        if title:
             self.plotter.add_text(
-                TITLE_FOR["3d"], font_size=9, color="white",
-                name=f"_title_{SUBPLOT_3D[0]}_{SUBPLOT_3D[1]}",
+                title, font_size=9, color="white",
+                name=title_actor_name(self._view.roles["3d"]),
             )
         self._mesh_actor = None
 
@@ -1556,13 +1846,18 @@ class CCDAF(QtWidgets.QMainWindow):
                 # aborts (fatally, from VTK 9.6: "invalid format specifier").
                 "shadow": True,
                 # Interactive scalar bars are unsupported on multi-renderer
-                # plotters — disable them when in 4-quadrant mode.
-                "interactive": not self._segmentation_mode,
+                # plotters — disable them on any multi-view layout.
+                "interactive": not self._view.is_multiview,
             }
         )
         sbar = self.plotter.scalar_bar
         sbar.SetUnconstrainedFontSize(True)
         sbar.SetAnnotationTextScaling(False)
+        # The Regions bar was interactive but its representation was never
+        # built, so the widget and the actor disagreed about its geometry
+        # and resize drags — the vertical ones visibly — were swallowed.
+        # Same treatment as the field bar, keeping the default vertical slot.
+        self._enable_bar_interaction("Regions")
 
         self.plotter.render()
 
@@ -1617,7 +1912,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Voxelising mesh…")
         QtWidgets.QApplication.processEvents()
         try:
-            img = self._voxelise_polydata(self.loader.mesh, spacing, flip=flip)
+            img = voxelise_polydata(self.loader.mesh, spacing, flip=flip)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Voxelisation failed", str(exc))
             return
@@ -1670,7 +1965,8 @@ class CCDAF(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents()
         try:
             self._sync_sitk_from_array()
-            poly = self._segmentation_to_polydata(
+            poly = segmentation_to_polydata(
+                self._seg_sitk,
                 flip=flip,
                 filt_stdev=list(self.seg_widget.gfilt_standard_deviation()),
                 filt_rfact=list(self.seg_widget.gfilt_radius_factor()),
@@ -1736,7 +2032,7 @@ class CCDAF(QtWidgets.QMainWindow):
 
         if bool(src["flip"]) != bool(export_flip):
             source_mesh = source_mesh.copy(deep=True)
-            self._negate_xy_inplace(source_mesh)
+            negate_xy_inplace(source_mesh)
             if electrodes is not None and len(electrodes):
                 electrodes = np.asarray(electrodes, dtype=float).copy()
                 electrodes[:, :2] *= -1.0
@@ -1833,6 +2129,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._wire_slice_pickers()
         self._refresh_slices(reset_camera=True)
         self._action_seg_update_3d()
+        self._sync_close_action()
 
     def _action_seg_close(self) -> None:
         """Drop the active segmentation and revert the plotter to 1×1."""
@@ -1849,32 +2146,14 @@ class CCDAF(QtWidgets.QMainWindow):
         self._exit_segmentation_mode()
         for other_sec in ["meshinfo","postproc","seeds","tagging","manual","clipping"]:
             self._set_section_visible(other_sec, True)
-        
+        self._sync_close_action()
         self.statusBar().showMessage("Segmentation closed.")
 
     def _sync_sitk_from_array(self) -> None:
         """Push numpy edits back into the SITK image (preserves geometry)."""
         if self._seg_array is None or self._seg_sitk is None:
             return
-        new = sitk.GetImageFromArray(self._seg_array.astype(np.int16))
-        new.SetOrigin(self._seg_sitk.GetOrigin())
-        new.SetSpacing(self._seg_sitk.GetSpacing())
-        new.SetDirection(self._seg_sitk.GetDirection())
-        self._seg_sitk = new
-
-    def _binary_mask_image(self) -> sitk.Image:
-        """Build a uint8 0/1 mask of the current segmentation.
-
-        Done in numpy to dodge ITK's ``BinaryThreshold`` parameter-range
-        checks (which fail when ``upperThreshold`` exceeds the pixel
-        type's max — e.g. ``2**31-1`` on a uint8 voxelisation).
-        """
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-        arr = (sitk.GetArrayFromImage(self._seg_sitk) > 0).astype(np.uint8)
-        out = sitk.GetImageFromArray(arr)
-        out.CopyInformation(self._seg_sitk)
-        return out
+        self._seg_sitk = sync_sitk_from_array(self._seg_array, self._seg_sitk)
 
     # ==================================================================
     # Segmentation — slice rendering
@@ -1926,8 +2205,8 @@ class CCDAF(QtWidgets.QMainWindow):
         if self._seg_array is None:
             return
         for axis in ORIENTATIONS:
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            loc = self._view.roles[axis]
+            self.plotter.subplot(*loc)
             prev = self._slice_actors.get(axis)
             if prev is not None:
                 try:
@@ -1953,9 +2232,9 @@ class CCDAF(QtWidgets.QMainWindow):
             # Overlay slice index & axis label.
             idx = self._seg_idx[axis]
             self.plotter.add_text(
-                f"{TITLE_FOR[axis]}  idx={idx}",
+                f"{self._view.titles[axis]}  idx={idx}",
                 font_size=9, color="yellow",
-                name=f"_title_{row}_{col}",
+                name=title_actor_name(loc),
             )
             # Lock the slice view to its canonical orthographic orientation.
             self._set_slice_camera(axis, reset=reset_camera)
@@ -2057,8 +2336,7 @@ class CCDAF(QtWidgets.QMainWindow):
         }
 
         for axis, lines in plan.items():
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            self.plotter.subplot(*self._view.roles[axis])
             for other_axis, p0, p1 in lines:
                 actor_name = f"crosshair_{axis}_{other_axis}"
                 try:
@@ -2150,8 +2428,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # Capture each slice subplot's renderer.
         self._slice_renderers: Dict[str, object] = {}
         for axis in ORIENTATIONS:
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            self.plotter.subplot(*self._view.roles[axis])
             self._slice_renderers[axis] = self.plotter.renderer
 
         # Reset any previously enabled picker (safe even if none).
@@ -2243,7 +2520,7 @@ class CCDAF(QtWidgets.QMainWindow):
             except Exception:
                 pass
             # Re-snap the canonical slice camera in case any motion happened.
-            self.plotter.subplot(*SUBPLOT_FOR[ax])
+            self.plotter.subplot(*self._view.roles[ax])
             self._set_slice_camera(ax, reset=False)
             cmd = caller.GetCommand(move_id["id"])
             if cmd is not None:
@@ -2509,7 +2786,7 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._seg_push_undo()
         try:
-            mask = self._binary_mask_image()
+            mask = binary_mask_image(self._seg_sitk)
             if op == "dilate":
                 out = sitk.BinaryDilate(mask, radius, kernelType=sitk.sitkBox)
             elif op == "erode":
@@ -2539,7 +2816,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._sync_sitk_from_array()
         self._seg_push_undo()
         try:
-            mask = self._binary_mask_image()
+            mask = binary_mask_image(self._seg_sitk)
             filled = sitk.BinaryFillhole(mask)
             self._seg_sitk = sitk.Cast(filled, self._seg_sitk.GetPixelID())
         except Exception as exc:
@@ -2591,7 +2868,8 @@ class CCDAF(QtWidgets.QMainWindow):
         polys: Dict[int, vtk.vtkPolyData] = {}
         for lbl in present_labels:
             try:
-                polys[lbl] = self._segmentation_to_polydata(
+                polys[lbl] = segmentation_to_polydata(
+                    self._seg_sitk,
                     flip=False,
                     filt_stdev=filt_stdev,
                     filt_rfact=filt_rfact,
@@ -2633,252 +2911,6 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.render()
         self.statusBar().showMessage("3D rendering updated from segmentation.")
 
-    # ==================================================================
-    # Segmentation — voxelisation (mesh → image)
-    # ==================================================================
-    def _voxelise_polydata(self, mesh: pv.PolyData,
-                           spacing: Tuple[float, float, float],
-                           *, flip: bool) -> sitk.Image:
-        """Convert a polydata surface to a binary SITK volume.
-
-        Self-contained stencil-based rasterisation. Foreground fill is
-        vectorised (single allocation through numpy_support).
-        """
-        # Take a writable deep copy of the polydata so optional flips
-        # don't mutate the caller's mesh.
-        poly = vtk.vtkPolyData()
-        poly.DeepCopy(mesh if isinstance(mesh, vtk.vtkPolyData) else mesh)
-
-        if flip:
-            self._negate_xy_inplace(poly)
-
-        spacing_arr = np.asarray(spacing, dtype=float)
-        if (spacing_arr <= 0).any():
-            raise ValueError(f"Spacing must be strictly positive, got {spacing}.")
-
-        white = self._define_image_from_mesh(poly, spacing_arr)
-
-        # Vectorised foreground fill (replaces per-voxel SetTuple1 loop).
-        n_pts = white.GetNumberOfPoints()
-        ones = np.ones(n_pts, dtype=np.uint8)
-        white.GetPointData().SetScalars(
-            numpy_support.numpy_to_vtk(ones, deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
-        )
-
-        stencil = vtk.vtkPolyDataToImageStencil()
-        stencil.SetInputData(poly)
-        stencil.SetOutputOrigin(white.GetOrigin())
-        stencil.SetOutputSpacing(white.GetSpacing())
-        stencil.SetOutputWholeExtent(white.GetExtent())
-        stencil.Update()
-
-        cutter = vtk.vtkImageStencil()
-        cutter.SetInputData(white)
-        cutter.SetStencilConnection(stencil.GetOutputPort())
-        cutter.ReverseStencilOff()
-        cutter.SetBackgroundValue(0)
-        cutter.Update()
-
-        return self._vtk_image_to_sitk(cutter.GetOutput())
-
-    @staticmethod
-    def _define_image_from_mesh(poly: vtk.vtkPolyData,
-                                spacing: np.ndarray) -> vtk.vtkImageData:
-        """Allocate a vtkImageData covering the mesh bounds at *spacing*."""
-        bounds = poly.GetBounds()  # (xmin, xmax, ymin, ymax, zmin, zmax)
-        extents_world = np.array([
-            bounds[1] - bounds[0],
-            bounds[3] - bounds[2],
-            bounds[5] - bounds[4],
-        ], dtype=float)
-        dims = np.maximum(np.ceil(extents_world / spacing).astype(int), 1)
-
-        img = vtk.vtkImageData()
-        img.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
-        img.SetDimensions(int(dims[0]), int(dims[1]), int(dims[2]))
-        # One voxel of background on every side. The upper buffer was always
-        # here, so the stencil never clips a face lying on the bbox max; the
-        # lower one matches it, rather than leaving the mesh's min bound
-        # sitting exactly on the grid's first plane with no background
-        # outside it for the distance transform to measure against.
-        img.SetExtent(0, int(dims[0]) + 2,
-                      0, int(dims[1]) + 2,
-                      0, int(dims[2]) + 2)
-        img.SetOrigin(float(bounds[0] - spacing[0]),
-                      float(bounds[2] - spacing[1]),
-                      float(bounds[4] - spacing[2]))
-        img.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
-        return img
-
-    @staticmethod
-    def _vtk_image_to_sitk(vtk_img: vtk.vtkImageData) -> sitk.Image:
-        """Convert a vtkImageData to a SimpleITK image (no Python loops)."""
-        ext = vtk_img.GetExtent()
-        dims = (ext[1] - ext[0] + 1, ext[3] - ext[2] + 1, ext[5] - ext[4] + 1)
-        scalars = vtk_img.GetPointData().GetScalars()
-        arr = numpy_support.vtk_to_numpy(scalars).reshape(dims[2], dims[1], dims[0])
-        out = sitk.GetImageFromArray(arr.astype(np.uint8))
-        out.SetSpacing(tuple(float(s) for s in vtk_img.GetSpacing()))
-        out.SetOrigin(tuple(float(o) for o in vtk_img.GetOrigin()))
-        return out
-
-    # ==================================================================
-    # Segmentation — meshing (image → polydata)
-    # ==================================================================
-
-    def _label_mask_image(self, label: int) -> sitk.Image:
-        """Return a uint8 0/1 mask for the single label value *label*."""
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-        arr = (sitk.GetArrayFromImage(self._seg_sitk) == label).astype(np.uint8)
-        out = sitk.GetImageFromArray(arr)
-        out.CopyInformation(self._seg_sitk)
-        return out
-
-    def _segmentation_to_polydata(self, *, flip: bool,
-                                           filt_stdev: list[float],
-                                           filt_rfact: list[float],
-                                           label: Optional[int] = None,
-                                  ) -> vtk.vtkPolyData:
-        """Plain marching cubes + smoothing; no preprocessing.
-
-        When *label* is given, only that label value is meshed. Otherwise
-        all voxels > 0 form the surface (legacy binary behaviour).
-        """
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-
-        binary = self._label_mask_image(label) if label is not None \
-            else self._binary_mask_image()
-        vimg = self._sitk_to_vtk_image(binary)
-
-        outside_dist = vtk.vtkImageEuclideanDistance()
-        outside_dist.SetInputData(vimg)
-        outside_dist.SetConsiderAnisotropy(True)
-        outside_dist.SetAlgorithmToSaito()
-        outside_dist.Update()
-        
-        # Flip binary {0,1} → {1,0} so vtkImageEuclideanDistance can compute
-        # distances from outside pixels to the nearest inside boundary.
-        # SetOperationToInvert would compute 1/x, giving inf for 0-pixels
-        # (no background for the distance filter). Use threshold instead.
-        thresh = vtk.vtkImageThreshold()
-        thresh.SetInputData(vimg)
-        thresh.ThresholdByLower(0.5)
-        thresh.SetInValue(1.0)
-        thresh.SetOutValue(0.0)
-        thresh.ReplaceInOn()
-        thresh.ReplaceOutOn()
-        thresh.Update()
-        inside_dist = vtk.vtkImageEuclideanDistance()
-        inside_dist.SetInputData(thresh.GetOutput())
-        inside_dist.SetConsiderAnisotropy(True)
-        inside_dist.SetAlgorithmToSaito()
-        inside_dist.Update()
-
-        sdf = vtk.vtkImageMathematics()
-        sdf.SetInput1Data(outside_dist.GetOutput())
-        sdf.SetInput2Data(inside_dist.GetOutput())
-        sdf.SetOperationToSubtract()
-        sdf.Update()
-        vimg_sdf = sdf.GetOutput()
-        
-        
-        mc = vtk.vtkMarchingCubes()
-        if np.any(np.array(filt_stdev)>0.) and np.any(np.array(filt_rfact)>0.): 
-            gaussian = vtk.vtkImageGaussianSmooth()
-            gaussian.SetStandardDeviations(filt_stdev[0],filt_stdev[1],filt_stdev[2])
-            gaussian.SetRadiusFactors(filt_rfact[0],filt_rfact[1],filt_rfact[2])
-            gaussian.SetDimensionality(3)
-            gaussian.SetInputData(vimg_sdf)
-            gaussian.Update()
-            mc.SetInputConnection(gaussian.GetOutputPort())
-        else:
-            mc.SetInputData(vimg_sdf)
-        mc.ComputeScalarsOff()
-        mc.ComputeNormalsOff()
-        mc.ComputeGradientsOff()
-        mc.SetValue(0, 0.0)
-        mc.Update()
-
-        normals = vtk.vtkPolyDataNormals()
-        normals.SetInputConnection(mc.GetOutputPort())
-        normals.ComputePointNormalsOn()
-        normals.ComputeCellNormalsOff()
-        normals.AutoOrientNormalsOn()
-        normals.FlipNormalsOn()
-        normals.Update()
-
-        tri = vtk.vtkTriangleFilter()
-        tri.SetInputConnection(normals.GetOutputPort())
-        tri.PassVertsOff()
-        tri.PassLinesOff()
-        tri.Update()
-        out: vtk.vtkPolyData = tri.GetOutput()
-
-
-        clean = vtk.vtkCleanPolyData()
-        clean.SetInputData(out)
-        clean.PointMergingOn()
-        clean.ConvertLinesToPointsOff()
-        clean.ConvertPolysToLinesOff()
-        clean.ConvertStripsToPolysOff()
-        clean.Update()
-        out = clean.GetOutput()
-        if flip:
-            self._negate_xy_inplace(out)
-        return out
-
-    @staticmethod
-    def _sitk_to_vtk_image(img: sitk.Image) -> vtk.vtkImageData:
-        """Build a vtkImageData mirroring *img*'s geometry (vectorised)."""
-        size = list(img.GetSize())
-        spacing = list(img.GetSpacing())
-        origin = list(img.GetOrigin())
-        direction = list(img.GetDirection())
-
-        vimg = vtk.vtkImageData()
-        vimg.SetDimensions(int(size[0]), int(size[1]), int(size[2]))
-        vimg.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
-        vimg.SetOrigin(float(origin[0]), float(origin[1]), float(origin[2]))
-        vimg.SetExtent(0, size[0] - 1, 0, size[1] - 1, 0, size[2] - 1)
-        if vtk.vtkVersion.GetVTKMajorVersion() >= 9 and len(direction) == 9:
-            vimg.SetDirectionMatrix(direction)
-
-        # SITK array shape is (Z, Y, X) C-contiguous; ravel matches VTK
-        # linear indexing where X varies fastest.
-        arr = sitk.GetArrayFromImage(img)
-        flat = np.ascontiguousarray(arr).ravel()
-        vimg.GetPointData().SetScalars(numpy_support.numpy_to_vtk(flat, deep=True))
-        return vimg
-
-    @staticmethod
-    def _smooth_polydata(poly: vtk.vtkPolyData, iterations: int,
-                         relaxation: float) -> vtk.vtkPolyData:
-        s = vtk.vtkSmoothPolyDataFilter()
-        s.SetInputData(poly)
-        s.SetNumberOfIterations(int(iterations))
-        s.SetFeatureAngle(60.0)
-        s.FeatureEdgeSmoothingOff()
-        s.SetRelaxationFactor(float(relaxation))
-        s.BoundarySmoothingOff()
-        s.SetConvergence(0.0)
-        s.Update()
-        return s.GetOutput()
-
-    @staticmethod
-    def _negate_xy_inplace(poly: vtk.vtkPolyData) -> None:
-        """Vectorised X/Y flip used by the MIRTK-orientation paths."""
-        pts = poly.GetPoints()
-        if pts is None or pts.GetNumberOfPoints() == 0:
-            return
-        arr = numpy_support.vtk_to_numpy(pts.GetData()).copy()
-        arr[:, 0] *= -1.0
-        arr[:, 1] *= -1.0
-        new_data = numpy_support.numpy_to_vtk(arr, deep=True)
-        new_pts = vtk.vtkPoints()
-        new_pts.SetData(new_data)
-        poly.SetPoints(new_pts)
 
 
 # ---------------------------------------------------------------------------
