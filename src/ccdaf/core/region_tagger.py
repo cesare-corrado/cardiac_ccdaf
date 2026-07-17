@@ -33,8 +33,8 @@ consecutive bins.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pyvista as pv
@@ -204,21 +204,8 @@ class RegionTagger:
         tri_label = self._enforce_contiguity(tri_label, seed_vertices, name_order)
         
 
-        v_labels = np.full((self._points.shape[0], 4), UNASSIGNED, dtype=np.int32)
         # PV labels of interest
         pv_labels = {LABELS["LSPV"], LABELS["LIPV"], LABELS["RSPV"], LABELS["RIPV"], LABELS["LAA"]}
-        
-        # Get the labels of all triangles incident to each vertex
-        for i in range(3):
-            # For each vertex in the triangle, record the triangle's label
-            # Note: This is an approximation; for high precision, 
-            # we iterate through the mesh structure.
-            col = self._triangles[:, i]
-            # We only care if the triangle has a PV label
-            valid_tris = np.isin(tri_label, list(pv_labels))
-            
-            # Simple approach: identify vertices that touch different PV labels
-            # We'll use a set-based check per vertex
         
         # 2. Identify "Multi-tag" vertices
         # We find vertices where the incident triangles have >1 unique PV label
@@ -319,8 +306,10 @@ class RegionTagger:
                 # edges (rare) are fully connected among their incident triangles.
                 for i in range(len(tris)):
                     for j in range(i + 1, len(tris)):
-                        rows.append(tris[i]); cols.append(tris[j])
-                        rows.append(tris[j]); cols.append(tris[i])
+                        rows.append(tris[i])
+                        cols.append(tris[j])
+                        rows.append(tris[j])
+                        cols.append(tris[i])
 
         data = np.ones(len(rows), dtype=np.uint8)
         return csr_matrix((data, (rows, cols)), shape=(m, m))
@@ -455,7 +444,7 @@ class RegionTagger:
         """
         try:
             # Local import keeps SciPy's spatial deps lazy.
-            from scipy.spatial import ConvexHull, QhullError
+            from scipy.spatial import QhullError
 
             finite = np.isfinite(d) & (d > 0)
             if np.count_nonzero(finite) < 16:
@@ -501,15 +490,14 @@ class RegionTagger:
                     
                 except (QhullError, ValueError, Exception):
                     continue
-                if np.isfinite(a) and a > 0.0:
-                    raw_areas[b] = a
+                if np.isfinite(area) and area > 0.0:
+                    raw_areas[b] = area
 
             mask = np.isfinite(raw_areas)
             if np.count_nonzero(mask) < 6:
                 return r_max
 
             xp    = np.where(mask)[0]
-            fp    = raw_areas[mask]
 
             # Linear interpolation for missing bins
             #areas = np.interp(np.arange(bins), xp, fp)

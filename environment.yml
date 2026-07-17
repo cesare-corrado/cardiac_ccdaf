@@ -3,17 +3,38 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.9
+  - python>=3.12   # validated on 3.14; floored with the VTK/pyvista stack below
   - numpy>=1.23
   - scipy>=1.10
-  - vtk>=9.2
-  - pyvista>=0.43
+  # Floors follow the validated stack (VTK 9.6.2 / pyvista 0.48.4 — see
+  # docs/eam-real-data-verification.md). Two VTK-9.6 behaviours are handled
+  # in code rather than avoided by pinning lower: the scalar-bar "%d" format
+  # became fatal in 9.6 (the format was removed), and 9.6's Viskores/CUDA
+  # filter overrides are disabled at the package root (CCDAF_VTK_ACCEL=1
+  # restores them). No exact pin: both hazards are neutralised, and an exact
+  # pin would only freeze upstream fixes. Older VTK (9.0.3 in base anaconda)
+  # behaves differently and once invalidated a whole session's testing —
+  # the raised floor makes that stack unsupported at install time.
+  - vtk>=9.6
+  # The interactive scalar-bar placement reaches into pyvista's private
+  # _scalar_bar_widgets dict; 0.48 is what is validated against.
+  - pyvista>=0.48
   - pyvistaqt>=0.11
   - pyqt>=5.15
   - matplotlib>=3.7
   - simpleitk>=2.4
   - trimesh>=4.0
+  # trimesh.fix_normals() needs networkx (an optional extra of trimesh);
+  # decimate raises ModuleNotFoundError without it.
+  - networkx>=3.0
   - pytest>=7.0
   - pip
   - pip:
     - -e .
+
+variables:
+  # conda-forge's vtk/pyqt combo can crash inside libfontconfig when the
+  # shared ~/.cache/fontconfig directory holds cache files written by other
+  # fontconfig versions (system fontconfig, other conda envs). Isolate this
+  # env's font cache to avoid cross-version corruption.
+  XDG_CACHE_HOME: ~/.cache/ccdaf-fontconfig

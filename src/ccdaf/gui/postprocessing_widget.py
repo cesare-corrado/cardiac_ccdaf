@@ -17,10 +17,14 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+import numpy as np
 import pyvista as pv
 from PyQt5 import QtCore, QtWidgets
 
-from ccdaf.core.mesh_postprocessor import PostprocessOptions, apply as postprocess_apply
+from ccdaf.core.mesh_postprocessor import (
+    PostprocessOptions, apply as postprocess_apply,
+    SMOOTH_TAUBIN, SMOOTH_LAPLACIAN,
+)
 
 
 class PostprocessingWidget(QtWidgets.QGroupBox):
@@ -31,11 +35,16 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
                  mesh_getter: Callable[[], Optional[pv.PolyData]],
                  mesh_setter: Callable[[pv.PolyData], None],
                  on_status: Optional[Callable[[str], None]] = None,
+                 on_surface_moved: Optional[Callable[[object, object], None]] = None,
                  parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__("Mesh post-processing", parent)
         self._get = mesh_getter
         self._set = mesh_setter
         self._status = on_status or (lambda msg: None)
+        # Fired with (old_mesh, new_mesh) when smoothing moves the surface,
+        # so the app can carry EAM electrodes along with it. The widget
+        # itself knows nothing about electrodes.
+        self._on_surface_moved = on_surface_moved
 
         self.setToolTip(
             "Mesh post-processing: decimate, refine and/or clean the mesh. "
@@ -78,28 +87,6 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         )
         #grid.addWidget(self.spn_iters, 1, 1)
         grid.addWidget(self.spn_iters, 1, 1)
-        lbl_hole = QtWidgets.QLabel("max hole size")
-        lbl_hole.setToolTip(
-            "After retriangulation, close holes whose bounding-sphere "
-            "radius is ≤ this value. Set well below the mitral-valve / "
-            "PV-ostia radius so those anatomical openings stay open. "
-            "0 disables hole filling."
-        )
-        #grid.addWidget(lbl_hole, 2, 0)
-        grid.addWidget(lbl_hole, 0, 2)
-        self.spn_hole = QtWidgets.QDoubleSpinBox()
-        self.spn_hole.setDecimals(4)
-        self.spn_hole.setRange(0.0, 1.0e6)
-        self.spn_hole.setValue(2.0)
-        self.spn_hole.setSingleStep(0.5)
-        self.spn_hole.setToolTip(
-            "After retriangulation, close holes whose bounding-sphere "
-            "radius is ≤ this value. Set well below the mitral-valve / "
-            "PV-ostia radius so those anatomical openings stay open. "
-            "0 disables hole filling."
-        )
-        #grid.addWidget(self.spn_hole, 2, 1)
-        grid.addWidget(self.spn_hole, 1, 2)
         v.addLayout(grid)
 
         # -- refine ---------------------------------------------------
@@ -206,11 +193,94 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         grid.addWidget(self.txt_preserve, 1, 3)
         v.addLayout(grid)
 
+        # -- fill holes -----------------------------------------------
+        _HOLE_TIP = (
+            "Close holes whose bounding-sphere radius is ≤ this value. Set "
+            "well below the mitral-valve / PV-ostia radius so those "
+            "anatomical openings stay open. 0 disables hole filling. "
+            "Decimation's own hole-filling pass uses the same value."
+        )
+        self.chk_fill = QtWidgets.QCheckBox("Fill holes")
+        self.chk_fill.setToolTip(
+            "Close the remaining holes below 'max hole size'. Runs last: "
+            "cleaning drops non-manifold cells and so opens holes of its own."
+        )
+        v.addWidget(self.chk_fill)
+
+        grid = QtWidgets.QGridLayout()
+        lbl_hole = QtWidgets.QLabel("max hole size")
+        lbl_hole.setToolTip(_HOLE_TIP)
+        grid.addWidget(lbl_hole, 0, 0)
+        self.spn_hole = QtWidgets.QDoubleSpinBox()
+        self.spn_hole.setDecimals(4)
+        self.spn_hole.setRange(0.0, 1.0e6)
+        self.spn_hole.setValue(4.0)
+        self.spn_hole.setSingleStep(0.5)
+        self.spn_hole.setToolTip(_HOLE_TIP)
+        grid.addWidget(self.spn_hole, 0, 1)
+        grid.setColumnStretch(2, 1)
+        v.addLayout(grid)
+
+        # -- smooth ---------------------------------------------------
+        self.chk_smooth = QtWidgets.QCheckBox("Smooth")
+        self.chk_smooth.setToolTip(
+            "Smooth the whole surface to strip acquisition noise. This is a "
+            "different job from Clean's smoothing, which only repairs badly-"
+            "shaped triangles and leaves the anatomy where it is.\n\n"
+            "Runs last, on the final topology. EAM electrodes are carried "
+            "along with the surface."
+        )
+        v.addWidget(self.chk_smooth)
+
+        grid = QtWidgets.QGridLayout()
+        _METHOD_TIP = (
+            "Taubin preserves the enclosed volume (~+0.1% on a Carto atrium); "
+            "Laplacian shrinks the shell progressively with iterations "
+            "(~-2.5% at 100), which matters if the shell is later measured."
+        )
+        lbl_method = QtWidgets.QLabel("method")
+        lbl_method.setToolTip(_METHOD_TIP)
+        grid.addWidget(lbl_method, 0, 0)
+        self.cmb_smooth = QtWidgets.QComboBox()
+        self.cmb_smooth.addItem("Taubin", SMOOTH_TAUBIN)
+        self.cmb_smooth.addItem("Laplacian", SMOOTH_LAPLACIAN)
+        self.cmb_smooth.setToolTip(_METHOD_TIP)
+        grid.addWidget(self.cmb_smooth, 1, 0)
+
+        _ITER_TIP = (
+            "Number of smoothing sweeps over the surface.\n\n"
+            "40 suits a dense surface (a Carto map is ~13k points, where "
+            "Taubin holds volume to +0.1%). On a coarser mesh the same count "
+            "over-smooths — decimated to 4k it loses ~4% of the volume — so "
+            "lower it when smoothing after decimation."
+        )
+        lbl_iters = QtWidgets.QLabel("iterations")
+        lbl_iters.setToolTip(_ITER_TIP)
+        grid.addWidget(lbl_iters, 0, 1)
+        self.spn_smooth_iters = QtWidgets.QSpinBox()
+        self.spn_smooth_iters.setRange(1, 1000)
+        self.spn_smooth_iters.setValue(40)
+        self.spn_smooth_iters.setToolTip(_ITER_TIP)
+        grid.addWidget(self.spn_smooth_iters, 1, 1)
+
+        self.lbl_smooth_param = QtWidgets.QLabel("passband")
+        grid.addWidget(self.lbl_smooth_param, 0, 2)
+        self.spn_smooth_param = QtWidgets.QDoubleSpinBox()
+        self.spn_smooth_param.setDecimals(4)
+        self.spn_smooth_param.setRange(0.0001, 1.0)
+        self.spn_smooth_param.setSingleStep(0.001)
+        self.spn_smooth_param.setValue(0.001)
+        grid.addWidget(self.spn_smooth_param, 1, 2)
+        grid.setColumnStretch(3, 1)
+        v.addLayout(grid)
+        self.cmb_smooth.currentIndexChanged.connect(self._sync_smooth_param)
+        self._sync_smooth_param()
+
         # -- apply ----------------------------------------------------
         self.btn_apply = QtWidgets.QPushButton("Apply post-processing")
         self.btn_apply.setToolTip(
             "Run the selected steps on the current mesh in the order "
-            "decimate → refine → clean."
+            "decimate → refine → clean → fill holes."
         )
         self.btn_apply.clicked.connect(self._on_apply)
         v.addWidget(self.btn_apply)
@@ -239,6 +309,21 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
                 raise ValueError(f"invalid label: {tok!r}")
         return tuple(out)
 
+    def _sync_smooth_param(self, *_args) -> None:
+        """The second smoothing knob means different things per method:
+        Taubin filters by passband, Laplacian steps by a relaxation factor."""
+        taubin = self.cmb_smooth.currentData() == SMOOTH_TAUBIN
+        self.lbl_smooth_param.setText("passband" if taubin else "relaxation")
+        tip = ("Taubin passband: smaller is smoother (0.001 is a usual choice)."
+               if taubin else
+               "Laplacian relaxation: how far a vertex moves toward its "
+               "neighbours' average each iteration.")
+        self.spn_smooth_param.setToolTip(tip)
+        self.lbl_smooth_param.setToolTip(tip)
+        self.spn_smooth_param.blockSignals(True)
+        self.spn_smooth_param.setValue(0.001 if taubin else 0.1)
+        self.spn_smooth_param.blockSignals(False)
+
     def _on_apply(self) -> None:
         mesh = self._get()
         if mesh is None:
@@ -248,10 +333,13 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
             return
         if not (self.chk_decimate.isChecked()
                 or self.chk_refine.isChecked()
-                or self.chk_clean.isChecked()):
+                or self.chk_clean.isChecked()
+                or self.chk_fill.isChecked()
+                or self.chk_smooth.isChecked()):
             QtWidgets.QMessageBox.information(
                 self, "Nothing to do",
-                "Select at least one of decimate / refine / clean.",
+                "Select at least one of decimate / refine / clean / "
+                "fill holes / smooth.",
             )
             return
 
@@ -265,9 +353,15 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
             do_decimate=self.chk_decimate.isChecked(),
             do_refine=self.chk_refine.isChecked(),
             do_clean=self.chk_clean.isChecked(),
+            do_fill_holes=self.chk_fill.isChecked(),
+            do_smooth=self.chk_smooth.isChecked(),
+            smooth_method=self.cmb_smooth.currentData(),
+            smooth_iterations=int(self.spn_smooth_iters.value()),
+            smooth_passband=float(self.spn_smooth_param.value()),
+            smooth_relaxation=float(self.spn_smooth_param.value()),
             decimate_target_points=int(self.spn_target.value()),
             decimate_iters=int(self.spn_iters.value()),
-            decimate_max_hole_size=float(self.spn_hole.value()),
+            max_hole_size=float(self.spn_hole.value()),
             refine_edge_len=float(self.spn_edge.value()),
             clean_quality_threshold=float(self.spn_quality.value()),
             clean_smooth_iterations=int(self.spn_smooth.value()),
@@ -290,9 +384,26 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
             self.progress.setValue(i)
             QtWidgets.QApplication.processEvents()
 
+        # How far smoothing actually moved the wall. Reported because the
+        # damage is invisible on screen and depends on the mesh: 40 Taubin
+        # sweeps barely touch a dense Carto map but round off a decimated
+        # one. A number the user can read beats a threshold we guess at.
+        moved: dict = {}
+
+        def _surface_moved(old, new) -> None:
+            d = np.linalg.norm(
+                np.asarray(new.points, dtype=float)
+                - np.asarray(old.points, dtype=float), axis=1)
+            if d.size:
+                moved["mean"] = float(d.mean())
+                moved["max"] = float(d.max())
+            if self._on_surface_moved is not None:
+                self._on_surface_moved(old, new)
+
         try:
             new_mesh = postprocess_apply(
-                mesh, opts, on_decimate_progress=_decimate_progress
+                mesh, opts, on_decimate_progress=_decimate_progress,
+                on_surface_moved=_surface_moved,
             )
         except Exception as exc:
             self.progress.setVisible(False)
@@ -307,10 +418,12 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
 
         self._set(new_mesh)
         self.mesh_changed.emit()
-        self._status(
-            f"Post-processing done: {new_mesh.n_points} points, "
-            f"{new_mesh.n_cells} cells."
-        )
+        msg = (f"Post-processing done: {new_mesh.n_points} points, "
+               f"{new_mesh.n_cells} cells.")
+        if moved:
+            msg += (f" Smoothing moved the surface {moved['mean']:.3g} on "
+                    f"average, {moved['max']:.3g} at most.")
+        self._status(msg)
 
 
 __all__ = ["PostprocessingWidget"]

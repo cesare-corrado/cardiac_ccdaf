@@ -181,6 +181,53 @@ class SeedSelector:
     def seeds_for_tagging(self) -> Dict[str, int]:
         return {n: s.vertex_id for n, s in self._state.seeds.items() if n != "MV"}
 
+    def apply_positions(self, positions) -> "list[str]":
+        """Rebuild the selection from saved coordinates, in order.
+
+        Each coordinate is snapped to the current surface by nearest
+        point — a saved seed carries no vertex id worth trusting across a
+        clip or a refinement — and then walks the same gauntlet as a
+        click: duplicate spacing, PV prior, state-machine order. Stops at
+        the first seed that is missing or rejected, leaving the earlier
+        ones placed and the selection resumable from there.
+
+        Returns one message per seed that could not be placed; empty
+        means the selection completed and ``on_complete`` fired.
+        """
+        problems: list = []
+        self.stop()
+        self._state.reset()
+        self._clear_markers()
+        for name in SEED_ORDER:
+            if name not in positions:
+                problems.append(f"{name}: not in the file")
+                break
+            try:
+                snap = self._geom.snap(np.asarray(positions[name], dtype=float))
+            except GeometryError as exc:
+                problems.append(f"{name}: {exc}")
+                break
+            existing_xyz = [s.xyz for s in self._state.seeds.values()]
+            if self._geom.is_duplicate_position(snap.xyz, existing_xyz):
+                problems.append(f"{name}: lands on an already-placed seed")
+                break
+            if name in PV_NAMES:
+                ok, reason = self._geom.validate_pv(snap.vertex_id)
+                if not ok:
+                    problems.append(f"{name}: {reason}")
+                    break
+            res = self._state.try_commit(
+                Seed(name=name, vertex_id=snap.vertex_id, xyz=snap.xyz),
+            )
+            if res is not CommitResult.OK:
+                problems.append(f"{name}: {res.value}")
+                break
+            self._add_marker(self._state.seeds[name])
+        self._emit_progress()
+        if self._state.is_complete and self.on_complete is not None:
+            self.on_complete(self._state.seeds)
+        return problems
+
     # ------------------------------------------------------------------
     # Pick routing
     # ------------------------------------------------------------------

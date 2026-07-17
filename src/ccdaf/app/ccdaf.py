@@ -28,6 +28,7 @@ Run
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -55,14 +56,13 @@ from pyvistaqt import QtInteractor
 
 import SimpleITK as sitk
 import vtk
-from vtk.util import numpy_support
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ccdaf.core.mesh_loader import MeshLoader, BODY_LABEL
 from ccdaf.interaction.seed_selector import SeedSelector, Seed, SEED_ORDER, SEED_PROMPT, SEED_COLOR
 from ccdaf.core.region_tagger import RegionTagger, LABELS
-from ccdaf.interaction.manual_editor import ManualEditor, EditState, ALLOWED_LABELS
+from ccdaf.interaction.manual_editor import ManualEditor, ALLOWED_LABELS
 from ccdaf.interaction.clipping_tool import ClippingTool, ClipMode
 from ccdaf.gui.postprocessing_widget import PostprocessingWidget
 from ccdaf.gui.segmentation_widget import SegmentationWidget
@@ -71,6 +71,25 @@ from ccdaf.gui.seed_widget import SeedWidget
 from ccdaf.gui.tagging_widget import TaggingWidget
 from ccdaf.gui.manual_correction_widget import ManualCorrectionWidget
 from ccdaf.gui.clipping_widget import ClippingWidget
+from ccdaf.gui.eam_load_dialog import (
+    EAMLoadDialog, FORMAT_CARTO_STUDY, FORMAT_CARTO_MAPPINGS,
+)
+from ccdaf.gui.visualisation_widget import VisualisationWidget
+from ccdaf.gui.mapping_select_dialog import MappingSelectDialog
+from ccdaf.gui.save_mesh_dialog import SaveMeshDialog, FORMAT_PICKLE
+from ccdaf.gui.eam_export_dialog import EAMExportDialog
+from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
+from ccdaf.io.carto_functions import extract_map_list_names
+from ccdaf.core.eam_loader import (
+    EAMData, load_carto_mapping, displace_electrodes_for, read_bundle,
+)
+from ccdaf.core.field_transfer import guard_distance, transfer_fields
+from ccdaf.core.segmentation import (
+    binary_mask_image, negate_xy_inplace, segmentation_to_polydata,
+    sync_sitk_from_array, voxelise_polydata,
+)
+from ccdaf.core.seed_io import load_seeds, save_seeds
+from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
 # ---------------------------------------------------------------------------
@@ -102,29 +121,33 @@ _SEG_COLOR_LIST = [SEG_LABEL_COLORS[i] for i in range(9)]
 
 PV_NAMES = ("LSPV", "LIPV", "RSPV", "RIPV")
 
+# Fields whose values are labels rather than measurements. A colour ramp
+# over these would be meaningless, so the visualisation widget hands them
+# to the region path (discrete colours + names) instead. Further label
+# fields belong here rather than in a paradigm of their own.
+CATEGORICAL_FIELDS = ("elemTag",)
 
-# Subplot positions for the 2x2 view.
-#   (0,0) Top-Left     Axial    XY
-#   (0,1) Top-Right    Sagittal YZ
-#   (1,1) Bottom-Right Coronal  XZ
-#   (1,0) Bottom-Left  3D
-SUBPLOT_3D = (1, 0)
-SUBPLOT_AXIAL = (0, 0)
-SUBPLOT_SAGITTAL = (0, 1)
-SUBPLOT_CORONAL = (1, 1)
+# EAM scalar bar: horizontal, along the bottom. Sizes are fractions of the
+# viewport, so the height giving a 20:1 bar on screen depends on the window's
+# own aspect — see _eam_bar_default_geom().
+EAM_BAR_WIDTH  = 0.6       # fraction of the viewport width
+EAM_BAR_ASPECT = 20.0      # length : height, as seen on screen
+EAM_BAR_POS_X  = 0.2
+EAM_BAR_POS_Y  = 0.05
+# Out-of-range colors: values past a manual min/max are flagged rather than
+# clamped to the map's end colors. They only ever show where data actually
+# falls outside the range, so an auto range makes them disappear by itself.
+EAM_BELOW_COLOR = "brown"
+EAM_ABOVE_COLOR = "magenta"
+# EAM electrodes, drawn as Gaussian points.
+EAM_ELECTRODE_COLOR = (100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0)
+EAM_ELECTRODE_RADIUS_FRAC = 0.008     # of the mesh's bounding-box diagonal
 
+
+# The three slice orientations of a segmentation volume. Where each one is
+# drawn is not decided here — that is the segmentation view's layout, in
+# ccdaf.app.views.
 ORIENTATIONS = ("axial", "sagittal", "coronal")
-SUBPLOT_FOR = {
-    "axial": SUBPLOT_AXIAL,
-    "sagittal": SUBPLOT_SAGITTAL,
-    "coronal": SUBPLOT_CORONAL,
-}
-TITLE_FOR = {
-    "axial": "Axial (XY)",
-    "sagittal": "Sagittal (YZ)",
-    "coronal": "Coronal (XZ)",
-    "3d": "3D",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -152,16 +175,36 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipper: Optional[ClippingTool] = None
         self._mesh_actor = None
 
+        # ---- EAM (electroanatomical mapping) state ---------------------
+        self._eam_directory: Optional[str] = None
+        self._eam_format: Optional[str] = None
+        self._eam_selected_file: Optional[str] = None
+        self._eam_data = None                              # EAMData once loaded
+        self._eam_electrode_points: Optional[np.ndarray] = None
+        self._eam_electrode_actor = None
+        # Title of the scalar bar we last built, and where the user dragged it
+        # to — a re-render rebuilds the bar, and would otherwise reset it.
+        self._eam_bar_title: Optional[str] = None
+        self._eam_bar_geom = None
+
         # ---- segmentation state ----------------------------------------
         self._seg_sitk: Optional[sitk.Image] = None
         self._seg_array: Optional[np.ndarray] = None  # shape (Z, Y, X), sitk convention
         self._seg_origin: Tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._seg_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0)
         self._seg_undo_stack: list = []  # up to 2 snapshots of _seg_array
+        # The mesh this segmentation was voxelised from, with the flip and
+        # spacing used — what converting it back needs to carry the fields
+        # and electrodes over. None ⇔ the segmentation came off disk.
+        self._seg_source: Optional[dict] = None
+        self._transfer_note: Optional[str] = None
         self._seg_idx: Dict[str, int] = {"axial": 0, "sagittal": 0, "coronal": 0}
         self._slice_actors: Dict[str, object] = {}
         self._paint_active: bool = False
-        self._segmentation_mode: bool = False  # True ⇔ 2×2 plotter active
+        # What the live plotter was built for — layout facts (multi-view?
+        # where is each pane?) come from its structure, task identity from
+        # its name. Written only by _build_plotter.
+        self._view: ViewSpec = VIEWS["general"]
         self._splitter: Optional[QtWidgets.QSplitter] = None
         self.plotter: Optional[QtInteractor] = None
         self._seg_3d_actors: list = []
@@ -216,6 +259,12 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_save.triggered.connect(self._action_save)
         file_menu.addAction(self.act_save)
 
+        self.act_close = QtWidgets.QAction("&Close", self)
+        self.act_close.setShortcut(QtGui.QKeySequence.Close)
+        self.act_close.setEnabled(False)
+        self.act_close.triggered.connect(self._action_close)
+        file_menu.addAction(self.act_close)
+
         file_menu.addSeparator()
         act_quit = QtWidgets.QAction("&Quit", self)
         act_quit.setShortcut(QtGui.QKeySequence.Quit)
@@ -251,6 +300,16 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_seg_close.triggered.connect(self._action_seg_close)
         seg_menu.addAction(self.act_seg_close)
 
+        # --- EAM menu (electroanatomical mapping) ----------------------
+        eam_menu = menubar.addMenu("&EAM")
+        self.act_eam_load = QtWidgets.QAction("&Load EAM…", self)
+        self.act_eam_load.triggered.connect(self._action_load_eam)
+        eam_menu.addAction(self.act_eam_load)
+        self.act_eam_export = QtWidgets.QAction("&Export…", self)
+        self.act_eam_export.setEnabled(False)
+        self.act_eam_export.triggered.connect(self._action_export_eam)
+        eam_menu.addAction(self.act_eam_export)
+
         # Visualise menu — toggles the left-panel sections.
         self.visualise_menu = menubar.addMenu("&Visualise")
 
@@ -283,10 +342,11 @@ class CCDAF(QtWidgets.QMainWindow):
             mesh_getter=lambda: self.loader.mesh,
             mesh_setter=self._replace_mesh,
             on_status=self.statusBar().showMessage,
+            on_surface_moved=self._on_surface_moved,
         )
         self.postproc.mesh_changed.connect(self._on_postproc_applied)
         self.postproc.setTitle("")
-        body = self._register_section(v, "postproc", "Post-processing")
+        body = self._register_section(v, "postproc", "Mesh post-processing")
         body.addWidget(self.postproc)
 
         # --- Seeds ------------------------------------------------------
@@ -294,6 +354,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.start_requested.connect(self._action_start_seeds)
         self.seed_widget.undo_requested.connect(self._action_undo_seed)
         self.seed_widget.reset_requested.connect(self._action_reset_seeds)
+        self.seed_widget.save_requested.connect(self._action_save_seeds)
+        self.seed_widget.load_requested.connect(self._action_load_seeds)
         body = self._register_section(v, "seeds", "Seed selection")
         body.addWidget(self.seed_widget)
 
@@ -322,6 +384,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipping_widget.mv_plane_requested.connect(self._action_mv_plane_start)
         self.clipping_widget.clip_apply_requested.connect(self._action_clip_apply)
         self.clipping_widget.clip_revert_requested.connect(self._action_clip_revert)
+        self.clipping_widget.clipping_toggled.connect(self._on_clipping_toggled)
         body = self._register_section(v, "clipping", "Clipping")
         body.addWidget(self.clipping_widget)
 
@@ -338,23 +401,32 @@ class CCDAF(QtWidgets.QMainWindow):
         body.addWidget(self.seg_widget)
         self._set_section_visible("segmentation", False)
 
+        # --- EAM display (hidden until an EAM mapping is loaded) --------
+        self.vis_widget = VisualisationWidget()
+        self.vis_widget.settings_changed.connect(self._render_field)
+        self.vis_widget.electrodes_toggled.connect(self._on_electrodes_toggled)
+        body = self._register_section(v, "visualisation", "Visualisation")
+        body.addWidget(self.vis_widget)
+        self._set_section_visible("visualisation", False)
+
         v.addStretch(1)
 
-        # --- Plotter — start in single-renderer (3D) mode --------------
-        self._build_plotter((1, 1))
+        # --- Plotter — start in the general (single 3D) view -----------
+        self._build_plotter("general")
 
         self.statusBar().showMessage("Ready.")
 
     # ------------------------------------------------------------------
     # Plotter (re)construction
     # ------------------------------------------------------------------
-    def _build_plotter(self, shape: Tuple[int, int]) -> None:
-        """Create or replace the plotter widget at the requested shape.
+    def _build_plotter(self, view: str) -> None:
+        """Create or replace the plotter widget for the named view purpose.
 
         Tears down the previous QtInteractor (if any), inserts a fresh one
-        into the splitter, and styles all subplots. Stale actor refs are
-        cleared so callers must re-render after switching.
+        into the splitter, and styles every pane the view defines. Stale
+        actor refs are cleared so callers must re-render after switching.
         """
+        spec = VIEWS[view]
         # Tear down any previous plotter.
         if self.plotter is not None:
             try:
@@ -369,37 +441,71 @@ class CCDAF(QtWidgets.QMainWindow):
                 pass
             self.plotter = None
 
-        self.plotter = QtInteractor(self, shape=shape)
+        kwargs = {} if spec.groups is None else {"groups": spec.groups}
+        self.plotter = QtInteractor(self, shape=spec.shape, **kwargs)
+        # From here the live plotter is the new view — the single write site.
+        self._view = spec
         self.plotter.interactor.setMinimumSize(480, 360)
         self._splitter.addWidget(self.plotter.interactor)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([320, 1000])
 
-        if shape == (1, 1):
+        # The X key has one owner: the app. PV clipping and manual correction
+        # both want it, and when each bound it itself, whoever came last won —
+        # or cleared the other's binding outright. Bound once per plotter
+        # (bindings die with it); _on_x_key routes by state at press time.
+        for key in ("x", "X"):
+            self.plotter.add_key_event(key, self._on_x_key)
+
+        if not spec.is_multiview:
             self.plotter.set_background("black")
             self.plotter.add_axes()
         else:
-            for row in range(shape[0]):
-                for col in range(shape[1]):
-                    self.plotter.subplot(row, col)
-
-                    self.plotter.set_background("black")
-                    self.plotter.add_axes()
-                    title = self._title_for_subplot(row, col)
+            for role, loc in spec.roles.items():
+                self.plotter.subplot(*loc)
+                self.plotter.set_background("black")
+                self.plotter.add_axes()
+                title = spec.titles.get(role)
+                if title:
                     self.plotter.add_text(title, font_size=9, color="white",
-                                          name=f"_title_{row}_{col}")
-                                          
-            self.plotter.subplot(*SUBPLOT_3D)
+                                          name=title_actor_name(loc))
+            self._focus_3d()
 
         # Stale references — old actors lived on the destroyed plotter.
         self._mesh_actor = None
         self._slice_actors = {}
 
     def _focus_3d(self) -> None:
-        """Switch the active subplot to the 3D quadrant when in 2×2 mode."""
-        if self._segmentation_mode and self.plotter is not None:
-            self.plotter.subplot(*SUBPLOT_3D)
+        """Switch the active subplot to the 3D pane, when the view has one."""
+        loc = self._view.roles.get("3d")
+        if self._view.is_multiview and loc is not None and self.plotter is not None:
+            self.plotter.subplot(*loc)
+
+    def _on_x_key(self) -> None:
+        """Route the X key to whichever tool it belongs to right now.
+
+        An in-progress PV contour takes it — but only while the clipping
+        panel's checkbox says clipping is active. Otherwise it commits the
+        manual-correction batch, which is a no-op with nothing pending.
+        """
+        if (self.clipper is not None
+                and self.clipping_widget.is_clipping_enabled()
+                and self.clipper.mode is ClipMode.PV_CONTOUR):
+            self.clipper.pick_at_cursor()
+            return
+        if self.editor is not None:
+            self.editor.commit_pending()
+
+    def _on_clipping_toggled(self, enabled: bool) -> None:
+        """Deactivating the clipping panel abandons any clip in flight."""
+        if enabled or self.clipper is None:
+            return
+        if self.clipper.mode is not ClipMode.NONE:
+            self.clipper.cancel()
+            self.plotter.render()
+            self.statusBar().showMessage(
+                "Clipping deactivated — the clip in progress was cancelled.")
 
     # ------------------------------------------------------------------
     # "Update 3D" overlay button (anchored bottom-left of the QtInteractor)
@@ -442,9 +548,10 @@ class CCDAF(QtWidgets.QMainWindow):
     def _reposition_update3d_overlay(self) -> None:
         """Anchor the overlay to the bottom-left of the 3D quadrant.
 
-        With a 2×2 layout and the 3D viewport at (1, 0), the bottom-left
-        of that subplot coincides with the bottom-left half of the
-        QtInteractor widget.
+        With the segmentation view's 2×2 layout and its 3D pane at (1, 0),
+        the bottom-left of that subplot coincides with the bottom-left of
+        the QtInteractor widget. Only that view creates this overlay; a
+        view placing 3D elsewhere would have to generalise this anchoring.
         """
         if self.btn_update3d_overlay is None or self.plotter is None:
             return
@@ -462,43 +569,58 @@ class CCDAF(QtWidgets.QMainWindow):
             self._reposition_update3d_overlay()
         return super().eventFilter(obj, event)
 
+    def _build_mesh_tools(self) -> None:
+        """(Re)bind the mesh-side tools to whichever plotter is current.
+
+        The clipper and the editor both hold the plotter they were built
+        against, so both die with it and both have to be remade whenever it
+        is rebuilt. Only the clipper was, which left manual correction bound
+        to nothing after any trip through the segmentation: tagging re-enables
+        the button regardless, so it looked live and swallowed every click.
+        """
+        if self.loader.mesh is None:
+            return
+        self.clipper = ClippingTool(
+            mesh_getter=lambda: self.loader.mesh,
+            mesh_setter=self._replace_mesh,
+            plotter=self.plotter,
+            on_status=self.statusBar().showMessage,
+        )
+        self.editor = ManualEditor(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_render=self._render_mesh,
+            on_state=lambda s: None,
+            on_commit=self._on_edit_committed,
+        )
+        self.manual_widget.set_active(True)
+        self.manual_widget.set_undo_enabled(False)
+
     def _enter_segmentation_mode(self) -> None:
-        if self._segmentation_mode:
+        if self._view.name == "segmentation":
             return
         # Force-stop any active mesh-side picker — its callbacks are bound
         # to the plotter we're about to destroy.
         self._teardown_mesh_tools(rebuild_clipper=False)
-        self._segmentation_mode = True
-        self._build_plotter((2, 2))
+        self._build_plotter("segmentation")
         if self.loader.mesh is not None:
-            self._render_mesh()
-            self.clipper = ClippingTool(
-                mesh_getter=lambda: self.loader.mesh,
-                mesh_setter=self._replace_mesh,
-                plotter=self.plotter,
-                on_status=self.statusBar().showMessage,
-            )
+            self._render_field()
+            self._build_mesh_tools()
         self._create_update3d_overlay()
 
     def _exit_segmentation_mode(self) -> None:
-        if not self._segmentation_mode:
+        if self._view.name != "segmentation":
             return
         self._destroy_update3d_overlay()
         self._uninstall_slice_observers()
         self._teardown_mesh_tools(rebuild_clipper=False)
-        self._segmentation_mode = False
         self._paint_active = False
         self._seg_3d_actors = []
-        self._build_plotter((1, 1))
+        self._build_plotter("general")
         if self.loader.mesh is not None:
-            self._render_mesh()
+            self._render_field()
             self.plotter.reset_camera()
-            self.clipper = ClippingTool(
-                mesh_getter=lambda: self.loader.mesh,
-                mesh_setter=self._replace_mesh,
-                plotter=self.plotter,
-                on_status=self.statusBar().showMessage,
-            )
+            self._build_mesh_tools()
 
     def _teardown_mesh_tools(self, *, rebuild_clipper: bool) -> None:
         """Drop refs to selector/editor/clipper bound to the old plotter."""
@@ -517,19 +639,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipper = None
         # Reset UI controls that depended on those tools.
         self.seed_widget.set_undo_enabled(False)
+        self.seed_widget.set_save_enabled(False)
         self.tagging_widget.set_seeds_complete(False)
         self.manual_widget.reset_state()
         self.clipping_widget.reset_state()
-
-    @staticmethod
-    def _title_for_subplot(row: int, col: int) -> str:
-        if (row, col) == SUBPLOT_AXIAL:
-            return TITLE_FOR["axial"]
-        if (row, col) == SUBPLOT_SAGITTAL:
-            return TITLE_FOR["sagittal"]
-        if (row, col) == SUBPLOT_CORONAL:
-            return TITLE_FOR["coronal"]
-        return TITLE_FOR["3d"]
 
     @staticmethod
     def _section(text: str) -> QtWidgets.QLabel:
@@ -597,19 +710,25 @@ class CCDAF(QtWidgets.QMainWindow):
     def _action_load(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load mesh", str(self.recent_folder),
-            "Mesh files (*.vtk *.vtp *.ply *.stl *.obj);;All files (*)",
+            "All files (*);;"
+            "Meshes (*.vtk *.vtp *.ply *.stl *.obj);;"
+            "Bundle (*.pkl *.pickle)",
         )
-        if fn:
+        if not fn:
+            return
+        if Path(fn).suffix.lower() in (".pkl", ".pickle"):
+            self._load_bundle(fn)
+        else:
             self._load_mesh(fn)
 
-    def _load_mesh(self, filename: str) -> None:
-        try:
-            mesh = self.loader.load(filename)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
-            return
-        self.recent_folder = Path(filename).resolve().parent
+    def _adopt_mesh(self, mesh: pv.PolyData, source_name: str) -> None:
+        """Common setup once ``mesh`` is the working mesh, whatever its source.
 
+        The loader's ``mesh``/``path`` must already be set. Rebuilds the
+        mesh-side tools against the current plotter, refreshes the panels,
+        and renders — everything a fresh mesh needs and nothing EAM- or
+        seed-specific, which the callers add.
+        """
         self.tagger = RegionTagger(mesh)
         self.editor = None
         self.clipper = ClippingTool(
@@ -619,14 +738,18 @@ class CCDAF(QtWidgets.QMainWindow):
             on_status=self.statusBar().showMessage,
         )
         self._reset_view()
+        # A plain mesh has fields too (elemTag, and whatever the file carried),
+        # so the visualisation panel applies to it just as much as to a mapping.
+        self._populate_fields()
+        self._set_section_visible("visualisation", True)
         self._render_mesh()
         self._focus_3d()
         self.plotter.reset_camera()
         self.mesh_info.update_info(mesh)
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
-        self.statusBar().showMessage(f"Loaded {Path(filename).name}")
-        
-        ################ manual editor active from beginning ######
+        self.statusBar().showMessage(f"Loaded {source_name}")
+
+        # Manual editor live from the start (see the X-key routing).
         self.editor = ManualEditor(
             mesh=self.loader.mesh,
             plotter=self.plotter,
@@ -636,21 +759,140 @@ class CCDAF(QtWidgets.QMainWindow):
         )
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
-        ################ manual editor active from beginning ######
 
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
+        self.seed_widget.set_load_enabled(True)
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
+        self._sync_close_action()
+
+    def _load_mesh(self, filename: str) -> None:
+        try:
+            mesh = self.loader.load(filename)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        self.recent_folder = Path(filename).resolve().parent
+        self._reset_eam_state()
+        self._adopt_mesh(mesh, Path(filename).name)
+
+    def _load_bundle(self, filename: str) -> None:
+        """Load a File → Save pickle bundle: mesh, tagging, seeds, electrodes."""
+        try:
+            mesh, seeds, electrodes = read_bundle(filename)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        self.recent_folder = Path(filename).resolve().parent
+        self.loader.mesh = mesh
+        self.loader.path = filename
+        self._reset_eam_state()
+        self._adopt_mesh(mesh, Path(filename).name)
+
+        # Electrodes, if the bundle carried them: restore the state EAM
+        # export needs and draw them.
+        elec_points = self._electrode_points_from_record(electrodes)
+        if elec_points is not None and len(elec_points):
+            self._eam_data = EAMData(
+                mesh=mesh,
+                field_names=list(mesh.point_data.keys()),
+                electrode_points=elec_points,
+                map_name=Path(filename).stem,
+                electrodes=electrodes,
+            )
+            self._eam_electrode_points = elec_points
+            self.vis_widget.set_electrodes_available(True)
+            self.act_eam_export.setEnabled(True)
+            self._render_field()
+
+        # Seeds last, so their markers land on the final view.
+        if seeds:
+            self._apply_loaded_seeds(seeds, Path(filename).name)
+
+    @staticmethod
+    def _electrode_points_from_record(electrodes):
+        """The (N, 3) electrode coordinates from a raw Carto record, or None."""
+        if not electrodes:
+            return None
+        data = np.asarray(electrodes.get("data"), dtype=float)
+        if data.ndim == 2 and data.shape[0] > 0 and data.shape[1] >= 4:
+            return data[:, 1:4]
+        return None
+
+    def _reset_eam_state(self) -> None:
+        """Drop any loaded mapping's state — a fresh non-EAM mesh has none."""
+        self._eam_data = None
+        self._eam_electrode_points = None
+        self._eam_electrode_actor = None
+        self._eam_bar_title = None
+        self._eam_bar_geom = None
+        self.vis_widget.set_electrodes_available(False)
+        self.act_eam_export.setEnabled(False)
+
+    def _sync_close_action(self) -> None:
+        """File → Close applies whenever a mesh or a segmentation is open."""
+        self.act_close.setEnabled(self.loader.mesh is not None
+                                  or self._seg_array is not None)
+
+    def _action_close(self) -> None:
+        """File → Close: unload everything, back to the startup state."""
+        if self._seg_array is not None:
+            self._action_seg_close()
+
+        # EAM state.
+        self._eam_directory = None
+        self._eam_format = None
+        self._eam_selected_file = None
+        self._eam_data = None
+        self._eam_electrode_points = None
+        self._eam_electrode_actor = None
+        self._eam_bar_title = None
+        self._eam_bar_geom = None
+        self._eam_warp_note = None
+        self.vis_widget.set_electrodes_available(False)
+        self.act_eam_export.setEnabled(False)
+
+        # Mesh state and the tools bound to it.
+        self._teardown_mesh_tools(rebuild_clipper=False)
+        self.tagger = None
+        self.loader.mesh = None
+        self.loader.path = None
+        self._seg_source = None
+        self._transfer_note = None
+
+        # The view and the panels, as the app starts.
+        self._reset_view()
+        self.plotter.render()
+        self.mesh_info.update_info(None)
+        self.vis_widget.set_fields([], [])
+        self._set_section_visible("visualisation", False)
+        self.manual_widget.set_active(False)
+        self.seed_widget.set_start_enabled(False)
+        self.seed_widget.set_reset_enabled(False)
+        self.seed_widget.set_load_enabled(False)
+        self.seed_widget.set_prompt("Load a mesh to begin.")
+        self.seed_widget.set_progress("Seeds: 0 / 6")
+        self.act_save.setEnabled(False)
+        self.act_seg_from_mesh.setEnabled(False)
+        self._sync_close_action()
+        self.statusBar().showMessage("Closed.")
 
     def _action_save(self) -> None:
         if self.loader.mesh is None:
             return
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save mesh", str(self.recent_folder), "VTK (*.vtk);;All files (*)",
+        mesh = self.loader.mesh
+        dlg = SaveMeshDialog(
+            point_fields=list(mesh.point_data.keys()),
+            cell_fields=list(mesh.cell_data.keys()),
+            start_dir=str(self.recent_folder), parent=self,
         )
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        fn = dlg.selected_path()
         if not fn:
             return
+        fields = dlg.selected_fields()
         self.recent_folder = Path(fn).resolve().parent
         if Path(fn).exists():
             reply = QtWidgets.QMessageBox.question(
@@ -664,10 +906,445 @@ class CCDAF(QtWidgets.QMainWindow):
                 return
 
         try:
-            self.loader.save(fn)
-            self.statusBar().showMessage(f"Saved to {fn}")
+            if dlg.selected_format() == FORMAT_PICKLE:
+                self._save_bundle(fn, fields)
+            else:
+                binary = dlg.selected_binary()
+                self.loader.save(fn, fields=fields, binary=binary)
+                written = ", ".join(fields) if fields else "no fields"
+                self.statusBar().showMessage(
+                    f"Saved to {fn} ({'binary' if binary else 'ASCII'}) "
+                    f"— wrote {written}")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
+
+    def _save_bundle(self, fn: str, fields: "list[str]") -> None:
+        """Write the pickle bundle: surface (chosen point fields), seeds,
+        electrodes and elemTag, so the mesh reloads with all of them."""
+        keep = set(fields)
+        surface = self.loader.mesh.copy(deep=True)
+        # polydata_to_carto_dict turns every 1-D point field into a colour
+        # column, so honour the field selection by dropping the rest first.
+        for name in list(surface.point_data.keys()):
+            if name not in keep:
+                surface.point_data.remove(name)
+
+        seeds = None
+        if self.selector is not None and self.selector.is_complete:
+            seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
+
+        electrodes = self._eam_data.electrodes if self._eam_data else None
+        export_binary(
+            fn, surface,
+            electrodes=electrodes,
+            electrode_points=self._eam_electrode_points,
+            seeds=seeds,
+            include_elem_tag=("elemTag" in keep),
+        )
+        parts = []
+        if seeds:
+            parts.append(f"{len(seeds)} seeds")
+        if electrodes is not None:
+            parts.append("electrodes")
+        extra = f" (+ {', '.join(parts)})" if parts else ""
+        self.statusBar().showMessage(f"Saved bundle to {fn}{extra}")
+
+    # ==================================================================
+    # EAM actions
+    # ==================================================================
+    def _action_load_eam(self) -> None:
+        """Pick an EAM source, resolve the map name, and load the mapping.
+
+        * ``Carto-Study``    — the picked study XML feeds
+          ``extract_map_list_names``; the user then chooses one mapping from a
+          radio-button pop-up.
+        * ``Carto-mappings`` — the map name is the picked ``.mesh`` file's stem.
+        """
+        dlg = EAMLoadDialog(start_dir=str(self.recent_folder), parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        path = dlg.selected_path()
+        if not path:
+            return
+        self._eam_selected_file = path
+        self._eam_directory = str(Path(path).parent)
+        self._eam_format = dlg.selected_format()
+        self.recent_folder = Path(self._eam_directory)
+
+        if self._eam_format == FORMAT_CARTO_STUDY:
+            try:
+                map_names = extract_map_list_names(path)
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(
+                    self, "EAM", f"Could not read the study file:\n{exc}")
+                return
+            if not map_names:
+                QtWidgets.QMessageBox.warning(
+                    self, "EAM", "This study lists no mappings.")
+                return
+            sel = MappingSelectDialog(map_names, parent=self)
+            if sel.exec_() != QtWidgets.QDialog.Accepted:
+                return
+            map_name = sel.selected_mapping()
+        elif self._eam_format == FORMAT_CARTO_MAPPINGS:
+            map_name = Path(path).stem
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "EAM",
+                "Loading is supported for the Carto-Study and Carto-mappings "
+                "formats. Pick one of those to load a mapping.")
+            return
+
+        if not map_name:
+            QtWidgets.QMessageBox.warning(self, "EAM", "No mapping selected.")
+            return
+        self._load_eam_mapping(self._eam_directory, map_name)
+
+    def _load_eam_mapping(self, directory: str, map_name: str) -> None:
+        """Read ``<map_name>.mesh`` + electrodes and adopt them as the working
+        mesh, then show the EAM panel and render the first field + electrodes."""
+        self.statusBar().showMessage(f"Loading EAM mapping '{map_name}'…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            eam = load_carto_mapping(directory, map_name)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "EAM load failed",
+                f"Could not load mapping '{map_name}':\n{exc}")
+            self.statusBar().showMessage("EAM load failed.")
+            return
+
+        mesh = eam.mesh
+        self._eam_data = eam
+        self._eam_electrode_points = eam.electrode_points
+        self.vis_widget.set_electrodes_available(
+            self._eam_electrode_points is not None
+            and len(self._eam_electrode_points) > 0)
+
+        # Adopt as the working mesh and (re)build the mesh-side tools.
+        self.loader.mesh = mesh
+        self.loader.path = None
+        self.tagger = RegionTagger(mesh)
+        self.clipper = ClippingTool(
+            mesh_getter=lambda: self.loader.mesh,
+            mesh_setter=self._replace_mesh,
+            plotter=self.plotter,
+            on_status=self.statusBar().showMessage,
+        )
+        self.editor = ManualEditor(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_render=self._render_mesh,
+            on_state=lambda s: None,
+            on_commit=self._on_edit_committed,
+        )
+        self.manual_widget.set_active(True)
+        self.manual_widget.set_undo_enabled(False)
+        self.seed_widget.set_start_enabled(True)
+        self.seed_widget.set_reset_enabled(True)
+        self.seed_widget.set_prompt(
+            "EAM mapping loaded. Click 'Start seed selection'.")
+        self.seed_widget.set_load_enabled(True)
+        self.act_save.setEnabled(True)
+        self.act_seg_from_mesh.setEnabled(True)
+        self.mesh_info.update_info(mesh)
+
+        # EAM display panel: populate fields and reveal it.
+        self._populate_fields()
+        if eam.field_names:
+            self.vis_widget.select_field(eam.field_names[0])
+        self._set_section_visible("visualisation", True)
+        self.act_eam_export.setEnabled(True)
+        self._sync_close_action()
+
+        # Render coloured by the first field, with electrode spheres.
+        self._reset_view()
+        self._render_field()
+        self._focus_3d()
+        self.plotter.reset_camera()
+        self.plotter.render()
+        self.statusBar().showMessage(
+            f"Loaded EAM mapping '{map_name}': {mesh.n_points} points, "
+            f"{len(self._eam_electrode_points)} electrodes.")
+
+    def _clear_scalar_bars(self) -> None:
+        """Drop every scalar bar on the plotter.
+
+        The mesh is always the single 'atrium' actor, so at most one bar is
+        ever meant to be on screen. Bars are keyed by title, so without this
+        each new title (another EAM field, or Regions) stacks a further bar.
+
+        An interactive bar is two props: the actor pyvista tracks by title,
+        and the widget's representation, which is what actually draws it.
+        Taking the mesh actor away makes pyvista forget the bar its mapper
+        fed — it drops the actor and the title, and leaves the representation
+        on screen with nothing left that names it. So the widgets are
+        disabled from their own dict rather than through the titles pyvista
+        still admits to; going by title alone leaves the old bar painted
+        beside the new one.
+        """
+        widgets = getattr(self.plotter.scalar_bars, "_scalar_bar_widgets", {})
+        for widget in list(widgets.values()):
+            try:
+                widget.SetEnabled(0)
+            except Exception:
+                pass
+        for title in list(self.plotter.scalar_bars.keys()):
+            try:
+                self.plotter.remove_scalar_bar(title, render=False)
+            except Exception:
+                pass
+        widgets.clear()
+
+    def _eam_bar_widget(self, title: Optional[str]):
+        """The interactive widget behind a scalar bar, or None.
+
+        pyvista keeps these in a private dict on the ScalarBars collection;
+        there is no public accessor.
+        """
+        if title is None:
+            return None
+        widgets = getattr(self.plotter.scalar_bars, "_scalar_bar_widgets", {})
+        return widgets.get(title)
+
+    def _remember_eam_bar_geom(self) -> None:
+        """Note where the user dragged/resized the EAM bar, so the next render
+        restores it instead of snapping back to the default corner."""
+        widget = self._eam_bar_widget(self._eam_bar_title)
+        if widget is None:
+            return
+        try:
+            rep = widget.GetRepresentation()
+            self._eam_bar_geom = (tuple(rep.GetPosition()),
+                                  tuple(rep.GetPosition2()))
+        except Exception:
+            pass
+
+    def _eam_bar_default_geom(self):
+        """Where a fresh EAM bar goes: horizontal, EAM_BAR_ASPECT:1 on screen.
+
+        VTK sizes the bar in viewport fractions, so the height fraction that
+        reads as 20:1 depends on the window's aspect. A 2x2 segmentation grid
+        halves both sides and so leaves the ratio — and this formula — intact.
+        """
+        try:
+            win_w, win_h = (float(v) for v in self.plotter.window_size)
+        except Exception:
+            win_w = win_h = 0.0
+        if win_w <= 0.0 or win_h <= 0.0:
+            win_w = win_h = 1.0
+        height = EAM_BAR_WIDTH * (win_w / win_h) / EAM_BAR_ASPECT
+        return (EAM_BAR_POS_X, EAM_BAR_POS_Y), (EAM_BAR_WIDTH, height)
+
+    def _enable_bar_interaction(self, title: str, geometry=None) -> None:
+        """Let the mouse move and freely resize an interactive scalar bar.
+
+        The widget's representation is what interaction drives, and it starts
+        out disagreeing with the actor pyvista placed — until
+        ``BuildRepresentation`` copies the representation onto the actor,
+        resize drags are swallowed. ``geometry`` (``(px, py), (w, h)``) sets
+        the representation explicitly; without it the representation adopts
+        the actor's current position, so the bar does not jump. Orientation
+        is left to the representation's AutoOrient, which follows the bar's
+        aspect — so a bar dragged tall turns vertical.
+        """
+        widget = self._eam_bar_widget(title)
+        if widget is None:      # non-interactive bar: add_mesh's size stands
+            return
+        try:
+            widget.SetResizable(True)
+            widget.SetRepositionable(True)
+            rep = widget.GetRepresentation()
+            rep.ProportionalResizeOff()    # width and height move independently
+            rep.SetShowBorderToActive()    # handles appear on hover, to grab
+            if geometry is None:
+                actor = self.plotter.scalar_bars[title]
+                rep.SetPosition(actor.GetPosition())
+                rep.SetPosition2(actor.GetPosition2())
+            else:
+                (px, py), (w, h) = geometry
+                rep.SetPosition(px, py)
+                rep.SetPosition2(w, h)
+            rep.BuildRepresentation()
+        except Exception:
+            pass
+
+    def _place_eam_scalar_bar(self, title: str) -> None:
+        """Give the field's scalar bar our geometry and mouse interaction.
+
+        The geometry passed to ``add_mesh`` is ignored once the widget's
+        representation takes over, so it is set on the representation —
+        the user's dragged position when there is one, the default corner
+        otherwise.
+        """
+        self._eam_bar_title = title
+        try:
+            # pyvista draws an 'above'/'below' swatch whenever the lookup table
+            # carries an out-of-range colour, and offers no kwarg to stop it —
+            # the swatch would show even where no data is out of range.
+            bar = self.plotter.scalar_bars[title]
+            bar.DrawAboveRangeSwatchOff()
+            bar.DrawBelowRangeSwatchOff()
+        except Exception:
+            pass
+        self._enable_bar_interaction(
+            title, geometry=self._eam_bar_geom or self._eam_bar_default_geom())
+
+    def _populate_fields(self, keep_selection: bool = False) -> None:
+        """Offer every field the current mesh carries, point and cell alike."""
+        mesh = self.loader.mesh
+        if mesh is None:
+            return
+        previous = self.vis_widget.current_field() if keep_selection else None
+        self.vis_widget.set_fields(
+            point_fields=list(mesh.point_data.keys()),
+            cell_fields=[k for k in mesh.cell_data.keys() if k != "render_idx"],
+            categorical=CATEGORICAL_FIELDS,
+        )
+        if previous is not None:
+            self.vis_widget.select_field(previous)
+
+    def _render_field(self, *_args) -> None:
+        """Draw whichever field the visualisation widget has selected.
+
+        Label fields go through the region path — discrete colours and names —
+        because a continuous ramp over labels says nothing. Everything else is
+        a measurement and gets the colour map.
+        """
+        if self.loader.mesh is None:
+            return
+        if self.vis_widget.current_field() is None:
+            self._render_mesh()
+            return
+        if self.vis_widget.is_categorical():
+            self._render_mesh()
+        else:
+            self._render_scalar_field()
+
+    def _render_scalar_field(self, *_args) -> None:
+        """Colour the working mesh by the selected measured field and (re)draw
+        the EAM electrodes. Falls back to a plain surface when the field is
+        absent or all no-data.
+
+        Works for a field on either association: point values are interpolated
+        across each triangle by the mapper, cell values are flat over it.
+
+        The range is the field's own when *auto* is ticked, otherwise the
+        widget's; values outside a manual range are flagged brown (below) and
+        magenta (above).
+        """
+        mesh = self.loader.mesh
+        if mesh is None:
+            return
+        self._focus_3d()
+        # Bars first: removing the mesh actor makes pyvista forget the bar it
+        # fed, and a forgotten bar can no longer be cleared by title.
+        self._remember_eam_bar_geom()
+        self._clear_scalar_bars()
+        try:
+            self.plotter.remove_actor("atrium", reset_camera=False)
+        except Exception:
+            pass
+        self._mesh_actor = None
+
+        field = self.vis_widget.current_field()
+        arr = None
+        if field and field in mesh.point_data:
+            arr = np.asarray(mesh.point_data[field], dtype=float)
+        elif field and field in mesh.cell_data:
+            arr = np.asarray(mesh.cell_data[field], dtype=float)
+        if arr is not None and np.isfinite(arr).any():
+            finite = arr[np.isfinite(arr)]
+            if self.vis_widget.is_auto():
+                lo, hi = float(finite.min()), float(finite.max())
+                self.vis_widget.set_range_display(lo, hi)
+            else:
+                lo, hi = self.vis_widget.clim()
+            if hi <= lo:   # constant field, or min/max typed the wrong way round
+                lo, hi = min(lo, hi) - 0.5, max(lo, hi) + 0.5
+            n_bands = self.vis_widget.n_isolines()
+            # The bar spans the data as well as the chosen range, so data left
+            # outside the range stays visible on it as a flat brown/magenta run.
+            bar_lo = min(lo, float(finite.min()))
+            bar_hi = max(hi, float(finite.max()))
+            lut = _eam_lookup_table(self.vis_widget.current_cmap(),
+                                    lo, hi, bar_lo, bar_hi, n_bands)
+            # Interactive scalar bars are unsupported on multi-renderer
+            # plotters — disable them on any multi-view layout.
+            interactive = not self._view.is_multiview
+            (px, py), (bw, bh) = self._eam_bar_geom or self._eam_bar_default_geom()
+            self._mesh_actor = self.plotter.add_mesh(
+                mesh, scalars=field, cmap=lut, clim=(bar_lo, bar_hi),
+                nan_color="lightgrey", show_edges=False, name="atrium",
+                reset_camera=False,
+                scalar_bar_args={
+                    "title": str(field),
+                    "n_labels": 3,        # min, mid, max
+                    # n_colors is left out on purpose: the bar then takes the
+                    # table's own entry count, so the brown/magenta runs land
+                    # on the boundaries rather than being resampled across them.
+                    # 'vertical' must be explicit: pyvista only sets it from a
+                    # vertical theme, and its None branches misplace the bar.
+                    "vertical": False,
+                    "width": bw,
+                    "height": bh,
+                    "position_x": px,
+                    "position_y": py,
+                    # The theme's font is black and the 3D view is black.
+                    "color": "white",
+                    "interactive": interactive,
+                },
+            )
+            self._place_eam_scalar_bar(str(field))
+        else:
+            self._mesh_actor = self.plotter.add_mesh(
+                mesh, color="lightgrey", show_edges=False, name="atrium",
+                reset_camera=False,
+            )
+        self._draw_electrodes()
+        self.plotter.render()
+
+    def _draw_electrodes(self) -> None:
+        """(Re)draw the EAM electrode positions as Gaussian points.
+
+        ``points_gaussian`` is pyvista's equivalent of ParaView's Point
+        Gaussian representation; spheres are its sphere shader preset. The
+        default gaussian-blur preset washes the electrodes out against the
+        surface, leaving them visible only where they overhang the background.
+        """
+        try:
+            self.plotter.remove_actor("eam_electrodes", reset_camera=False)
+        except Exception:
+            pass
+        self._eam_electrode_actor = None
+        pts = self._eam_electrode_points
+        if pts is None or len(pts) == 0 or self.loader.mesh is None:
+            return
+        if not self.vis_widget.show_electrodes():
+            return   # the actor is already removed above; stay hidden
+        self._focus_3d()
+        b = self.loader.mesh.bounds
+        diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
+        radius = max(EAM_ELECTRODE_RADIUS_FRAC * diag, 1e-6)
+        cloud = pv.PolyData(np.asarray(pts, dtype=float))
+        # The Gaussian mapper scales by point_size * dataset.length / 1300;
+        # invert that so the blobs keep a fixed size in world units.
+        length = float(cloud.length) or 1.0
+        point_size = radius * 1300.0 / length
+        self._eam_electrode_actor = self.plotter.add_mesh(
+            cloud, style="points_gaussian", color=EAM_ELECTRODE_COLOR,
+            point_size=point_size, emissive=False,
+            render_points_as_spheres=True, name="eam_electrodes",
+            reset_camera=False, pickable=False,
+        )
+
+    def _on_electrodes_toggled(self, _on: bool) -> None:
+        """Show/hide the electrode actor without re-rendering the field.
+
+        A direct redraw works in every view — the actor otherwise lingers
+        across the region view, which never calls _draw_electrodes."""
+        self._draw_electrodes()
+        self.plotter.render()
 
     # ==================================================================
     # Seed actions
@@ -707,6 +1384,9 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _on_seed_progress(self, next_name: str, done: int, total: int) -> None:
         self.seed_widget.set_progress(f"Seeds: {done} / {total}")
+        # Saving means something only for a complete selection; progress is
+        # emitted on every transition, so this tracks undo and reset too.
+        self.seed_widget.set_save_enabled(done == total)
         if done < total and next_name:
             color = SEED_COLOR.get(next_name, "#ffffff")
             self.seed_widget.set_prompt(
@@ -719,6 +1399,78 @@ class CCDAF(QtWidgets.QMainWindow):
     def _on_seeds_complete(self, seeds: Dict[str, Seed]) -> None:
         self.tagging_widget.set_seeds_complete(True)
         self.statusBar().showMessage("All seeds collected. Ready to tag.")
+
+    def _action_save_seeds(self) -> None:
+        if self.selector is None or not self.selector.is_complete:
+            return
+        stem = Path(self.loader.path).stem if self.loader.path else "mesh"
+        default = str(Path(self.recent_folder) / f"{stem}.seeds.json")
+        fn, filt = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save seeds", default,
+            "Seeds JSON (*.json);;Surface + seeds pickle (*.pkl)",
+        )
+        if not fn:
+            return
+        if not fn.lower().endswith((".json", ".pkl", ".pickle")):
+            fn += ".pkl" if "pickle" in filt else ".json"
+        self.recent_folder = Path(fn).resolve().parent
+        seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
+        try:
+            save_seeds(fn, seeds, mesh=self.loader.mesh)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Save seeds failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved {len(seeds)} seeds to {fn}")
+
+    def _action_load_seeds(self) -> None:
+        if self.loader.mesh is None:
+            return
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load seeds", str(self.recent_folder),
+            "Seed files (*.json *.pkl *.pickle);;All files (*)",
+        )
+        if not fn:
+            return
+        self.recent_folder = Path(fn).resolve().parent
+        try:
+            positions = load_seeds(fn)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load seeds failed", str(exc))
+            return
+        self._apply_loaded_seeds(positions, Path(fn).name)
+
+    def _apply_loaded_seeds(self, positions: Dict[str, np.ndarray],
+                            source_name: str) -> None:
+        """Rebuild the seed selection from saved coordinates on the live mesh.
+
+        Each coordinate is snapped to the current surface; a validation
+        failure stops there, keeps the earlier seeds and resumes picking.
+        Shared by the seed panel's Load and the pickle-bundle load.
+        """
+        if self.selector is not None:
+            self.selector.stop()
+        self._focus_3d()
+        self.tagging_widget.set_seeds_complete(False)
+        self.selector = SeedSelector(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_progress=self._on_seed_progress,
+            on_complete=self._on_seeds_complete,
+        )
+        problems = self.selector.apply_positions(positions)
+        self.seed_widget.set_undo_enabled(True)
+        if problems:
+            self.selector.resume()
+            QtWidgets.QMessageBox.warning(
+                self, "Seeds partially loaded",
+                "\n".join(problems)
+                + "\n\nThe seeds before the failure are placed — pick the "
+                  "remaining ones in the 3D view.",
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Loaded {len(SEED_ORDER)} seeds from {source_name} "
+                "(snapped to the current surface).")
 
     # ==================================================================
     # Tagging
@@ -928,6 +1680,9 @@ class CCDAF(QtWidgets.QMainWindow):
     # ==================================================================
     def _replace_mesh(self, new_mesh: pv.PolyData) -> None:
         self.loader.mesh = new_mesh
+        # Post-processing can add or drop arrays, so re-offer what the new
+        # mesh actually has — keeping the user on their field if it survived.
+        self._populate_fields(keep_selection=True)
         self.tagger = RegionTagger(new_mesh)
         if self.editor is not None:
             self.editor = ManualEditor(
@@ -940,21 +1695,106 @@ class CCDAF(QtWidgets.QMainWindow):
             self.manual_widget.set_undo_enabled(False)
         self.mesh_info.update_info(new_mesh)
 
+    def _action_export_eam(self) -> None:
+        """Write the loaded mapping out as it currently stands — repairs,
+        smoothing and the electrode displacement included."""
+        if self._eam_data is None or self.loader.mesh is None:
+            return
+        dlg = EAMExportDialog(
+            start_dir=str(self.recent_folder),
+            default_name=str(self._eam_data.map_name).strip().replace(" ", "_"),
+            parent=self,
+        )
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        path = dlg.selected_path()
+        if not path:
+            QtWidgets.QMessageBox.warning(self, "Export", "Give the file a name.")
+            return
+        if not os.path.isdir(os.path.dirname(path)):
+            QtWidgets.QMessageBox.warning(
+                self, "Export", f"No such directory:\n{os.path.dirname(path)}")
+            return
+        if os.path.exists(path):
+            reply = QtWidgets.QMessageBox.question(
+                self, "Overwrite file", f"{path} already exists. Overwrite?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if reply != QtWidgets.QMessageBox.Yes:
+                return
+        try:
+            if dlg.selected_format() == EXPORT_BINARY:
+                export_binary(path, self.loader.mesh,
+                              electrodes=self._eam_data.electrodes,
+                              electrode_points=self._eam_electrode_points)
+            else:
+                export_vtk(path, self.loader.mesh, binary=dlg.selected_binary())
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Exported to {path}")
+
+    def _on_surface_moved(self, old_mesh, new_mesh) -> None:
+        """Carry the EAM electrodes when the wall moves under them.
+
+        One path for both callers — post-processing's smoothing, and a
+        segmentation round trip — because the electrodes are read from the
+        two surfaces as shapes, which is all a marching-cubes result has in
+        common with the Carto mesh it came from.
+
+        Neither mesh is altered; this only moves the electrodes. No-op when
+        no mapping is loaded.
+        """
+        pts = self._eam_electrode_points
+        if self._eam_data is None or pts is None or len(pts) == 0:
+            return
+        if (old_mesh is None or new_mesh is None
+                or old_mesh.n_cells == 0 or new_mesh.n_cells == 0):
+            return
+        self._eam_warp_note = None
+        try:
+            self._eam_electrode_points = displace_electrodes_for(
+                pts, old_mesh, new_mesh,
+                on_status=lambda msg: setattr(self, "_eam_warp_note", msg))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "EAM",
+                f"The surface moved, but the electrodes could not follow "
+                f"it:\n{exc}\n\nThey are left where they were.")
+
     def _on_postproc_applied(self) -> None:
-        self._render_mesh()
+        # Post-processing keeps the point fields, so an EAM mapping stays
+        # displayable — put back whichever view the user chose rather than
+        # dropping them into the region view.
+        self._render_field()
         self._focus_3d()
         self.plotter.reset_camera()
+        # Report the warp last. This runs from mesh_changed, and the widget
+        # posts its own "done" message straight after emitting it — so defer
+        # by one event-loop pass or the note is buried immediately.
+        note = getattr(self, "_eam_warp_note", None)
+        if note:
+            self._eam_warp_note = None
+            QtCore.QTimer.singleShot(
+                0, lambda: self.statusBar().showMessage(note, 20000))
 
     def _reset_view(self) -> None:
-        """Clear the 3D viewport — preserves segmentation slice views in 2×2 mode."""
+        """Clear the 3D viewport — other panes (e.g. slice views) survive."""
         self._focus_3d()
+        # plotter.clear() forgets the scalar-bar widgets without disabling
+        # them, which leaves their representations drawn over the next mesh.
+        self._clear_scalar_bars()
         self.plotter.clear()
         self.plotter.set_background("black")
         self.plotter.add_axes()
-        if self._segmentation_mode:
+        # clear() also wiped the pane's title — put back the one the view
+        # defines for the 3D role, if any.
+        title = self._view.titles.get("3d")
+        if title:
             self.plotter.add_text(
-                TITLE_FOR["3d"], font_size=9, color="white",
-                name=f"_title_{SUBPLOT_3D[0]}_{SUBPLOT_3D[1]}",
+                title, font_size=9, color="white",
+                name=title_actor_name(self._view.roles["3d"]),
             )
         self._mesh_actor = None
 
@@ -963,6 +1803,8 @@ class CCDAF(QtWidgets.QMainWindow):
         if mesh is None:
             return
         self._focus_3d()
+        # Same ordering as _render_scalar_field, and for the same reason.
+        self._clear_scalar_bars()
         if self._mesh_actor is not None:
             try:
                 self.plotter.remove_actor(self._mesh_actor, reset_camera=False)
@@ -997,16 +1839,24 @@ class CCDAF(QtWidgets.QMainWindow):
                 "title": "Regions",
                 "n_labels": 0,
                 "label_font_size": 18,
-                "fmt": "%d",
+                # No "fmt": this bar labels regions through `annotations` and
+                # draws no tick labels. VTK still formats them internally, and
+                # applies the format to a double — "%d" is invalid there and
+                # aborts (fatally, from VTK 9.6: "invalid format specifier").
                 "shadow": True,
                 # Interactive scalar bars are unsupported on multi-renderer
-                # plotters — disable them when in 4-quadrant mode.
-                "interactive": not self._segmentation_mode,
+                # plotters — disable them on any multi-view layout.
+                "interactive": not self._view.is_multiview,
             }
         )
         sbar = self.plotter.scalar_bar
         sbar.SetUnconstrainedFontSize(True)
         sbar.SetAnnotationTextScaling(False)
+        # The Regions bar was interactive but its representation was never
+        # built, so the widget and the actor disagreed about its geometry
+        # and resize drags — the vertical ones visibly — were swallowed.
+        # Same treatment as the field bar, keeping the default vertical slot.
+        self._enable_bar_interaction("Regions")
 
         self.plotter.render()
 
@@ -1027,6 +1877,10 @@ class CCDAF(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
             return
         self._set_segmentation(img)
+        # A segmentation off disk has no source surface, so nothing can be
+        # carried onto the mesh it converts to — whatever is loaded is
+        # unrelated geometry, and matching against it would be nonsense.
+        self._seg_source = None
         self.statusBar().showMessage(f"Loaded segmentation {Path(fn).name}")
 
     def _action_seg_save(self) -> None:
@@ -1057,11 +1911,20 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Voxelising mesh…")
         QtWidgets.QApplication.processEvents()
         try:
-            img = self._voxelise_polydata(self.loader.mesh, spacing, flip=flip)
+            img = voxelise_polydata(self.loader.mesh, spacing, flip=flip)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Voxelisation failed", str(exc))
             return
         self._set_segmentation(img)
+        # Remember what this segmentation was made from. Converting it back
+        # needs all three: the surface to read the fields off, the flip to
+        # undo (the export prompt asks again, and may disagree), and the
+        # spacing, which sets how far a rebuilt wall can honestly stray.
+        self._seg_source = {
+            "mesh": self.loader.mesh.copy(deep=True),
+            "flip": bool(flip),
+            "spacing": tuple(float(s) for s in spacing),
+        }
         self.statusBar().showMessage(
             f"Voxelisation complete — {img.GetSize()} @ spacing {spacing} (flip={flip})."
         )
@@ -1101,7 +1964,8 @@ class CCDAF(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents()
         try:
             self._sync_sitk_from_array()
-            poly = self._segmentation_to_polydata(
+            poly = segmentation_to_polydata(
+                self._seg_sitk,
                 flip=flip,
                 filt_stdev=list(self.seg_widget.gfilt_standard_deviation()),
                 filt_rfact=list(self.seg_widget.gfilt_radius_factor()),
@@ -1121,15 +1985,71 @@ class CCDAF(QtWidgets.QMainWindow):
         new_mesh.cell_data["elemTag"] = np.full(
             new_mesh.n_cells, BODY_LABEL, dtype=np.int32
         )
+        # Marching cubes attaches its own point normals, for shading. They are
+        # not a field of this mesh: they would show up in the visualisation
+        # list beside the measured quantities, and be written as three unnamed
+        # columns of a Carto export. Saving recomputes normals from the
+        # geometry when asked, exactly as it does for a Carto mapping.
+        if "Normals" in new_mesh.point_data:
+            new_mesh.point_data.remove("Normals")
+        self._carry_source_onto(new_mesh, export_flip=flip)
         self._replace_mesh(new_mesh)
-        self._render_mesh()
+        self._render_field()
         self.act_save.setEnabled(True)
         self.plotter.reset_camera()
         self.plotter.render()
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
-        self.statusBar().showMessage("Segmentation converted and visualised.")
+        notes = [n for n in (getattr(self, "_transfer_note", None),
+                             getattr(self, "_eam_warp_note", None)) if n]
+        self._eam_warp_note = self._transfer_note = None
+        self.statusBar().showMessage(
+            " ".join(["Segmentation converted and visualised."] + notes),
+            20000 if notes else 0)
+
+    # ------------------------------------------------------------------
+    def _carry_source_onto(self, new_mesh: pv.PolyData, *,
+                           export_flip: bool) -> None:
+        """Carry the voxelised surface's fields and electrodes onto the
+        surface rebuilt from the segmentation.
+
+        Does nothing unless this segmentation was made from a mesh here: one
+        loaded from disk has no source to read, and the mesh that happens to
+        be open is unrelated geometry.
+
+        The two flip prompts are independent, so the round trip mirrors the
+        anatomy whenever they disagree. The source is brought into the
+        rebuilt surface's frame first — otherwise every match is made against
+        a mirror image, and the result looks plausible and is wrong.
+        """
+        src = self._seg_source
+        if src is None:
+            return
+        source_mesh = src["mesh"]
+        electrodes = self._eam_electrode_points
+
+        if bool(src["flip"]) != bool(export_flip):
+            source_mesh = source_mesh.copy(deep=True)
+            negate_xy_inplace(source_mesh)
+            if electrodes is not None and len(electrodes):
+                electrodes = np.asarray(electrodes, dtype=float).copy()
+                electrodes[:, :2] *= -1.0
+                self._eam_electrode_points = electrodes
+
+        max_distance = guard_distance(source_mesh, src["spacing"])
+
+        self._on_surface_moved(source_mesh, new_mesh)
+        self._transfer_note = None
+        try:
+            transfer_fields(
+                source_mesh, new_mesh, max_distance=max_distance,
+                on_status=lambda msg: setattr(self, "_transfer_note", msg))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Field transfer",
+                f"The surface was rebuilt, but its fields could not be "
+                f"carried over:\n{exc}\n\nThe new surface has geometry only.")
 
     # ------------------------------------------------------------------
     def _prompt_voxelise_options(self) -> Optional[Tuple[Tuple[float, float, float], bool]]:
@@ -1208,6 +2128,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._wire_slice_pickers()
         self._refresh_slices(reset_camera=True)
         self._action_seg_update_3d()
+        self._sync_close_action()
 
     def _action_seg_close(self) -> None:
         """Drop the active segmentation and revert the plotter to 1×1."""
@@ -1224,32 +2145,14 @@ class CCDAF(QtWidgets.QMainWindow):
         self._exit_segmentation_mode()
         for other_sec in ["meshinfo","postproc","seeds","tagging","manual","clipping"]:
             self._set_section_visible(other_sec, True)
-        
+        self._sync_close_action()
         self.statusBar().showMessage("Segmentation closed.")
 
     def _sync_sitk_from_array(self) -> None:
         """Push numpy edits back into the SITK image (preserves geometry)."""
         if self._seg_array is None or self._seg_sitk is None:
             return
-        new = sitk.GetImageFromArray(self._seg_array.astype(np.int16))
-        new.SetOrigin(self._seg_sitk.GetOrigin())
-        new.SetSpacing(self._seg_sitk.GetSpacing())
-        new.SetDirection(self._seg_sitk.GetDirection())
-        self._seg_sitk = new
-
-    def _binary_mask_image(self) -> sitk.Image:
-        """Build a uint8 0/1 mask of the current segmentation.
-
-        Done in numpy to dodge ITK's ``BinaryThreshold`` parameter-range
-        checks (which fail when ``upperThreshold`` exceeds the pixel
-        type's max — e.g. ``2**31-1`` on a uint8 voxelisation).
-        """
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-        arr = (sitk.GetArrayFromImage(self._seg_sitk) > 0).astype(np.uint8)
-        out = sitk.GetImageFromArray(arr)
-        out.CopyInformation(self._seg_sitk)
-        return out
+        self._seg_sitk = sync_sitk_from_array(self._seg_array, self._seg_sitk)
 
     # ==================================================================
     # Segmentation — slice rendering
@@ -1301,8 +2204,8 @@ class CCDAF(QtWidgets.QMainWindow):
         if self._seg_array is None:
             return
         for axis in ORIENTATIONS:
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            loc = self._view.roles[axis]
+            self.plotter.subplot(*loc)
             prev = self._slice_actors.get(axis)
             if prev is not None:
                 try:
@@ -1328,9 +2231,9 @@ class CCDAF(QtWidgets.QMainWindow):
             # Overlay slice index & axis label.
             idx = self._seg_idx[axis]
             self.plotter.add_text(
-                f"{TITLE_FOR[axis]}  idx={idx}",
+                f"{self._view.titles[axis]}  idx={idx}",
                 font_size=9, color="yellow",
-                name=f"_title_{row}_{col}",
+                name=title_actor_name(loc),
             )
             # Lock the slice view to its canonical orthographic orientation.
             self._set_slice_camera(axis, reset=reset_camera)
@@ -1432,8 +2335,7 @@ class CCDAF(QtWidgets.QMainWindow):
         }
 
         for axis, lines in plan.items():
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            self.plotter.subplot(*self._view.roles[axis])
             for other_axis, p0, p1 in lines:
                 actor_name = f"crosshair_{axis}_{other_axis}"
                 try:
@@ -1463,12 +2365,6 @@ class CCDAF(QtWidgets.QMainWindow):
         ox, oy, oz = self._seg_origin
         sx, sy, sz = self._seg_spacing
         nz, ny, nx = self._seg_array.shape
-        cx = ox + 0.5 * nx * sx
-        cy = oy + 0.5 * ny * sy
-        cz = oz + 0.5 * nz * sz
-        ix = int(np.clip(self._seg_idx["sagittal"], 0, nx - 1))
-        iy = int(np.clip(self._seg_idx["coronal"], 0, ny - 1))
-        iz = int(np.clip(self._seg_idx["axial"], 0, nz - 1))
 
         # Reuse the same slice ImageData built for the 2D views.
         plane_specs = {
@@ -1525,8 +2421,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # Capture each slice subplot's renderer.
         self._slice_renderers: Dict[str, object] = {}
         for axis in ORIENTATIONS:
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            self.plotter.subplot(*self._view.roles[axis])
             self._slice_renderers[axis] = self.plotter.renderer
 
         # Reset any previously enabled picker (safe even if none).
@@ -1618,7 +2513,7 @@ class CCDAF(QtWidgets.QMainWindow):
             except Exception:
                 pass
             # Re-snap the canonical slice camera in case any motion happened.
-            self.plotter.subplot(*SUBPLOT_FOR[ax])
+            self.plotter.subplot(*self._view.roles[ax])
             self._set_slice_camera(ax, reset=False)
             cmd = caller.GetCommand(move_id["id"])
             if cmd is not None:
@@ -1884,7 +2779,7 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._seg_push_undo()
         try:
-            mask = self._binary_mask_image()
+            mask = binary_mask_image(self._seg_sitk)
             if op == "dilate":
                 out = sitk.BinaryDilate(mask, radius, kernelType=sitk.sitkBox)
             elif op == "erode":
@@ -1914,7 +2809,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._sync_sitk_from_array()
         self._seg_push_undo()
         try:
-            mask = self._binary_mask_image()
+            mask = binary_mask_image(self._seg_sitk)
             filled = sitk.BinaryFillhole(mask)
             self._seg_sitk = sitk.Cast(filled, self._seg_sitk.GetPixelID())
         except Exception as exc:
@@ -1966,7 +2861,8 @@ class CCDAF(QtWidgets.QMainWindow):
         polys: Dict[int, vtk.vtkPolyData] = {}
         for lbl in present_labels:
             try:
-                polys[lbl] = self._segmentation_to_polydata(
+                polys[lbl] = segmentation_to_polydata(
+                    self._seg_sitk,
                     flip=False,
                     filt_stdev=filt_stdev,
                     filt_rfact=filt_rfact,
@@ -2008,253 +2904,56 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.render()
         self.statusBar().showMessage("3D rendering updated from segmentation.")
 
-    # ==================================================================
-    # Segmentation — voxelisation (mesh → image)
-    # ==================================================================
-    def _voxelise_polydata(self, mesh: pv.PolyData,
-                           spacing: Tuple[float, float, float],
-                           *, flip: bool) -> sitk.Image:
-        """Convert a polydata surface to a binary SITK volume.
-
-        Self-contained stencil-based rasterisation. Foreground fill is
-        vectorised (single allocation through numpy_support).
-        """
-        # Take a writable deep copy of the polydata so optional flips
-        # don't mutate the caller's mesh.
-        poly = vtk.vtkPolyData()
-        poly.DeepCopy(mesh if isinstance(mesh, vtk.vtkPolyData) else mesh)
-
-        if flip:
-            self._negate_xy_inplace(poly)
-
-        spacing_arr = np.asarray(spacing, dtype=float)
-        if (spacing_arr <= 0).any():
-            raise ValueError(f"Spacing must be strictly positive, got {spacing}.")
-
-        white = self._define_image_from_mesh(poly, spacing_arr)
-
-        # Vectorised foreground fill (replaces per-voxel SetTuple1 loop).
-        n_pts = white.GetNumberOfPoints()
-        ones = np.ones(n_pts, dtype=np.uint8)
-        white.GetPointData().SetScalars(
-            numpy_support.numpy_to_vtk(ones, deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
-        )
-
-        stencil = vtk.vtkPolyDataToImageStencil()
-        stencil.SetInputData(poly)
-        stencil.SetOutputOrigin(white.GetOrigin())
-        stencil.SetOutputSpacing(white.GetSpacing())
-        stencil.SetOutputWholeExtent(white.GetExtent())
-        stencil.Update()
-
-        cutter = vtk.vtkImageStencil()
-        cutter.SetInputData(white)
-        cutter.SetStencilConnection(stencil.GetOutputPort())
-        cutter.ReverseStencilOff()
-        cutter.SetBackgroundValue(0)
-        cutter.Update()
-
-        return self._vtk_image_to_sitk(cutter.GetOutput())
-
-    @staticmethod
-    def _define_image_from_mesh(poly: vtk.vtkPolyData,
-                                spacing: np.ndarray) -> vtk.vtkImageData:
-        """Allocate a vtkImageData covering the mesh bounds at *spacing*."""
-        bounds = poly.GetBounds()  # (xmin, xmax, ymin, ymax, zmin, zmax)
-        extents_world = np.array([
-            bounds[1] - bounds[0],
-            bounds[3] - bounds[2],
-            bounds[5] - bounds[4],
-        ], dtype=float)
-        dims = np.maximum(np.ceil(extents_world / spacing).astype(int), 1)
-
-        img = vtk.vtkImageData()
-        img.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
-        img.SetDimensions(int(dims[0]), int(dims[1]), int(dims[2]))
-        # +1 voxel buffer on the upper extent — matches reference behaviour
-        # so the stencil never clips a face that lies on the bbox max.
-        img.SetExtent(0, int(dims[0]) + 1,
-                      0, int(dims[1]) + 1,
-                      0, int(dims[2]) + 1)
-        img.SetOrigin(float(bounds[0]), float(bounds[2]), float(bounds[4]))
-        img.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
-        return img
-
-    @staticmethod
-    def _vtk_image_to_sitk(vtk_img: vtk.vtkImageData) -> sitk.Image:
-        """Convert a vtkImageData to a SimpleITK image (no Python loops)."""
-        ext = vtk_img.GetExtent()
-        dims = (ext[1] - ext[0] + 1, ext[3] - ext[2] + 1, ext[5] - ext[4] + 1)
-        scalars = vtk_img.GetPointData().GetScalars()
-        arr = numpy_support.vtk_to_numpy(scalars).reshape(dims[2], dims[1], dims[0])
-        out = sitk.GetImageFromArray(arr.astype(np.uint8))
-        out.SetSpacing(tuple(float(s) for s in vtk_img.GetSpacing()))
-        out.SetOrigin(tuple(float(o) for o in vtk_img.GetOrigin()))
-        return out
-
-    # ==================================================================
-    # Segmentation — meshing (image → polydata)
-    # ==================================================================
-
-    def _label_mask_image(self, label: int) -> sitk.Image:
-        """Return a uint8 0/1 mask for the single label value *label*."""
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-        arr = (sitk.GetArrayFromImage(self._seg_sitk) == label).astype(np.uint8)
-        out = sitk.GetImageFromArray(arr)
-        out.CopyInformation(self._seg_sitk)
-        return out
-
-    def _segmentation_to_polydata(self, *, flip: bool,
-                                           filt_stdev: list[float],
-                                           filt_rfact: list[float],
-                                           label: Optional[int] = None,
-                                  ) -> vtk.vtkPolyData:
-        """Plain marching cubes + smoothing; no preprocessing.
-
-        When *label* is given, only that label value is meshed. Otherwise
-        all voxels > 0 form the surface (legacy binary behaviour).
-        """
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-
-        binary = self._label_mask_image(label) if label is not None \
-            else self._binary_mask_image()
-        vimg = self._sitk_to_vtk_image(binary)
-
-        outside_dist = vtk.vtkImageEuclideanDistance()
-        outside_dist.SetInputData(vimg)
-        outside_dist.SetConsiderAnisotropy(True)
-        outside_dist.SetAlgorithmToSaito()
-        outside_dist.Update()
-        
-        # Flip binary {0,1} → {1,0} so vtkImageEuclideanDistance can compute
-        # distances from outside pixels to the nearest inside boundary.
-        # SetOperationToInvert would compute 1/x, giving inf for 0-pixels
-        # (no background for the distance filter). Use threshold instead.
-        thresh = vtk.vtkImageThreshold()
-        thresh.SetInputData(vimg)
-        thresh.ThresholdByLower(0.5)
-        thresh.SetInValue(1.0)
-        thresh.SetOutValue(0.0)
-        thresh.ReplaceInOn()
-        thresh.ReplaceOutOn()
-        thresh.Update()
-        inside_dist = vtk.vtkImageEuclideanDistance()
-        inside_dist.SetInputData(thresh.GetOutput())
-        inside_dist.SetConsiderAnisotropy(True)
-        inside_dist.SetAlgorithmToSaito()
-        inside_dist.Update()
-
-        sdf = vtk.vtkImageMathematics()
-        sdf.SetInput1Data(outside_dist.GetOutput())
-        sdf.SetInput2Data(inside_dist.GetOutput())
-        sdf.SetOperationToSubtract()
-        sdf.Update()
-        vimg_sdf = sdf.GetOutput()
-        
-        
-        mc = vtk.vtkMarchingCubes()
-        if np.any(np.array(filt_stdev)>0.) and np.any(np.array(filt_rfact)>0.): 
-            gaussian = vtk.vtkImageGaussianSmooth()
-            gaussian.SetStandardDeviations(filt_stdev[0],filt_stdev[1],filt_stdev[2])
-            gaussian.SetRadiusFactors(filt_rfact[0],filt_rfact[1],filt_rfact[2])
-            gaussian.SetDimensionality(3)
-            gaussian.SetInputData(vimg_sdf)
-            gaussian.Update()
-            mc.SetInputConnection(gaussian.GetOutputPort())
-        else:
-            mc.SetInputData(vimg_sdf)
-        mc.ComputeScalarsOff()
-        mc.ComputeNormalsOff()
-        mc.ComputeGradientsOff()
-        mc.SetValue(0, 0.0)
-        mc.Update()
-
-        normals = vtk.vtkPolyDataNormals()
-        normals.SetInputConnection(mc.GetOutputPort())
-        normals.ComputePointNormalsOn()
-        normals.ComputeCellNormalsOff()
-        normals.AutoOrientNormalsOn()
-        normals.FlipNormalsOn()
-        normals.Update()
-
-        tri = vtk.vtkTriangleFilter()
-        tri.SetInputConnection(normals.GetOutputPort())
-        tri.PassVertsOff()
-        tri.PassLinesOff()
-        tri.Update()
-        out: vtk.vtkPolyData = tri.GetOutput()
-
-
-        clean = vtk.vtkCleanPolyData()
-        clean.SetInputData(out)
-        clean.PointMergingOn()
-        clean.ConvertLinesToPointsOff()
-        clean.ConvertPolysToLinesOff()
-        clean.ConvertStripsToPolysOff()
-        clean.Update()
-        out = clean.GetOutput()
-        if flip:
-            self._negate_xy_inplace(out)
-        return out
-
-    @staticmethod
-    def _sitk_to_vtk_image(img: sitk.Image) -> vtk.vtkImageData:
-        """Build a vtkImageData mirroring *img*'s geometry (vectorised)."""
-        size = list(img.GetSize())
-        spacing = list(img.GetSpacing())
-        origin = list(img.GetOrigin())
-        direction = list(img.GetDirection())
-
-        vimg = vtk.vtkImageData()
-        vimg.SetDimensions(int(size[0]), int(size[1]), int(size[2]))
-        vimg.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
-        vimg.SetOrigin(float(origin[0]), float(origin[1]), float(origin[2]))
-        vimg.SetExtent(0, size[0] - 1, 0, size[1] - 1, 0, size[2] - 1)
-        if vtk.vtkVersion.GetVTKMajorVersion() >= 9 and len(direction) == 9:
-            vimg.SetDirectionMatrix(direction)
-
-        # SITK array shape is (Z, Y, X) C-contiguous; ravel matches VTK
-        # linear indexing where X varies fastest.
-        arr = sitk.GetArrayFromImage(img)
-        flat = np.ascontiguousarray(arr).ravel()
-        vimg.GetPointData().SetScalars(numpy_support.numpy_to_vtk(flat, deep=True))
-        return vimg
-
-    @staticmethod
-    def _smooth_polydata(poly: vtk.vtkPolyData, iterations: int,
-                         relaxation: float) -> vtk.vtkPolyData:
-        s = vtk.vtkSmoothPolyDataFilter()
-        s.SetInputData(poly)
-        s.SetNumberOfIterations(int(iterations))
-        s.SetFeatureAngle(60.0)
-        s.FeatureEdgeSmoothingOff()
-        s.SetRelaxationFactor(float(relaxation))
-        s.BoundarySmoothingOff()
-        s.SetConvergence(0.0)
-        s.Update()
-        return s.GetOutput()
-
-    @staticmethod
-    def _negate_xy_inplace(poly: vtk.vtkPolyData) -> None:
-        """Vectorised X/Y flip used by the MIRTK-orientation paths."""
-        pts = poly.GetPoints()
-        if pts is None or pts.GetNumberOfPoints() == 0:
-            return
-        arr = numpy_support.vtk_to_numpy(pts.GetData()).copy()
-        arr[:, 0] *= -1.0
-        arr[:, 1] *= -1.0
-        new_data = numpy_support.numpy_to_vtk(arr, deep=True)
-        new_pts = vtk.vtkPoints()
-        new_pts.SetData(new_data)
-        poly.SetPoints(new_pts)
 
 
 # ---------------------------------------------------------------------------
 def _discrete_cmap(hex_colors):
     from matplotlib.colors import ListedColormap
     return ListedColormap(hex_colors)
+
+
+def _eam_lookup_table(cmap_name: str, lo: float, hi: float,
+                      bar_lo: float, bar_hi: float, n_bands: int):
+    """Colour table for an EAM field, spanning ``bar_lo..bar_hi``.
+
+    The table covers the *union* of the data range and the chosen min/max, so
+    the bar keeps showing data that falls outside the chosen range instead of
+    rescaling to it. Inside ``lo..hi`` it is ``cmap_name`` in ``n_bands``
+    steps; below ``lo`` a flat brown and above ``hi`` a flat magenta. When the
+    chosen range covers the data, ``bar_lo/bar_hi`` are ``lo/hi`` and neither
+    flat band exists — the ordinary fixed-range colour map.
+    """
+    from matplotlib import colormaps
+    from pyvista import Color
+
+    span, inner = bar_hi - bar_lo, hi - lo
+    # Enough entries that the coloured part still resolves n_bands steps, since
+    # it only occupies inner/span of the table. Capped: a very narrow range
+    # over a wide bar would otherwise ask for a huge table.
+    total = n_bands
+    if span > inner > 0:
+        total = int(round(n_bands * span / inner))
+    total = int(min(max(total, n_bands), 4096))
+
+    cmap = colormaps[cmap_name]
+    below, above = Color(EAM_BELOW_COLOR).float_rgb, Color(EAM_ABOVE_COLOR).float_rgb
+
+    lut = pv.LookupTable()
+    lut.SetNumberOfTableValues(total)
+    lut.SetTableRange(bar_lo, bar_hi)
+    for i in range(total):
+        value = bar_lo + (i + 0.5) * span / total
+        if value < lo:
+            rgb = below
+        elif value > hi:
+            rgb = above
+        else:
+            frac = 0.0 if inner <= 0 else (value - lo) / inner
+            band = min(int(frac * n_bands), n_bands - 1)   # quantise to n_bands
+            rgb = cmap((band + 0.5) / n_bands)[:3]
+        lut.SetTableValue(i, rgb[0], rgb[1], rgb[2], 1.0)
+    lut.SetNanColor(*Color("lightgrey").float_rgb, 1.0)
+    return lut
 
 
 def _label_name(tag: int) -> str:

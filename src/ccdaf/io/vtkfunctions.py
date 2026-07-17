@@ -1,5 +1,4 @@
 import vtk
-import numpy as np
 import os
 
 def readvtk(filename : str) -> vtk.vtkPolyData:

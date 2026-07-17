@@ -276,8 +276,6 @@ class ClippingTool:
         self._remove_plane_widget()
         try:
             self.plotter.disable_picking()
-            self.plotter.clear_events_for_key("x")
-            self.plotter.clear_events_for_key("X")
         except Exception:
             pass
 
@@ -372,15 +370,15 @@ class ClippingTool:
             pickable_window=False,
             left_clicking=False,
         )
-        self.plotter.add_key_event("x", self._on_x_key_press)
-        self.plotter.add_key_event("X", self._on_x_key_press)
-
         self._status(
             f"PV clip: pick points on tag {self._target_tag} — the snake "
             "will follow a geodesic restricted to that region."
         )
 
-    def _on_x_key_press(self) -> None:
+    def pick_at_cursor(self) -> None:
+        """Place a snake point at the mouse position — the host routes the
+        X key here. The tool no longer binds keys itself: manual correction
+        wants the same key, and whoever bound last used to win."""
         if self._mode is not ClipMode.PV_CONTOUR:
             return
         interactor = self.plotter.iren.interactor

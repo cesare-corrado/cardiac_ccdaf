@@ -10,7 +10,8 @@ Interaction model
 - Picked triangles are highlighted in yellow as a *pending* batch.
 - Pressing **X** commits the batch: every pending triangle receives the
   currently active label, the highlight is cleared, and the mesh is
-  recolored live.
+  recolored live. The key itself is bound by the host, which routes it
+  to :meth:`commit_pending` — clipping shares the key.
 - Changing the active label clears any pending selection (prevents mixed
   batches being committed by accident).
 
@@ -22,12 +23,15 @@ from __future__ import annotations
 
 from collections import deque
 from enum import Enum, auto
-from typing import Callable, Deque, Dict, Optional, Set
+from typing import TYPE_CHECKING, Callable, Deque, Optional, Set
 from scipy.spatial import cKDTree
 import numpy as np
 import pyvista as pv
 
 from ccdaf.core.mesh_loader import BODY_LABEL, UNASSIGNED
+
+if TYPE_CHECKING:
+    from ccdaf.core.region_tagger import RegionTagger
 
 
 ALLOWED_LABELS = (11, 13, 15, 17, 19, BODY_LABEL)
@@ -63,9 +67,10 @@ class ManualEditor:
         self._sphere_actor = None
         self._undo_stack: Deque[np.ndarray] = deque(maxlen=3)
 
-        # Bind the commit key once; the callback is a no-op while idle.
-        self.plotter.add_key_event("x", self._commit)
-        self.plotter.add_key_event("X", self._commit)
+        # The X key is bound by the host, not here: clipping wants the same
+        # key, and when both tools bound it themselves whoever came last
+        # won — or wiped the other's binding outright. The host owns the
+        # key and routes it to commit_pending().
         self._prepare_search_index(mesh)
     # ------------------------------------------------------------------
     # Public API
@@ -122,7 +127,7 @@ class ManualEditor:
     def accept(self) -> None:
         """Commit any pending batch and exit the editor entirely."""
         if self._pending:
-            self._commit()
+            self.commit_pending()
         # assign body_label to unassigned
         tags = np.asarray(self.mesh.cell_data["elemTag"]).copy()
         idx = (tags == UNASSIGNED)
@@ -154,8 +159,7 @@ class ManualEditor:
         # 4. Use the tagger's hole-filling logic
         filled_label = tagger._fill_holes(tri_label)
         
-        # 5. Write back to mesh, respecting the BODY_LABEL for background
-        assigned = tri_label != UNASSIGNED
+        # 5. Write the filled labels back to the mesh
         self.mesh.cell_data["elemTag"] = filled_label
         
         # 6. Refresh the view
@@ -229,7 +233,8 @@ class ManualEditor:
     # ------------------------------------------------------------------
     # Commit / highlight
     # ------------------------------------------------------------------
-    def _commit(self) -> None:
+    def commit_pending(self) -> None:
+        """Commit the pending batch; a no-op with nothing pending."""
         if not self._pending:
             return
         # Snapshot current state before modifying (for undo).

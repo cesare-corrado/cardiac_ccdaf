@@ -34,3 +34,7 @@ examples/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+# Lint / test caches
+.ruff_cache/
+.pytest_cache/
