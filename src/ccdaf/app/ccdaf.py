@@ -197,10 +197,6 @@ class CCDAF(QtWidgets.QMainWindow):
         # to — a re-render rebuilds the bar, and would otherwise reset it.
         self._eam_bar_title: Optional[str] = None
         self._eam_bar_geom = None
-        # Which of the two views owns the 'atrium' actor: the EAM field
-        # colouring or the region colouring. Both render the same mesh, so
-        # whoever re-renders it has to put back the view the user was in.
-        self._eam_view_active = False
 
         # ---- segmentation state ----------------------------------------
         self._seg_sitk: Optional[sitk.Image] = None
@@ -571,7 +567,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._segmentation_mode = True
         self._build_plotter((2, 2))
         if self.loader.mesh is not None:
-            self._render_mesh()
+            self._render_field()
             self._build_mesh_tools()
         self._create_update3d_overlay()
 
@@ -586,7 +582,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._seg_3d_actors = []
         self._build_plotter((1, 1))
         if self.loader.mesh is not None:
-            self._render_mesh()
+            self._render_field()
             self.plotter.reset_camera()
             self._build_mesh_tools()
 
@@ -1039,7 +1035,6 @@ class CCDAF(QtWidgets.QMainWindow):
         mesh = self.loader.mesh
         if mesh is None:
             return
-        self._eam_view_active = True
         self._focus_3d()
         # Bars first: removing the mesh actor makes pyvista forget the bar it
         # fed, and a forgotten bar can no longer be cleared by title.
@@ -1484,12 +1479,9 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _on_postproc_applied(self) -> None:
         # Post-processing keeps the point fields, so an EAM mapping stays
-        # displayable — put back whichever view was on screen rather than
-        # dropping the user into the region view.
-        if self._eam_view_active and self._eam_data is not None:
-            self._render_field()
-        else:
-            self._render_mesh()
+        # displayable — put back whichever view the user chose rather than
+        # dropping them into the region view.
+        self._render_field()
         self._focus_3d()
         self.plotter.reset_camera()
         # Report the warp last. This runs from mesh_changed, and the widget
@@ -1521,7 +1513,6 @@ class CCDAF(QtWidgets.QMainWindow):
         mesh = self.loader.mesh
         if mesh is None:
             return
-        self._eam_view_active = False
         self._focus_3d()
         # Same ordering as _render_scalar_field, and for the same reason.
         self._clear_scalar_bars()
@@ -1708,8 +1699,7 @@ class CCDAF(QtWidgets.QMainWindow):
             new_mesh.point_data.remove("Normals")
         self._carry_source_onto(new_mesh, export_flip=flip)
         self._replace_mesh(new_mesh)
-        self._render_field() if self._eam_view_active and self._eam_data \
-            else self._render_mesh()
+        self._render_field()
         self.act_save.setEnabled(True)
         self.plotter.reset_camera()
         self.plotter.render()
