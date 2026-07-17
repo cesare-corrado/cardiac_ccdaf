@@ -535,6 +535,33 @@ class CCDAF(QtWidgets.QMainWindow):
             self._reposition_update3d_overlay()
         return super().eventFilter(obj, event)
 
+    def _build_mesh_tools(self) -> None:
+        """(Re)bind the mesh-side tools to whichever plotter is current.
+
+        The clipper and the editor both hold the plotter they were built
+        against, so both die with it and both have to be remade whenever it
+        is rebuilt. Only the clipper was, which left manual correction bound
+        to nothing after any trip through the segmentation: tagging re-enables
+        the button regardless, so it looked live and swallowed every click.
+        """
+        if self.loader.mesh is None:
+            return
+        self.clipper = ClippingTool(
+            mesh_getter=lambda: self.loader.mesh,
+            mesh_setter=self._replace_mesh,
+            plotter=self.plotter,
+            on_status=self.statusBar().showMessage,
+        )
+        self.editor = ManualEditor(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_render=self._render_mesh,
+            on_state=lambda s: None,
+            on_commit=self._on_edit_committed,
+        )
+        self.manual_widget.set_active(True)
+        self.manual_widget.set_undo_enabled(False)
+
     def _enter_segmentation_mode(self) -> None:
         if self._segmentation_mode:
             return
@@ -545,12 +572,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._build_plotter((2, 2))
         if self.loader.mesh is not None:
             self._render_mesh()
-            self.clipper = ClippingTool(
-                mesh_getter=lambda: self.loader.mesh,
-                mesh_setter=self._replace_mesh,
-                plotter=self.plotter,
-                on_status=self.statusBar().showMessage,
-            )
+            self._build_mesh_tools()
         self._create_update3d_overlay()
 
     def _exit_segmentation_mode(self) -> None:
@@ -566,12 +588,7 @@ class CCDAF(QtWidgets.QMainWindow):
         if self.loader.mesh is not None:
             self._render_mesh()
             self.plotter.reset_camera()
-            self.clipper = ClippingTool(
-                mesh_getter=lambda: self.loader.mesh,
-                mesh_setter=self._replace_mesh,
-                plotter=self.plotter,
-                on_status=self.statusBar().showMessage,
-            )
+            self._build_mesh_tools()
 
     def _teardown_mesh_tools(self, *, rebuild_clipper: bool) -> None:
         """Drop refs to selector/editor/clipper bound to the old plotter."""
@@ -876,12 +893,28 @@ class CCDAF(QtWidgets.QMainWindow):
         The mesh is always the single 'atrium' actor, so at most one bar is
         ever meant to be on screen. Bars are keyed by title, so without this
         each new title (another EAM field, or Regions) stacks a further bar.
+
+        An interactive bar is two props: the actor pyvista tracks by title,
+        and the widget's representation, which is what actually draws it.
+        Taking the mesh actor away makes pyvista forget the bar its mapper
+        fed — it drops the actor and the title, and leaves the representation
+        on screen with nothing left that names it. So the widgets are
+        disabled from their own dict rather than through the titles pyvista
+        still admits to; going by title alone leaves the old bar painted
+        beside the new one.
         """
+        widgets = getattr(self.plotter.scalar_bars, "_scalar_bar_widgets", {})
+        for widget in list(widgets.values()):
+            try:
+                widget.SetEnabled(0)
+            except Exception:
+                pass
         for title in list(self.plotter.scalar_bars.keys()):
             try:
                 self.plotter.remove_scalar_bar(title, render=False)
             except Exception:
                 pass
+        widgets.clear()
 
     def _eam_bar_widget(self, title: Optional[str]):
         """The interactive widget behind a scalar bar, or None.
@@ -1008,12 +1041,14 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._eam_view_active = True
         self._focus_3d()
+        # Bars first: removing the mesh actor makes pyvista forget the bar it
+        # fed, and a forgotten bar can no longer be cleared by title.
+        self._remember_eam_bar_geom()
+        self._clear_scalar_bars()
         try:
             self.plotter.remove_actor("atrium", reset_camera=False)
         except Exception:
             pass
-        self._remember_eam_bar_geom()
-        self._clear_scalar_bars()
         self._mesh_actor = None
 
         field = self.vis_widget.current_field()
@@ -1469,6 +1504,9 @@ class CCDAF(QtWidgets.QMainWindow):
     def _reset_view(self) -> None:
         """Clear the 3D viewport — preserves segmentation slice views in 2×2 mode."""
         self._focus_3d()
+        # plotter.clear() forgets the scalar-bar widgets without disabling
+        # them, which leaves their representations drawn over the next mesh.
+        self._clear_scalar_bars()
         self.plotter.clear()
         self.plotter.set_background("black")
         self.plotter.add_axes()
@@ -1485,13 +1523,14 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._eam_view_active = False
         self._focus_3d()
+        # Same ordering as _render_scalar_field, and for the same reason.
+        self._clear_scalar_bars()
         if self._mesh_actor is not None:
             try:
                 self.plotter.remove_actor(self._mesh_actor, reset_camera=False)
             except Exception:
                 pass
             self._mesh_actor = None
-        self._clear_scalar_bars()
 
         tags       = np.asarray(mesh.cell_data["elemTag"], dtype=int)
         all_tags   = sorted(LABEL_COLORS.keys())
