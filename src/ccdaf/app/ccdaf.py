@@ -83,6 +83,7 @@ from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
 from ccdaf.io.carto_functions import extract_map_list_names
 from ccdaf.core.eam_loader import load_carto_mapping, displace_electrodes_for
 from ccdaf.core.field_transfer import guard_distance, transfer_fields
+from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
 # ---------------------------------------------------------------------------
@@ -137,28 +138,10 @@ EAM_ELECTRODE_COLOR = (100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0)
 EAM_ELECTRODE_RADIUS_FRAC = 0.008     # of the mesh's bounding-box diagonal
 
 
-# Subplot positions for the 2x2 view.
-#   (0,0) Top-Left     Axial    XY
-#   (0,1) Top-Right    Sagittal YZ
-#   (1,1) Bottom-Right Coronal  XZ
-#   (1,0) Bottom-Left  3D
-SUBPLOT_3D = (1, 0)
-SUBPLOT_AXIAL = (0, 0)
-SUBPLOT_SAGITTAL = (0, 1)
-SUBPLOT_CORONAL = (1, 1)
-
+# The three slice orientations of a segmentation volume. Where each one is
+# drawn is not decided here — that is the segmentation view's layout, in
+# ccdaf.app.views.
 ORIENTATIONS = ("axial", "sagittal", "coronal")
-SUBPLOT_FOR = {
-    "axial": SUBPLOT_AXIAL,
-    "sagittal": SUBPLOT_SAGITTAL,
-    "coronal": SUBPLOT_CORONAL,
-}
-TITLE_FOR = {
-    "axial": "Axial (XY)",
-    "sagittal": "Sagittal (YZ)",
-    "coronal": "Coronal (XZ)",
-    "3d": "3D",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +195,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self._seg_idx: Dict[str, int] = {"axial": 0, "sagittal": 0, "coronal": 0}
         self._slice_actors: Dict[str, object] = {}
         self._paint_active: bool = False
-        self._segmentation_mode: bool = False  # True ⇔ 2×2 plotter active
+        # What the live plotter was built for — layout facts (multi-view?
+        # where is each pane?) come from its structure, task identity from
+        # its name. Written only by _build_plotter.
+        self._view: ViewSpec = VIEWS["general"]
         self._splitter: Optional[QtWidgets.QSplitter] = None
         self.plotter: Optional[QtInteractor] = None
         self._seg_3d_actors: list = []
@@ -266,6 +252,12 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_save.setEnabled(False)
         self.act_save.triggered.connect(self._action_save)
         file_menu.addAction(self.act_save)
+
+        self.act_close = QtWidgets.QAction("&Close", self)
+        self.act_close.setShortcut(QtGui.QKeySequence.Close)
+        self.act_close.setEnabled(False)
+        self.act_close.triggered.connect(self._action_close)
+        file_menu.addAction(self.act_close)
 
         file_menu.addSeparator()
         act_quit = QtWidgets.QAction("&Quit", self)
@@ -384,6 +376,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipping_widget.mv_plane_requested.connect(self._action_mv_plane_start)
         self.clipping_widget.clip_apply_requested.connect(self._action_clip_apply)
         self.clipping_widget.clip_revert_requested.connect(self._action_clip_revert)
+        self.clipping_widget.clipping_toggled.connect(self._on_clipping_toggled)
         body = self._register_section(v, "clipping", "Clipping")
         body.addWidget(self.clipping_widget)
 
@@ -403,27 +396,29 @@ class CCDAF(QtWidgets.QMainWindow):
         # --- EAM display (hidden until an EAM mapping is loaded) --------
         self.vis_widget = VisualisationWidget()
         self.vis_widget.settings_changed.connect(self._render_field)
+        self.vis_widget.electrodes_toggled.connect(self._on_electrodes_toggled)
         body = self._register_section(v, "visualisation", "Visualisation")
         body.addWidget(self.vis_widget)
         self._set_section_visible("visualisation", False)
 
         v.addStretch(1)
 
-        # --- Plotter — start in single-renderer (3D) mode --------------
-        self._build_plotter((1, 1))
+        # --- Plotter — start in the general (single 3D) view -----------
+        self._build_plotter("general")
 
         self.statusBar().showMessage("Ready.")
 
     # ------------------------------------------------------------------
     # Plotter (re)construction
     # ------------------------------------------------------------------
-    def _build_plotter(self, shape: Tuple[int, int]) -> None:
-        """Create or replace the plotter widget at the requested shape.
+    def _build_plotter(self, view: str) -> None:
+        """Create or replace the plotter widget for the named view purpose.
 
         Tears down the previous QtInteractor (if any), inserts a fresh one
-        into the splitter, and styles all subplots. Stale actor refs are
-        cleared so callers must re-render after switching.
+        into the splitter, and styles every pane the view defines. Stale
+        actor refs are cleared so callers must re-render after switching.
         """
+        spec = VIEWS[view]
         # Tear down any previous plotter.
         if self.plotter is not None:
             try:
@@ -438,37 +433,71 @@ class CCDAF(QtWidgets.QMainWindow):
                 pass
             self.plotter = None
 
-        self.plotter = QtInteractor(self, shape=shape)
+        kwargs = {} if spec.groups is None else {"groups": spec.groups}
+        self.plotter = QtInteractor(self, shape=spec.shape, **kwargs)
+        # From here the live plotter is the new view — the single write site.
+        self._view = spec
         self.plotter.interactor.setMinimumSize(480, 360)
         self._splitter.addWidget(self.plotter.interactor)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([320, 1000])
 
-        if shape == (1, 1):
+        # The X key has one owner: the app. PV clipping and manual correction
+        # both want it, and when each bound it itself, whoever came last won —
+        # or cleared the other's binding outright. Bound once per plotter
+        # (bindings die with it); _on_x_key routes by state at press time.
+        for key in ("x", "X"):
+            self.plotter.add_key_event(key, self._on_x_key)
+
+        if not spec.is_multiview:
             self.plotter.set_background("black")
             self.plotter.add_axes()
         else:
-            for row in range(shape[0]):
-                for col in range(shape[1]):
-                    self.plotter.subplot(row, col)
-
-                    self.plotter.set_background("black")
-                    self.plotter.add_axes()
-                    title = self._title_for_subplot(row, col)
+            for role, loc in spec.roles.items():
+                self.plotter.subplot(*loc)
+                self.plotter.set_background("black")
+                self.plotter.add_axes()
+                title = spec.titles.get(role)
+                if title:
                     self.plotter.add_text(title, font_size=9, color="white",
-                                          name=f"_title_{row}_{col}")
-                                          
-            self.plotter.subplot(*SUBPLOT_3D)
+                                          name=title_actor_name(loc))
+            self._focus_3d()
 
         # Stale references — old actors lived on the destroyed plotter.
         self._mesh_actor = None
         self._slice_actors = {}
 
     def _focus_3d(self) -> None:
-        """Switch the active subplot to the 3D quadrant when in 2×2 mode."""
-        if self._segmentation_mode and self.plotter is not None:
-            self.plotter.subplot(*SUBPLOT_3D)
+        """Switch the active subplot to the 3D pane, when the view has one."""
+        loc = self._view.roles.get("3d")
+        if self._view.is_multiview and loc is not None and self.plotter is not None:
+            self.plotter.subplot(*loc)
+
+    def _on_x_key(self) -> None:
+        """Route the X key to whichever tool it belongs to right now.
+
+        An in-progress PV contour takes it — but only while the clipping
+        panel's checkbox says clipping is active. Otherwise it commits the
+        manual-correction batch, which is a no-op with nothing pending.
+        """
+        if (self.clipper is not None
+                and self.clipping_widget.is_clipping_enabled()
+                and self.clipper.mode is ClipMode.PV_CONTOUR):
+            self.clipper.pick_at_cursor()
+            return
+        if self.editor is not None:
+            self.editor.commit_pending()
+
+    def _on_clipping_toggled(self, enabled: bool) -> None:
+        """Deactivating the clipping panel abandons any clip in flight."""
+        if enabled or self.clipper is None:
+            return
+        if self.clipper.mode is not ClipMode.NONE:
+            self.clipper.cancel()
+            self.plotter.render()
+            self.statusBar().showMessage(
+                "Clipping deactivated — the clip in progress was cancelled.")
 
     # ------------------------------------------------------------------
     # "Update 3D" overlay button (anchored bottom-left of the QtInteractor)
@@ -511,9 +540,10 @@ class CCDAF(QtWidgets.QMainWindow):
     def _reposition_update3d_overlay(self) -> None:
         """Anchor the overlay to the bottom-left of the 3D quadrant.
 
-        With a 2×2 layout and the 3D viewport at (1, 0), the bottom-left
-        of that subplot coincides with the bottom-left half of the
-        QtInteractor widget.
+        With the segmentation view's 2×2 layout and its 3D pane at (1, 0),
+        the bottom-left of that subplot coincides with the bottom-left of
+        the QtInteractor widget. Only that view creates this overlay; a
+        view placing 3D elsewhere would have to generalise this anchoring.
         """
         if self.btn_update3d_overlay is None or self.plotter is None:
             return
@@ -559,28 +589,26 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.set_undo_enabled(False)
 
     def _enter_segmentation_mode(self) -> None:
-        if self._segmentation_mode:
+        if self._view.name == "segmentation":
             return
         # Force-stop any active mesh-side picker — its callbacks are bound
         # to the plotter we're about to destroy.
         self._teardown_mesh_tools(rebuild_clipper=False)
-        self._segmentation_mode = True
-        self._build_plotter((2, 2))
+        self._build_plotter("segmentation")
         if self.loader.mesh is not None:
             self._render_field()
             self._build_mesh_tools()
         self._create_update3d_overlay()
 
     def _exit_segmentation_mode(self) -> None:
-        if not self._segmentation_mode:
+        if self._view.name != "segmentation":
             return
         self._destroy_update3d_overlay()
         self._uninstall_slice_observers()
         self._teardown_mesh_tools(rebuild_clipper=False)
-        self._segmentation_mode = False
         self._paint_active = False
         self._seg_3d_actors = []
-        self._build_plotter((1, 1))
+        self._build_plotter("general")
         if self.loader.mesh is not None:
             self._render_field()
             self.plotter.reset_camera()
@@ -606,16 +634,6 @@ class CCDAF(QtWidgets.QMainWindow):
         self.tagging_widget.set_seeds_complete(False)
         self.manual_widget.reset_state()
         self.clipping_widget.reset_state()
-
-    @staticmethod
-    def _title_for_subplot(row: int, col: int) -> str:
-        if (row, col) == SUBPLOT_AXIAL:
-            return TITLE_FOR["axial"]
-        if (row, col) == SUBPLOT_SAGITTAL:
-            return TITLE_FOR["sagittal"]
-        if (row, col) == SUBPLOT_CORONAL:
-            return TITLE_FOR["coronal"]
-        return TITLE_FOR["3d"]
 
     @staticmethod
     def _section(text: str) -> QtWidgets.QLabel:
@@ -732,6 +750,54 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.set_reset_enabled(True)
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
+        self._sync_close_action()
+
+    def _sync_close_action(self) -> None:
+        """File → Close applies whenever a mesh or a segmentation is open."""
+        self.act_close.setEnabled(self.loader.mesh is not None
+                                  or self._seg_array is not None)
+
+    def _action_close(self) -> None:
+        """File → Close: unload everything, back to the startup state."""
+        if self._seg_array is not None:
+            self._action_seg_close()
+
+        # EAM state.
+        self._eam_directory = None
+        self._eam_format = None
+        self._eam_selected_file = None
+        self._eam_data = None
+        self._eam_electrode_points = None
+        self._eam_electrode_actor = None
+        self._eam_bar_title = None
+        self._eam_bar_geom = None
+        self._eam_warp_note = None
+        self.vis_widget.set_electrodes_available(False)
+        self.act_eam_export.setEnabled(False)
+
+        # Mesh state and the tools bound to it.
+        self._teardown_mesh_tools(rebuild_clipper=False)
+        self.tagger = None
+        self.loader.mesh = None
+        self.loader.path = None
+        self._seg_source = None
+        self._transfer_note = None
+
+        # The view and the panels, as the app starts.
+        self._reset_view()
+        self.plotter.render()
+        self.mesh_info.update_info(None)
+        self.vis_widget.set_fields([], [])
+        self._set_section_visible("visualisation", False)
+        self.manual_widget.set_active(False)
+        self.seed_widget.set_start_enabled(False)
+        self.seed_widget.set_reset_enabled(False)
+        self.seed_widget.set_prompt("Load a mesh to begin.")
+        self.seed_widget.set_progress("Seeds: 0 / 6")
+        self.act_save.setEnabled(False)
+        self.act_seg_from_mesh.setEnabled(False)
+        self._sync_close_action()
+        self.statusBar().showMessage("Closed.")
 
     def _action_save(self) -> None:
         if self.loader.mesh is None:
@@ -838,6 +904,9 @@ class CCDAF(QtWidgets.QMainWindow):
         mesh = eam.mesh
         self._eam_data = eam
         self._eam_electrode_points = eam.electrode_points
+        self.vis_widget.set_electrodes_available(
+            self._eam_electrode_points is not None
+            and len(self._eam_electrode_points) > 0)
 
         # Adopt as the working mesh and (re)build the mesh-side tools.
         self.loader.mesh = mesh
@@ -872,6 +941,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self.vis_widget.select_field(eam.field_names[0])
         self._set_section_visible("visualisation", True)
         self.act_eam_export.setEnabled(True)
+        self._sync_close_action()
 
         # Render coloured by the first field, with electrode spheres.
         self._reset_view()
@@ -952,15 +1022,46 @@ class CCDAF(QtWidgets.QMainWindow):
         height = EAM_BAR_WIDTH * (win_w / win_h) / EAM_BAR_ASPECT
         return (EAM_BAR_POS_X, EAM_BAR_POS_Y), (EAM_BAR_WIDTH, height)
 
-    def _place_eam_scalar_bar(self, title: str) -> None:
-        """Give an interactive scalar bar our geometry and let the mouse resize it.
+    def _enable_bar_interaction(self, title: str, geometry=None) -> None:
+        """Let the mouse move and freely resize an interactive scalar bar.
 
-        An interactive bar is driven by its widget's representation, which
-        resets the actor to VTK's defaults and ignores the width/height passed
-        to ``add_mesh``. Setting the representation keeps our size *and* the
-        dragging; ``BuildRepresentation`` is what copies the values onto the
-        actor. Orientation is left to the representation's AutoOrient, which
-        follows the bar's aspect — so a bar dragged tall turns vertical.
+        The widget's representation is what interaction drives, and it starts
+        out disagreeing with the actor pyvista placed — until
+        ``BuildRepresentation`` copies the representation onto the actor,
+        resize drags are swallowed. ``geometry`` (``(px, py), (w, h)``) sets
+        the representation explicitly; without it the representation adopts
+        the actor's current position, so the bar does not jump. Orientation
+        is left to the representation's AutoOrient, which follows the bar's
+        aspect — so a bar dragged tall turns vertical.
+        """
+        widget = self._eam_bar_widget(title)
+        if widget is None:      # non-interactive bar: add_mesh's size stands
+            return
+        try:
+            widget.SetResizable(True)
+            widget.SetRepositionable(True)
+            rep = widget.GetRepresentation()
+            rep.ProportionalResizeOff()    # width and height move independently
+            rep.SetShowBorderToActive()    # handles appear on hover, to grab
+            if geometry is None:
+                actor = self.plotter.scalar_bars[title]
+                rep.SetPosition(actor.GetPosition())
+                rep.SetPosition2(actor.GetPosition2())
+            else:
+                (px, py), (w, h) = geometry
+                rep.SetPosition(px, py)
+                rep.SetPosition2(w, h)
+            rep.BuildRepresentation()
+        except Exception:
+            pass
+
+    def _place_eam_scalar_bar(self, title: str) -> None:
+        """Give the field's scalar bar our geometry and mouse interaction.
+
+        The geometry passed to ``add_mesh`` is ignored once the widget's
+        representation takes over, so it is set on the representation —
+        the user's dragged position when there is one, the default corner
+        otherwise.
         """
         self._eam_bar_title = title
         try:
@@ -972,22 +1073,8 @@ class CCDAF(QtWidgets.QMainWindow):
             bar.DrawBelowRangeSwatchOff()
         except Exception:
             pass
-
-        widget = self._eam_bar_widget(title)
-        if widget is None:      # non-interactive bar: add_mesh's size stands
-            return
-        (px, py), (w, h) = self._eam_bar_geom or self._eam_bar_default_geom()
-        try:
-            widget.SetResizable(True)
-            widget.SetRepositionable(True)
-            rep = widget.GetRepresentation()
-            rep.ProportionalResizeOff()    # width and height move independently
-            rep.SetShowBorderToActive()    # handles appear on hover, to grab
-            rep.SetPosition(px, py)
-            rep.SetPosition2(w, h)
-            rep.BuildRepresentation()
-        except Exception:
-            pass
+        self._enable_bar_interaction(
+            title, geometry=self._eam_bar_geom or self._eam_bar_default_geom())
 
     def _populate_fields(self, keep_selection: bool = False) -> None:
         """Offer every field the current mesh carries, point and cell alike."""
@@ -1069,8 +1156,8 @@ class CCDAF(QtWidgets.QMainWindow):
             lut = _eam_lookup_table(self.vis_widget.current_cmap(),
                                     lo, hi, bar_lo, bar_hi, n_bands)
             # Interactive scalar bars are unsupported on multi-renderer
-            # plotters — disable them when in 4-quadrant mode.
-            interactive = not self._segmentation_mode
+            # plotters — disable them on any multi-view layout.
+            interactive = not self._view.is_multiview
             (px, py), (bw, bh) = self._eam_bar_geom or self._eam_bar_default_geom()
             self._mesh_actor = self.plotter.add_mesh(
                 mesh, scalars=field, cmap=lut, clim=(bar_lo, bar_hi),
@@ -1119,6 +1206,8 @@ class CCDAF(QtWidgets.QMainWindow):
         pts = self._eam_electrode_points
         if pts is None or len(pts) == 0 or self.loader.mesh is None:
             return
+        if not self.vis_widget.show_electrodes():
+            return   # the actor is already removed above; stay hidden
         self._focus_3d()
         b = self.loader.mesh.bounds
         diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
@@ -1134,6 +1223,14 @@ class CCDAF(QtWidgets.QMainWindow):
             render_points_as_spheres=True, name="eam_electrodes",
             reset_camera=False, pickable=False,
         )
+
+    def _on_electrodes_toggled(self, _on: bool) -> None:
+        """Show/hide the electrode actor without re-rendering the field.
+
+        A direct redraw works in every view — the actor otherwise lingers
+        across the region view, which never calls _draw_electrodes."""
+        self._draw_electrodes()
+        self.plotter.render()
 
     # ==================================================================
     # Seed actions
@@ -1494,7 +1591,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 0, lambda: self.statusBar().showMessage(note, 20000))
 
     def _reset_view(self) -> None:
-        """Clear the 3D viewport — preserves segmentation slice views in 2×2 mode."""
+        """Clear the 3D viewport — other panes (e.g. slice views) survive."""
         self._focus_3d()
         # plotter.clear() forgets the scalar-bar widgets without disabling
         # them, which leaves their representations drawn over the next mesh.
@@ -1502,10 +1599,13 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.clear()
         self.plotter.set_background("black")
         self.plotter.add_axes()
-        if self._segmentation_mode:
+        # clear() also wiped the pane's title — put back the one the view
+        # defines for the 3D role, if any.
+        title = self._view.titles.get("3d")
+        if title:
             self.plotter.add_text(
-                TITLE_FOR["3d"], font_size=9, color="white",
-                name=f"_title_{SUBPLOT_3D[0]}_{SUBPLOT_3D[1]}",
+                title, font_size=9, color="white",
+                name=title_actor_name(self._view.roles["3d"]),
             )
         self._mesh_actor = None
 
@@ -1556,13 +1656,18 @@ class CCDAF(QtWidgets.QMainWindow):
                 # aborts (fatally, from VTK 9.6: "invalid format specifier").
                 "shadow": True,
                 # Interactive scalar bars are unsupported on multi-renderer
-                # plotters — disable them when in 4-quadrant mode.
-                "interactive": not self._segmentation_mode,
+                # plotters — disable them on any multi-view layout.
+                "interactive": not self._view.is_multiview,
             }
         )
         sbar = self.plotter.scalar_bar
         sbar.SetUnconstrainedFontSize(True)
         sbar.SetAnnotationTextScaling(False)
+        # The Regions bar was interactive but its representation was never
+        # built, so the widget and the actor disagreed about its geometry
+        # and resize drags — the vertical ones visibly — were swallowed.
+        # Same treatment as the field bar, keeping the default vertical slot.
+        self._enable_bar_interaction("Regions")
 
         self.plotter.render()
 
@@ -1833,6 +1938,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._wire_slice_pickers()
         self._refresh_slices(reset_camera=True)
         self._action_seg_update_3d()
+        self._sync_close_action()
 
     def _action_seg_close(self) -> None:
         """Drop the active segmentation and revert the plotter to 1×1."""
@@ -1849,7 +1955,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._exit_segmentation_mode()
         for other_sec in ["meshinfo","postproc","seeds","tagging","manual","clipping"]:
             self._set_section_visible(other_sec, True)
-        
+        self._sync_close_action()
         self.statusBar().showMessage("Segmentation closed.")
 
     def _sync_sitk_from_array(self) -> None:
@@ -1926,8 +2032,8 @@ class CCDAF(QtWidgets.QMainWindow):
         if self._seg_array is None:
             return
         for axis in ORIENTATIONS:
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            loc = self._view.roles[axis]
+            self.plotter.subplot(*loc)
             prev = self._slice_actors.get(axis)
             if prev is not None:
                 try:
@@ -1953,9 +2059,9 @@ class CCDAF(QtWidgets.QMainWindow):
             # Overlay slice index & axis label.
             idx = self._seg_idx[axis]
             self.plotter.add_text(
-                f"{TITLE_FOR[axis]}  idx={idx}",
+                f"{self._view.titles[axis]}  idx={idx}",
                 font_size=9, color="yellow",
-                name=f"_title_{row}_{col}",
+                name=title_actor_name(loc),
             )
             # Lock the slice view to its canonical orthographic orientation.
             self._set_slice_camera(axis, reset=reset_camera)
@@ -2057,8 +2163,7 @@ class CCDAF(QtWidgets.QMainWindow):
         }
 
         for axis, lines in plan.items():
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            self.plotter.subplot(*self._view.roles[axis])
             for other_axis, p0, p1 in lines:
                 actor_name = f"crosshair_{axis}_{other_axis}"
                 try:
@@ -2150,8 +2255,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # Capture each slice subplot's renderer.
         self._slice_renderers: Dict[str, object] = {}
         for axis in ORIENTATIONS:
-            row, col = SUBPLOT_FOR[axis]
-            self.plotter.subplot(row, col)
+            self.plotter.subplot(*self._view.roles[axis])
             self._slice_renderers[axis] = self.plotter.renderer
 
         # Reset any previously enabled picker (safe even if none).
@@ -2243,7 +2347,7 @@ class CCDAF(QtWidgets.QMainWindow):
             except Exception:
                 pass
             # Re-snap the canonical slice camera in case any motion happened.
-            self.plotter.subplot(*SUBPLOT_FOR[ax])
+            self.plotter.subplot(*self._view.roles[ax])
             self._set_slice_camera(ax, reset=False)
             cmd = caller.GetCommand(move_id["id"])
             if cmd is not None:

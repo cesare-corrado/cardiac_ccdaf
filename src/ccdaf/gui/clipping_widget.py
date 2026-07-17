@@ -21,13 +21,26 @@ class ClippingWidget(QtWidgets.QGroupBox):
     mv_plane_requested   = QtCore.pyqtSignal()
     clip_apply_requested = QtCore.pyqtSignal()
     clip_revert_requested = QtCore.pyqtSignal()
+    clipping_toggled     = QtCore.pyqtSignal(bool)
 
     def __init__(self,
                  pv_names: List[str],
                  parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
+        # Set by set_enabled_after_accept / reset_state; the start buttons
+        # need both this and the activation checkbox.
+        self._accepted = False
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        self.chk_active = QtWidgets.QCheckBox("Clipping active")
+        self.chk_active.setChecked(False)
+        self.chk_active.setToolTip(
+            "While unchecked, clipping is dormant and the X key belongs to "
+            "manual correction. Both tools want X — this decides the owner."
+        )
+        self.chk_active.toggled.connect(self._on_active_toggled)
+        layout.addWidget(self.chk_active)
 
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("PV:"))
@@ -73,6 +86,9 @@ class ClippingWidget(QtWidgets.QGroupBox):
     def selected_pv(self) -> str:
         return str(self.cmb_pv.currentData())
 
+    def is_clipping_enabled(self) -> bool:
+        return bool(self.chk_active.isChecked())
+
     def set_pv_finish_enabled(self, enabled: bool) -> None:
         self.btn_pv_finish.setEnabled(enabled)
 
@@ -83,19 +99,37 @@ class ClippingWidget(QtWidgets.QGroupBox):
         self.btn_revert.setEnabled(enabled)
 
     def set_enabled_after_accept(self) -> None:
-        """Enable PV and mitral controls once tagging has been accepted."""
-        self.btn_pv_start.setEnabled(True)
-        self.btn_mv_sphere.setEnabled(True)
-        self.btn_mv_plane.setEnabled(True)
+        """Allow PV and mitral controls once tagging has been accepted.
+
+        The start buttons still wait for the activation checkbox."""
+        self._accepted = True
+        self._sync_start_buttons()
 
     def reset_state(self) -> None:
-        """Disable all controls — used by teardown after plotter rebuild."""
+        """Disable all controls — used by teardown after plotter rebuild.
+
+        The activation checkbox is the user's choice and survives."""
+        self._accepted = False
         self.btn_pv_start.setEnabled(False)
         self.btn_pv_finish.setEnabled(False)
         self.btn_mv_sphere.setEnabled(False)
         self.btn_mv_plane.setEnabled(False)
         self.btn_apply.setEnabled(False)
         self.btn_revert.setEnabled(False)
+
+    def _sync_start_buttons(self) -> None:
+        on = self._accepted and self.is_clipping_enabled()
+        self.btn_pv_start.setEnabled(on)
+        self.btn_mv_sphere.setEnabled(on)
+        self.btn_mv_plane.setEnabled(on)
+
+    def _on_active_toggled(self, on: bool) -> None:
+        self._sync_start_buttons()
+        if not on:
+            # Whatever was mid-flight is being abandoned by the host.
+            self.btn_pv_finish.setEnabled(False)
+            self.btn_apply.setEnabled(False)
+        self.clipping_toggled.emit(on)
 
 
 __all__ = ["ClippingWidget"]

@@ -49,6 +49,9 @@ CELL_FIELD = "cell"
 class VisualisationWidget(QtWidgets.QGroupBox):
 
     settings_changed = QtCore.pyqtSignal()
+    # Emitted by the electrode checkbox alone: toggling visibility only needs
+    # the electrode actor redrawn, not the whole field re-rendered.
+    electrodes_toggled = QtCore.pyqtSignal(bool)
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -100,6 +103,16 @@ class VisualisationWidget(QtWidgets.QGroupBox):
         self.spn_iso.setValue(DEFAULT_ISOLINES)
         self.spn_iso.setToolTip("Number of discrete colour bands (minimum 2).")
         grid.addWidget(self.spn_iso, row, 1)
+        row += 1
+
+        self.chk_electrodes = QtWidgets.QCheckBox("Show electrodes")
+        self.chk_electrodes.setChecked(True)
+        self.chk_electrodes.setEnabled(False)   # grey until a mapping brings some
+        self.chk_electrodes.setToolTip(
+            "Draw the mapping's electrode positions on the surface. "
+            "Greyed until a mapping with electrodes is loaded."
+        )
+        grid.addWidget(self.chk_electrodes, row, 0, 1, 2)
 
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
@@ -110,6 +123,7 @@ class VisualisationWidget(QtWidgets.QGroupBox):
         self.spn_min.valueChanged.connect(self._emit)
         self.spn_max.valueChanged.connect(self._emit)
         self.spn_iso.valueChanged.connect(self._emit)
+        self.chk_electrodes.toggled.connect(self.electrodes_toggled.emit)
         self._sync_enabled()
 
     @staticmethod
@@ -183,6 +197,16 @@ class VisualisationWidget(QtWidgets.QGroupBox):
 
     def n_isolines(self) -> int:
         return int(self.spn_iso.value())
+
+    def show_electrodes(self) -> bool:
+        return bool(self.chk_electrodes.isChecked())
+
+    def set_electrodes_available(self, available: bool) -> None:
+        """Grey the electrode checkbox when there are none to show.
+
+        The checked state is the user's choice and survives; only the
+        greying follows the data. Does not emit."""
+        self.chk_electrodes.setEnabled(bool(available))
 
     # -- internals ------------------------------------------------------
     def _sync_enabled(self) -> None:
