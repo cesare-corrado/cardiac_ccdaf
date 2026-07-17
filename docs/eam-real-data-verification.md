@@ -49,6 +49,7 @@ for doing it.
 
 ```
 /home/ccorrad1/data/EGM/patient_data/Carto/SN00{1..5}/*/*.mesh
+/data/cc14/Amsterdam-EGM-MRI/data/Q110001/0_data/Q110001_EAMexport/Carto_Q110001/*.mesh
 ```
 
 17 mappings across SN001–SN004 carry fields; `1-NONE` (SN003/NIEDERER,
@@ -135,6 +136,24 @@ rather than a threshold.
   (0.67%) beyond 2mm. Those 145 would otherwise inherit LAT spanning
   −52.4..119.5 ms against a true range of −53..138 — indistinguishable from
   measurement. With the guard they are NaN.
+- **The guard's scale**: `2 × max(voxel spacing, median source edge)`, not
+  `2 × voxel spacing`. The original rule was wrong and a real run found it.
+  What moves the wall is the smoothing and the morphology, in millimetres —
+  the voxel size does not — so refining the grid shrank the threshold past a
+  drift that had not moved, and the *better* reconstruction discarded more
+  data. On `1-Pre-PVI SR ANALYSE` (Q110001, 13579 points, median edge 1.29mm,
+  vertices 0.87mm apart) at 0.5mm voxels, σ=1.5, morphological opening and
+  closing at r=2:
+  ```
+  guard 2 x 0.5 = 1.0mm  -> 283 of 105526 NaN, in 22 clusters, largest 38
+                            their drift 1.00..1.49mm
+                            each within 1.67mm of a real measurement
+                            i.e. inside one source triangle
+  same run at 1mm voxels -> 0 NaN
+  guard 2 x max(0.5, 1.29) = 2.57mm -> 0 NaN, and a 4mm dilation still 100%
+  ```
+  At a 1mm voxelisation of a Carto shell the voxels win and the rule is
+  unchanged, so every number above still holds.
 - **End to end, both flip pairings, with the closing applied**:
   ```
   new mesh 21614 pts | point fields 14 | cell ['elemTag']
@@ -170,6 +189,16 @@ rather than a threshold.
 
 ## Known, accepted
 
+- **VTK 9.6 offloads a few filters to Viskores and reaches for CUDA.** Where
+  the PTX does not match the driver every such call fails
+  (`cudaErrorUnsupportedPtxVersion`), prints a screenful, and redoes the work
+  on the CPU — correct, but `cell_data_to_point_data` on a 42k-cell shell
+  costs 0.427s against 0.002s with the overrides off, and clipping calls it
+  every pass. Disabled at the package root; `CCDAF_VTK_ACCEL=1` restores it.
+- `vtkDelaunay2D`'s "edge not recovered, polygon fill not possible" is the
+  hole filler's constrained triangulation failing on a loop.
+  `_delaunay_covers_all_loop_edges` catches it and falls back to ear-clip,
+  then a centroid fan. Benign, and VTK prints it regardless.
 - Decimate followed by 40 smoothing iterations loses 4–7% of a decimated
   shell's volume. Reported rather than prevented; volume is a poor metric on
   a Carto shell anyway.
