@@ -77,11 +77,13 @@ from ccdaf.gui.eam_load_dialog import (
 )
 from ccdaf.gui.visualisation_widget import VisualisationWidget
 from ccdaf.gui.mapping_select_dialog import MappingSelectDialog
-from ccdaf.gui.save_mesh_dialog import SaveMeshDialog
+from ccdaf.gui.save_mesh_dialog import SaveMeshDialog, FORMAT_PICKLE
 from ccdaf.gui.eam_export_dialog import EAMExportDialog
 from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
 from ccdaf.io.carto_functions import extract_map_list_names
-from ccdaf.core.eam_loader import load_carto_mapping, displace_electrodes_for
+from ccdaf.core.eam_loader import (
+    EAMData, load_carto_mapping, displace_electrodes_for, read_bundle,
+)
 from ccdaf.core.field_transfer import guard_distance, transfer_fields
 from ccdaf.core.segmentation import (
     binary_mask_image, negate_xy_inplace, segmentation_to_polydata,
@@ -709,19 +711,25 @@ class CCDAF(QtWidgets.QMainWindow):
     def _action_load(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load mesh", str(self.recent_folder),
-            "Mesh files (*.vtk *.vtp *.ply *.stl *.obj);;All files (*)",
+            "All files (*);;"
+            "Meshes (*.vtk *.vtp *.ply *.stl *.obj);;"
+            "Bundle (*.pkl *.pickle)",
         )
-        if fn:
+        if not fn:
+            return
+        if Path(fn).suffix.lower() in (".pkl", ".pickle"):
+            self._load_bundle(fn)
+        else:
             self._load_mesh(fn)
 
-    def _load_mesh(self, filename: str) -> None:
-        try:
-            mesh = self.loader.load(filename)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
-            return
-        self.recent_folder = Path(filename).resolve().parent
+    def _adopt_mesh(self, mesh: pv.PolyData, source_name: str) -> None:
+        """Common setup once ``mesh`` is the working mesh, whatever its source.
 
+        The loader's ``mesh``/``path`` must already be set. Rebuilds the
+        mesh-side tools against the current plotter, refreshes the panels,
+        and renders — everything a fresh mesh needs and nothing EAM- or
+        seed-specific, which the callers add.
+        """
         self.tagger = RegionTagger(mesh)
         self.editor = None
         self.clipper = ClippingTool(
@@ -740,9 +748,9 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.reset_camera()
         self.mesh_info.update_info(mesh)
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
-        self.statusBar().showMessage(f"Loaded {Path(filename).name}")
+        self.statusBar().showMessage(f"Loaded {source_name}")
 
-        ################ manual editor active from beginning ######
+        # Manual editor live from the start (see the X-key routing).
         self.editor = ManualEditor(
             mesh=self.loader.mesh,
             plotter=self.plotter,
@@ -752,7 +760,6 @@ class CCDAF(QtWidgets.QMainWindow):
         )
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
-        ################ manual editor active from beginning ######
 
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
@@ -760,6 +767,69 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
         self._sync_close_action()
+
+    def _load_mesh(self, filename: str) -> None:
+        try:
+            mesh = self.loader.load(filename)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        self.recent_folder = Path(filename).resolve().parent
+        self._reset_eam_state()
+        self._adopt_mesh(mesh, Path(filename).name)
+
+    def _load_bundle(self, filename: str) -> None:
+        """Load a File → Save pickle bundle: mesh, tagging, seeds, electrodes."""
+        try:
+            mesh, seeds, electrodes = read_bundle(filename)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        self.recent_folder = Path(filename).resolve().parent
+        self.loader.mesh = mesh
+        self.loader.path = filename
+        self._reset_eam_state()
+        self._adopt_mesh(mesh, Path(filename).name)
+
+        # Electrodes, if the bundle carried them: restore the state EAM
+        # export needs and draw them.
+        elec_points = self._electrode_points_from_record(electrodes)
+        if elec_points is not None and len(elec_points):
+            self._eam_data = EAMData(
+                mesh=mesh,
+                field_names=list(mesh.point_data.keys()),
+                electrode_points=elec_points,
+                map_name=Path(filename).stem,
+                electrodes=electrodes,
+            )
+            self._eam_electrode_points = elec_points
+            self.vis_widget.set_electrodes_available(True)
+            self.act_eam_export.setEnabled(True)
+            self._render_field()
+
+        # Seeds last, so their markers land on the final view.
+        if seeds:
+            self._apply_loaded_seeds(seeds, Path(filename).name)
+
+    @staticmethod
+    def _electrode_points_from_record(electrodes):
+        """The (N, 3) electrode coordinates from a raw Carto record, or None."""
+        if not electrodes:
+            return None
+        data = np.asarray(electrodes.get("data"), dtype=float)
+        if data.ndim == 2 and data.shape[0] > 0 and data.shape[1] >= 4:
+            return data[:, 1:4]
+        return None
+
+    def _reset_eam_state(self) -> None:
+        """Drop any loaded mapping's state — a fresh non-EAM mesh has none."""
+        self._eam_data = None
+        self._eam_electrode_points = None
+        self._eam_electrode_actor = None
+        self._eam_bar_title = None
+        self._eam_bar_geom = None
+        self.vis_widget.set_electrodes_available(False)
+        self.act_eam_export.setEnabled(False)
 
     def _sync_close_action(self) -> None:
         """File → Close applies whenever a mesh or a segmentation is open."""
@@ -837,14 +907,48 @@ class CCDAF(QtWidgets.QMainWindow):
                 return
 
         try:
-            binary = dlg.selected_binary()
-            self.loader.save(fn, fields=fields, binary=binary)
-            written = ", ".join(fields) if fields else "no fields"
-            self.statusBar().showMessage(
-                f"Saved to {fn} ({'binary' if binary else 'ASCII'}) "
-                f"— wrote {written}")
+            if dlg.selected_format() == FORMAT_PICKLE:
+                self._save_bundle(fn, fields)
+            else:
+                binary = dlg.selected_binary()
+                self.loader.save(fn, fields=fields, binary=binary)
+                written = ", ".join(fields) if fields else "no fields"
+                self.statusBar().showMessage(
+                    f"Saved to {fn} ({'binary' if binary else 'ASCII'}) "
+                    f"— wrote {written}")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
+
+    def _save_bundle(self, fn: str, fields: "list[str]") -> None:
+        """Write the pickle bundle: surface (chosen point fields), seeds,
+        electrodes and elemTag, so the mesh reloads with all of them."""
+        keep = set(fields)
+        surface = self.loader.mesh.copy(deep=True)
+        # polydata_to_carto_dict turns every 1-D point field into a colour
+        # column, so honour the field selection by dropping the rest first.
+        for name in list(surface.point_data.keys()):
+            if name not in keep:
+                surface.point_data.remove(name)
+
+        seeds = None
+        if self.selector is not None and self.selector.is_complete:
+            seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
+
+        electrodes = self._eam_data.electrodes if self._eam_data else None
+        export_binary(
+            fn, surface,
+            electrodes=electrodes,
+            electrode_points=self._eam_electrode_points,
+            seeds=seeds,
+            include_elem_tag=("elemTag" in keep),
+        )
+        parts = []
+        if seeds:
+            parts.append(f"{len(seeds)} seeds")
+        if electrodes is not None:
+            parts.append("electrodes")
+        extra = f" (+ {', '.join(parts)})" if parts else ""
+        self.statusBar().showMessage(f"Saved bundle to {fn}{extra}")
 
     # ==================================================================
     # EAM actions

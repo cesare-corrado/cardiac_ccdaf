@@ -107,14 +107,39 @@ def electrodes_at(electrodes: Optional[dict],
     return out
 
 
+def _plain_seeds(seeds) -> dict:
+    """Seeds as ``{name: [x, y, z]}`` of plain finite floats."""
+    out = {}
+    for name, xyz in seeds.items():
+        arr = np.asarray(xyz, dtype=float).reshape(-1)
+        if arr.shape != (3,) or not np.isfinite(arr).all():
+            raise ValueError(f"seed '{name}' is not a finite 3-vector: {xyz}")
+        out[str(name)] = [float(v) for v in arr]
+    return out
+
+
 def export_binary(path: str, mesh: pv.PolyData,
                   electrodes: Optional[dict] = None,
-                  electrode_points: Optional[np.ndarray] = None) -> None:
-    """Pickle ``{'surface': <reader dict>, 'electrodes': <record>}``."""
+                  electrode_points: Optional[np.ndarray] = None,
+                  seeds: Optional[dict] = None,
+                  include_elem_tag: bool = False) -> None:
+    """Pickle ``{'surface': <reader dict>, 'electrodes': <record>}``.
+
+    ``seeds`` and ``include_elem_tag`` extend the payload for the File →
+    Save bundle: a ``"seeds"`` key (name → xyz) and an ``"elemTag"`` key
+    (the cell tags, which the Carto surface dict cannot carry) appear only
+    when asked for, so the EAM export's own output is unchanged. The
+    reference downstream reads ``['surface']``/``['electrodes']`` and
+    ignores the rest, so the extra keys stay compatible.
+    """
     payload = {
         "surface": polydata_to_carto_dict(mesh),
         "electrodes": electrodes_at(electrodes, electrode_points),
     }
+    if seeds:
+        payload["seeds"] = _plain_seeds(seeds)
+    if include_elem_tag and "elemTag" in mesh.cell_data:
+        payload["elemTag"] = np.asarray(mesh.cell_data["elemTag"]).astype(int)
     with open(path, "wb") as fh:
         pickle.dump(payload, fh)
 

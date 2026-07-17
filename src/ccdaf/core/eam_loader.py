@@ -23,8 +23,9 @@ so they drop out of colour scales instead of flattening them.
 from __future__ import annotations
 
 import os
+import pickle
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pyvista as pv
@@ -105,6 +106,44 @@ def carto_mesh_to_polydata(mesh0: dict) -> pv.PolyData:
 
     poly.cell_data["elemTag"] = np.ones(poly.n_cells, dtype=np.int32)
     return poly
+
+
+def read_bundle(path: str
+                ) -> Tuple[pv.PolyData, Optional[Dict[str, np.ndarray]],
+                           Optional[dict]]:
+    """Read a File → Save pickle bundle back into working objects.
+
+    The inverse of :func:`eam_export.export_binary` used with the bundle
+    keys: the ``"surface"`` dict becomes a PolyData through
+    :func:`carto_mesh_to_polydata`, the ``"elemTag"`` key (if present)
+    restores the cell tags the Carto surface dict cannot carry, and the
+    ``"seeds"`` / ``"electrodes"`` keys come back as they were saved.
+
+    Returns ``(mesh, seeds, electrodes)`` — ``seeds`` a name → xyz mapping
+    or ``None``, ``electrodes`` the raw record or ``None``.
+    """
+    with open(path, "rb") as fh:
+        payload = pickle.load(fh)
+    if not isinstance(payload, dict) or "surface" not in payload:
+        raise ValueError(f"{os.path.basename(path)} is not a mesh bundle "
+                         "(no 'surface' key).")
+
+    mesh = carto_mesh_to_polydata(payload["surface"])
+    if "elemTag" in payload:
+        tags = np.asarray(payload["elemTag"], dtype=np.int32).ravel()
+        if tags.shape[0] == mesh.n_cells:
+            mesh.cell_data["elemTag"] = tags
+
+    seeds: Optional[Dict[str, np.ndarray]] = None
+    if payload.get("seeds"):
+        seeds = {}
+        for name, xyz in payload["seeds"].items():
+            arr = np.asarray(xyz, dtype=float).reshape(-1)
+            if arr.shape == (3,) and np.isfinite(arr).all():
+                seeds[str(name)] = arr
+
+    electrodes = payload.get("electrodes")
+    return mesh, seeds, electrodes
 
 
 def load_carto_mapping(directory: str, map_name: str) -> EAMData:

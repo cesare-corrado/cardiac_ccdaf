@@ -135,6 +135,16 @@ class EAMLoadDialog(QtWidgets.QFileDialog):
             layout.addWidget(QtWidgets.QLabel("EAM format:"), row, 0)
             layout.addWidget(self._cmb_format, row, 1)
 
+        # The EAM-format combo above is the content filter here, so the
+        # built-in 'Files of type' row (a single 'All files (*)') is
+        # redundant — hide it. Names are Qt's own for the non-native dialog.
+        combo = self.findChild(QtWidgets.QComboBox, "fileTypeCombo")
+        if combo is not None:
+            combo.hide()
+        lbl = self.findChild(QtWidgets.QLabel, "fileTypeLabel")
+        if lbl is not None:
+            lbl.hide()
+
         # Re-evaluate the filter whenever the browsed directory changes.
         self.directoryEntered.connect(lambda _path: self._proxy.invalidateFilter())
 
