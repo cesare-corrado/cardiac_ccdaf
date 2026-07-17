@@ -83,6 +83,10 @@ from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
 from ccdaf.io.carto_functions import extract_map_list_names
 from ccdaf.core.eam_loader import load_carto_mapping, displace_electrodes_for
 from ccdaf.core.field_transfer import guard_distance, transfer_fields
+from ccdaf.core.segmentation import (
+    binary_mask_image, negate_xy_inplace, segmentation_to_polydata,
+    sync_sitk_from_array, voxelise_polydata,
+)
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
@@ -1722,7 +1726,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Voxelising mesh…")
         QtWidgets.QApplication.processEvents()
         try:
-            img = self._voxelise_polydata(self.loader.mesh, spacing, flip=flip)
+            img = voxelise_polydata(self.loader.mesh, spacing, flip=flip)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Voxelisation failed", str(exc))
             return
@@ -1775,7 +1779,8 @@ class CCDAF(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents()
         try:
             self._sync_sitk_from_array()
-            poly = self._segmentation_to_polydata(
+            poly = segmentation_to_polydata(
+                self._seg_sitk,
                 flip=flip,
                 filt_stdev=list(self.seg_widget.gfilt_standard_deviation()),
                 filt_rfact=list(self.seg_widget.gfilt_radius_factor()),
@@ -1841,7 +1846,7 @@ class CCDAF(QtWidgets.QMainWindow):
 
         if bool(src["flip"]) != bool(export_flip):
             source_mesh = source_mesh.copy(deep=True)
-            self._negate_xy_inplace(source_mesh)
+            negate_xy_inplace(source_mesh)
             if electrodes is not None and len(electrodes):
                 electrodes = np.asarray(electrodes, dtype=float).copy()
                 electrodes[:, :2] *= -1.0
@@ -1962,25 +1967,7 @@ class CCDAF(QtWidgets.QMainWindow):
         """Push numpy edits back into the SITK image (preserves geometry)."""
         if self._seg_array is None or self._seg_sitk is None:
             return
-        new = sitk.GetImageFromArray(self._seg_array.astype(np.int16))
-        new.SetOrigin(self._seg_sitk.GetOrigin())
-        new.SetSpacing(self._seg_sitk.GetSpacing())
-        new.SetDirection(self._seg_sitk.GetDirection())
-        self._seg_sitk = new
-
-    def _binary_mask_image(self) -> sitk.Image:
-        """Build a uint8 0/1 mask of the current segmentation.
-
-        Done in numpy to dodge ITK's ``BinaryThreshold`` parameter-range
-        checks (which fail when ``upperThreshold`` exceeds the pixel
-        type's max — e.g. ``2**31-1`` on a uint8 voxelisation).
-        """
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-        arr = (sitk.GetArrayFromImage(self._seg_sitk) > 0).astype(np.uint8)
-        out = sitk.GetImageFromArray(arr)
-        out.CopyInformation(self._seg_sitk)
-        return out
+        self._seg_sitk = sync_sitk_from_array(self._seg_array, self._seg_sitk)
 
     # ==================================================================
     # Segmentation — slice rendering
@@ -2613,7 +2600,7 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._seg_push_undo()
         try:
-            mask = self._binary_mask_image()
+            mask = binary_mask_image(self._seg_sitk)
             if op == "dilate":
                 out = sitk.BinaryDilate(mask, radius, kernelType=sitk.sitkBox)
             elif op == "erode":
@@ -2643,7 +2630,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._sync_sitk_from_array()
         self._seg_push_undo()
         try:
-            mask = self._binary_mask_image()
+            mask = binary_mask_image(self._seg_sitk)
             filled = sitk.BinaryFillhole(mask)
             self._seg_sitk = sitk.Cast(filled, self._seg_sitk.GetPixelID())
         except Exception as exc:
@@ -2695,7 +2682,8 @@ class CCDAF(QtWidgets.QMainWindow):
         polys: Dict[int, vtk.vtkPolyData] = {}
         for lbl in present_labels:
             try:
-                polys[lbl] = self._segmentation_to_polydata(
+                polys[lbl] = segmentation_to_polydata(
+                    self._seg_sitk,
                     flip=False,
                     filt_stdev=filt_stdev,
                     filt_rfact=filt_rfact,
@@ -2737,252 +2725,6 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.render()
         self.statusBar().showMessage("3D rendering updated from segmentation.")
 
-    # ==================================================================
-    # Segmentation — voxelisation (mesh → image)
-    # ==================================================================
-    def _voxelise_polydata(self, mesh: pv.PolyData,
-                           spacing: Tuple[float, float, float],
-                           *, flip: bool) -> sitk.Image:
-        """Convert a polydata surface to a binary SITK volume.
-
-        Self-contained stencil-based rasterisation. Foreground fill is
-        vectorised (single allocation through numpy_support).
-        """
-        # Take a writable deep copy of the polydata so optional flips
-        # don't mutate the caller's mesh.
-        poly = vtk.vtkPolyData()
-        poly.DeepCopy(mesh if isinstance(mesh, vtk.vtkPolyData) else mesh)
-
-        if flip:
-            self._negate_xy_inplace(poly)
-
-        spacing_arr = np.asarray(spacing, dtype=float)
-        if (spacing_arr <= 0).any():
-            raise ValueError(f"Spacing must be strictly positive, got {spacing}.")
-
-        white = self._define_image_from_mesh(poly, spacing_arr)
-
-        # Vectorised foreground fill (replaces per-voxel SetTuple1 loop).
-        n_pts = white.GetNumberOfPoints()
-        ones = np.ones(n_pts, dtype=np.uint8)
-        white.GetPointData().SetScalars(
-            numpy_support.numpy_to_vtk(ones, deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
-        )
-
-        stencil = vtk.vtkPolyDataToImageStencil()
-        stencil.SetInputData(poly)
-        stencil.SetOutputOrigin(white.GetOrigin())
-        stencil.SetOutputSpacing(white.GetSpacing())
-        stencil.SetOutputWholeExtent(white.GetExtent())
-        stencil.Update()
-
-        cutter = vtk.vtkImageStencil()
-        cutter.SetInputData(white)
-        cutter.SetStencilConnection(stencil.GetOutputPort())
-        cutter.ReverseStencilOff()
-        cutter.SetBackgroundValue(0)
-        cutter.Update()
-
-        return self._vtk_image_to_sitk(cutter.GetOutput())
-
-    @staticmethod
-    def _define_image_from_mesh(poly: vtk.vtkPolyData,
-                                spacing: np.ndarray) -> vtk.vtkImageData:
-        """Allocate a vtkImageData covering the mesh bounds at *spacing*."""
-        bounds = poly.GetBounds()  # (xmin, xmax, ymin, ymax, zmin, zmax)
-        extents_world = np.array([
-            bounds[1] - bounds[0],
-            bounds[3] - bounds[2],
-            bounds[5] - bounds[4],
-        ], dtype=float)
-        dims = np.maximum(np.ceil(extents_world / spacing).astype(int), 1)
-
-        img = vtk.vtkImageData()
-        img.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
-        img.SetDimensions(int(dims[0]), int(dims[1]), int(dims[2]))
-        # One voxel of background on every side. The upper buffer was always
-        # here, so the stencil never clips a face lying on the bbox max; the
-        # lower one matches it, rather than leaving the mesh's min bound
-        # sitting exactly on the grid's first plane with no background
-        # outside it for the distance transform to measure against.
-        img.SetExtent(0, int(dims[0]) + 2,
-                      0, int(dims[1]) + 2,
-                      0, int(dims[2]) + 2)
-        img.SetOrigin(float(bounds[0] - spacing[0]),
-                      float(bounds[2] - spacing[1]),
-                      float(bounds[4] - spacing[2]))
-        img.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
-        return img
-
-    @staticmethod
-    def _vtk_image_to_sitk(vtk_img: vtk.vtkImageData) -> sitk.Image:
-        """Convert a vtkImageData to a SimpleITK image (no Python loops)."""
-        ext = vtk_img.GetExtent()
-        dims = (ext[1] - ext[0] + 1, ext[3] - ext[2] + 1, ext[5] - ext[4] + 1)
-        scalars = vtk_img.GetPointData().GetScalars()
-        arr = numpy_support.vtk_to_numpy(scalars).reshape(dims[2], dims[1], dims[0])
-        out = sitk.GetImageFromArray(arr.astype(np.uint8))
-        out.SetSpacing(tuple(float(s) for s in vtk_img.GetSpacing()))
-        out.SetOrigin(tuple(float(o) for o in vtk_img.GetOrigin()))
-        return out
-
-    # ==================================================================
-    # Segmentation — meshing (image → polydata)
-    # ==================================================================
-
-    def _label_mask_image(self, label: int) -> sitk.Image:
-        """Return a uint8 0/1 mask for the single label value *label*."""
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-        arr = (sitk.GetArrayFromImage(self._seg_sitk) == label).astype(np.uint8)
-        out = sitk.GetImageFromArray(arr)
-        out.CopyInformation(self._seg_sitk)
-        return out
-
-    def _segmentation_to_polydata(self, *, flip: bool,
-                                           filt_stdev: list[float],
-                                           filt_rfact: list[float],
-                                           label: Optional[int] = None,
-                                  ) -> vtk.vtkPolyData:
-        """Plain marching cubes + smoothing; no preprocessing.
-
-        When *label* is given, only that label value is meshed. Otherwise
-        all voxels > 0 form the surface (legacy binary behaviour).
-        """
-        if self._seg_sitk is None:
-            raise RuntimeError("No segmentation loaded.")
-
-        binary = self._label_mask_image(label) if label is not None \
-            else self._binary_mask_image()
-        vimg = self._sitk_to_vtk_image(binary)
-
-        outside_dist = vtk.vtkImageEuclideanDistance()
-        outside_dist.SetInputData(vimg)
-        outside_dist.SetConsiderAnisotropy(True)
-        outside_dist.SetAlgorithmToSaito()
-        outside_dist.Update()
-        
-        # Flip binary {0,1} → {1,0} so vtkImageEuclideanDistance can compute
-        # distances from outside pixels to the nearest inside boundary.
-        # SetOperationToInvert would compute 1/x, giving inf for 0-pixels
-        # (no background for the distance filter). Use threshold instead.
-        thresh = vtk.vtkImageThreshold()
-        thresh.SetInputData(vimg)
-        thresh.ThresholdByLower(0.5)
-        thresh.SetInValue(1.0)
-        thresh.SetOutValue(0.0)
-        thresh.ReplaceInOn()
-        thresh.ReplaceOutOn()
-        thresh.Update()
-        inside_dist = vtk.vtkImageEuclideanDistance()
-        inside_dist.SetInputData(thresh.GetOutput())
-        inside_dist.SetConsiderAnisotropy(True)
-        inside_dist.SetAlgorithmToSaito()
-        inside_dist.Update()
-
-        sdf = vtk.vtkImageMathematics()
-        sdf.SetInput1Data(outside_dist.GetOutput())
-        sdf.SetInput2Data(inside_dist.GetOutput())
-        sdf.SetOperationToSubtract()
-        sdf.Update()
-        vimg_sdf = sdf.GetOutput()
-        
-        
-        mc = vtk.vtkMarchingCubes()
-        if np.any(np.array(filt_stdev)>0.) and np.any(np.array(filt_rfact)>0.): 
-            gaussian = vtk.vtkImageGaussianSmooth()
-            gaussian.SetStandardDeviations(filt_stdev[0],filt_stdev[1],filt_stdev[2])
-            gaussian.SetRadiusFactors(filt_rfact[0],filt_rfact[1],filt_rfact[2])
-            gaussian.SetDimensionality(3)
-            gaussian.SetInputData(vimg_sdf)
-            gaussian.Update()
-            mc.SetInputConnection(gaussian.GetOutputPort())
-        else:
-            mc.SetInputData(vimg_sdf)
-        mc.ComputeScalarsOff()
-        mc.ComputeNormalsOff()
-        mc.ComputeGradientsOff()
-        mc.SetValue(0, 0.0)
-        mc.Update()
-
-        normals = vtk.vtkPolyDataNormals()
-        normals.SetInputConnection(mc.GetOutputPort())
-        normals.ComputePointNormalsOn()
-        normals.ComputeCellNormalsOff()
-        normals.AutoOrientNormalsOn()
-        normals.FlipNormalsOn()
-        normals.Update()
-
-        tri = vtk.vtkTriangleFilter()
-        tri.SetInputConnection(normals.GetOutputPort())
-        tri.PassVertsOff()
-        tri.PassLinesOff()
-        tri.Update()
-        out: vtk.vtkPolyData = tri.GetOutput()
-
-
-        clean = vtk.vtkCleanPolyData()
-        clean.SetInputData(out)
-        clean.PointMergingOn()
-        clean.ConvertLinesToPointsOff()
-        clean.ConvertPolysToLinesOff()
-        clean.ConvertStripsToPolysOff()
-        clean.Update()
-        out = clean.GetOutput()
-        if flip:
-            self._negate_xy_inplace(out)
-        return out
-
-    @staticmethod
-    def _sitk_to_vtk_image(img: sitk.Image) -> vtk.vtkImageData:
-        """Build a vtkImageData mirroring *img*'s geometry (vectorised)."""
-        size = list(img.GetSize())
-        spacing = list(img.GetSpacing())
-        origin = list(img.GetOrigin())
-        direction = list(img.GetDirection())
-
-        vimg = vtk.vtkImageData()
-        vimg.SetDimensions(int(size[0]), int(size[1]), int(size[2]))
-        vimg.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
-        vimg.SetOrigin(float(origin[0]), float(origin[1]), float(origin[2]))
-        vimg.SetExtent(0, size[0] - 1, 0, size[1] - 1, 0, size[2] - 1)
-        if vtk.vtkVersion.GetVTKMajorVersion() >= 9 and len(direction) == 9:
-            vimg.SetDirectionMatrix(direction)
-
-        # SITK array shape is (Z, Y, X) C-contiguous; ravel matches VTK
-        # linear indexing where X varies fastest.
-        arr = sitk.GetArrayFromImage(img)
-        flat = np.ascontiguousarray(arr).ravel()
-        vimg.GetPointData().SetScalars(numpy_support.numpy_to_vtk(flat, deep=True))
-        return vimg
-
-    @staticmethod
-    def _smooth_polydata(poly: vtk.vtkPolyData, iterations: int,
-                         relaxation: float) -> vtk.vtkPolyData:
-        s = vtk.vtkSmoothPolyDataFilter()
-        s.SetInputData(poly)
-        s.SetNumberOfIterations(int(iterations))
-        s.SetFeatureAngle(60.0)
-        s.FeatureEdgeSmoothingOff()
-        s.SetRelaxationFactor(float(relaxation))
-        s.BoundarySmoothingOff()
-        s.SetConvergence(0.0)
-        s.Update()
-        return s.GetOutput()
-
-    @staticmethod
-    def _negate_xy_inplace(poly: vtk.vtkPolyData) -> None:
-        """Vectorised X/Y flip used by the MIRTK-orientation paths."""
-        pts = poly.GetPoints()
-        if pts is None or pts.GetNumberOfPoints() == 0:
-            return
-        arr = numpy_support.vtk_to_numpy(pts.GetData()).copy()
-        arr[:, 0] *= -1.0
-        arr[:, 1] *= -1.0
-        new_data = numpy_support.numpy_to_vtk(arr, deep=True)
-        new_pts = vtk.vtkPoints()
-        new_pts.SetData(new_data)
-        poly.SetPoints(new_pts)
 
 
 # ---------------------------------------------------------------------------

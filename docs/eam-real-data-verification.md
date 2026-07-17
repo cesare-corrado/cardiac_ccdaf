@@ -163,6 +163,11 @@ rather than a threshold.
   Transferred 13 point and 1 cell fields; 145 of 21614 vertices sit further
     than 2 from anything measured and were left as no-data.
   ```
+  These counts are the **flip=False pairing's**. The flip=True pairing
+  legitimately differs (a 2026-07 re-run: 21692 pts, LAT NaN 138): negating
+  x/y re-anchors the voxel grid on the negated bounds — a different
+  sub-voxel offset — so it is not a mirror of the same rasterisation. Both
+  are correct; compare a re-run against the pairing it actually ran.
 - **Orientation**: `_segmentation_to_polydata` calls `FlipNormalsOn()`, which
   inverts the signed distance — the sign follows triangle **winding**, not the
   stored `Normals` array. On a sphere: `[-9.95, 10.02]` becomes
