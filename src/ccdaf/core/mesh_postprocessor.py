@@ -21,7 +21,6 @@ neighbour lookup (integer arrays are preserved exactly).
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional, Sequence, Set
 

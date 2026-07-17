@@ -84,13 +84,12 @@ def read_carto_mesh_file(mesh_filename: str) -> dict:
                      
     with open(mesh_filename,'rb') as fm:
         data   = fm.readlines()
-        header = data[:4]
         data   = data[4:]
         for row,rowdata in enumerate(data):
             data[row]=rowdata.strip()
             try:
                 data[row]=data[row].decode('utf8')
-            except:
+            except Exception:
                 data[row]=data[row].decode('latin-1')
     section_index_start = []
     for sname in section_names:
@@ -199,7 +198,6 @@ def load_carto_electrodes(carto_elec: str)  -> dict:
                  ],dtype=int)
     with open(carto_elec,'r') as fcar:
         data_car = fcar.readlines()
-        VERSION  = data_car[0]
         data_car = data_car[1:]
     if len(data_car)>0:
         for irow, row_values in enumerate(data_car):

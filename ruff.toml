@@ -1,0 +1,25 @@
+# Ruff configuration for CCDAF continuous integration.
+#
+# The gate is ruff's default rule set: pyflakes (F) plus the pycodestyle
+# error families E4 (imports), E7 (statement-level mistakes) and E9 (syntax).
+# These flag genuine defects — undefined names, unused imports/variables,
+# broken comparisons, bare excepts, syntax errors — not layout. Formatting
+# rules (line length E5, whitespace E2, warnings W) are deliberately left
+# out so the linter never fights the house style; they can be layered in
+# later, non-blocking, if ever wanted.
+#
+# The whole tree is in scope, including io/carto_functions.py: it is part of
+# the repository and is held to the same defect bar as everything else.
+
+target-version = "py312"
+line-length = 100      # a target, not enforced (E5/E501 is not selected)
+
+extend-exclude = [
+    "*.egg-info",
+    "**/__pycache__",
+    "**/*.pyc",
+    ".ruff_cache",
+]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

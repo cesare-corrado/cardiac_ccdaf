@@ -107,9 +107,6 @@ class SeedGeometryResolver:
         if finite.size == 0:
             raise GeometryError("geodesic computation returned no finite values")
         q1 = float(np.percentile(finite, 25))
-        med = float(np.percentile(finite, 50))
-        q3 = float(np.percentile(finite, 75))
-        iqr = max(q3 - q1, 0.0)
         # Classic upper Tukey fence: values above (median + 1.5*IQR) are
         # statistical outliers — on an atrial mesh, those are the PV tips.
         #tukey_threshold    = med + 0.5 * iqr

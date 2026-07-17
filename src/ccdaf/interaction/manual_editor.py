@@ -23,12 +23,15 @@ from __future__ import annotations
 
 from collections import deque
 from enum import Enum, auto
-from typing import Callable, Deque, Dict, Optional, Set
+from typing import TYPE_CHECKING, Callable, Deque, Optional, Set
 from scipy.spatial import cKDTree
 import numpy as np
 import pyvista as pv
 
 from ccdaf.core.mesh_loader import BODY_LABEL, UNASSIGNED
+
+if TYPE_CHECKING:
+    from ccdaf.core.region_tagger import RegionTagger
 
 
 ALLOWED_LABELS = (11, 13, 15, 17, 19, BODY_LABEL)
@@ -156,8 +159,7 @@ class ManualEditor:
         # 4. Use the tagger's hole-filling logic
         filled_label = tagger._fill_holes(tri_label)
         
-        # 5. Write back to mesh, respecting the BODY_LABEL for background
-        assigned = tri_label != UNASSIGNED
+        # 5. Write the filled labels back to the mesh
         self.mesh.cell_data["elemTag"] = filled_label
         
         # 6. Refresh the view
