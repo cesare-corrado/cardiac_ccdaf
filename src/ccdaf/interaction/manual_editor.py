@@ -63,9 +63,17 @@ class ManualEditor:
         self._sphere_actor = None
         self._undo_stack: Deque[np.ndarray] = deque(maxlen=3)
 
-        # Bind the commit key once; the callback is a no-op while idle.
-        self.plotter.add_key_event("x", self._commit)
-        self.plotter.add_key_event("X", self._commit)
+        # Bind the commit key; the callback is a no-op while idle. An editor
+        # is remade whenever the mesh or the plotter is, and add_key_event
+        # appends rather than replaces — so drop any earlier binding, or X
+        # also commits into the editors that came before, each holding a mesh
+        # that is no longer on screen.
+        for key in ("x", "X"):
+            try:
+                self.plotter.clear_events_for_key(key)
+            except Exception:
+                pass
+            self.plotter.add_key_event(key, self._commit)
         self._prepare_search_index(mesh)
     # ------------------------------------------------------------------
     # Public API

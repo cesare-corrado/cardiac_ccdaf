@@ -7,3 +7,6 @@ PyQt5>=5.15
 matplotlib>=3.7
 SimpleITK>=2.4
 trimesh>=4.0
+# trimesh.fix_normals() needs networkx (an optional extra of trimesh);
+# decimate raises ModuleNotFoundError without it.
+networkx>=3.0

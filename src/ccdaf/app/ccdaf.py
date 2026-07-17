@@ -28,6 +28,7 @@ Run
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -71,6 +72,17 @@ from ccdaf.gui.seed_widget import SeedWidget
 from ccdaf.gui.tagging_widget import TaggingWidget
 from ccdaf.gui.manual_correction_widget import ManualCorrectionWidget
 from ccdaf.gui.clipping_widget import ClippingWidget
+from ccdaf.gui.eam_load_dialog import (
+    EAMLoadDialog, FORMAT_NONE, FORMAT_CARTO_STUDY, FORMAT_CARTO_MAPPINGS,
+)
+from ccdaf.gui.visualisation_widget import VisualisationWidget
+from ccdaf.gui.mapping_select_dialog import MappingSelectDialog
+from ccdaf.gui.save_mesh_dialog import SaveMeshDialog
+from ccdaf.gui.eam_export_dialog import EAMExportDialog
+from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
+from ccdaf.io.carto_functions import extract_map_list_names
+from ccdaf.core.eam_loader import load_carto_mapping, displace_electrodes_for
+from ccdaf.core.field_transfer import guard_distance, transfer_fields
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +113,28 @@ SEG_LABEL_COLORS: Dict[int, str] = {
 _SEG_COLOR_LIST = [SEG_LABEL_COLORS[i] for i in range(9)]
 
 PV_NAMES = ("LSPV", "LIPV", "RSPV", "RIPV")
+
+# Fields whose values are labels rather than measurements. A colour ramp
+# over these would be meaningless, so the visualisation widget hands them
+# to the region path (discrete colours + names) instead. Further label
+# fields belong here rather than in a paradigm of their own.
+CATEGORICAL_FIELDS = ("elemTag",)
+
+# EAM scalar bar: horizontal, along the bottom. Sizes are fractions of the
+# viewport, so the height giving a 20:1 bar on screen depends on the window's
+# own aspect — see _eam_bar_default_geom().
+EAM_BAR_WIDTH  = 0.6       # fraction of the viewport width
+EAM_BAR_ASPECT = 20.0      # length : height, as seen on screen
+EAM_BAR_POS_X  = 0.2
+EAM_BAR_POS_Y  = 0.05
+# Out-of-range colors: values past a manual min/max are flagged rather than
+# clamped to the map's end colors. They only ever show where data actually
+# falls outside the range, so an auto range makes them disappear by itself.
+EAM_BELOW_COLOR = "brown"
+EAM_ABOVE_COLOR = "magenta"
+# EAM electrodes, drawn as Gaussian points.
+EAM_ELECTRODE_COLOR = (100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0)
+EAM_ELECTRODE_RADIUS_FRAC = 0.008     # of the mesh's bounding-box diagonal
 
 
 # Subplot positions for the 2x2 view.
@@ -152,12 +186,29 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipper: Optional[ClippingTool] = None
         self._mesh_actor = None
 
+        # ---- EAM (electroanatomical mapping) state ---------------------
+        self._eam_directory: Optional[str] = None
+        self._eam_format: Optional[str] = None
+        self._eam_selected_file: Optional[str] = None
+        self._eam_data = None                              # EAMData once loaded
+        self._eam_electrode_points: Optional[np.ndarray] = None
+        self._eam_electrode_actor = None
+        # Title of the scalar bar we last built, and where the user dragged it
+        # to — a re-render rebuilds the bar, and would otherwise reset it.
+        self._eam_bar_title: Optional[str] = None
+        self._eam_bar_geom = None
+
         # ---- segmentation state ----------------------------------------
         self._seg_sitk: Optional[sitk.Image] = None
         self._seg_array: Optional[np.ndarray] = None  # shape (Z, Y, X), sitk convention
         self._seg_origin: Tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._seg_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0)
         self._seg_undo_stack: list = []  # up to 2 snapshots of _seg_array
+        # The mesh this segmentation was voxelised from, with the flip and
+        # spacing used — what converting it back needs to carry the fields
+        # and electrodes over. None ⇔ the segmentation came off disk.
+        self._seg_source: Optional[dict] = None
+        self._transfer_note: Optional[str] = None
         self._seg_idx: Dict[str, int] = {"axial": 0, "sagittal": 0, "coronal": 0}
         self._slice_actors: Dict[str, object] = {}
         self._paint_active: bool = False
@@ -251,6 +302,16 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_seg_close.triggered.connect(self._action_seg_close)
         seg_menu.addAction(self.act_seg_close)
 
+        # --- EAM menu (electroanatomical mapping) ----------------------
+        eam_menu = menubar.addMenu("&EAM")
+        self.act_eam_load = QtWidgets.QAction("&Load EAM…", self)
+        self.act_eam_load.triggered.connect(self._action_load_eam)
+        eam_menu.addAction(self.act_eam_load)
+        self.act_eam_export = QtWidgets.QAction("&Export…", self)
+        self.act_eam_export.setEnabled(False)
+        self.act_eam_export.triggered.connect(self._action_export_eam)
+        eam_menu.addAction(self.act_eam_export)
+
         # Visualise menu — toggles the left-panel sections.
         self.visualise_menu = menubar.addMenu("&Visualise")
 
@@ -283,10 +344,11 @@ class CCDAF(QtWidgets.QMainWindow):
             mesh_getter=lambda: self.loader.mesh,
             mesh_setter=self._replace_mesh,
             on_status=self.statusBar().showMessage,
+            on_surface_moved=self._on_surface_moved,
         )
         self.postproc.mesh_changed.connect(self._on_postproc_applied)
         self.postproc.setTitle("")
-        body = self._register_section(v, "postproc", "Post-processing")
+        body = self._register_section(v, "postproc", "Mesh post-processing")
         body.addWidget(self.postproc)
 
         # --- Seeds ------------------------------------------------------
@@ -337,6 +399,13 @@ class CCDAF(QtWidgets.QMainWindow):
         body = self._register_section(v, "segmentation", "Segmentation")
         body.addWidget(self.seg_widget)
         self._set_section_visible("segmentation", False)
+
+        # --- EAM display (hidden until an EAM mapping is loaded) --------
+        self.vis_widget = VisualisationWidget()
+        self.vis_widget.settings_changed.connect(self._render_field)
+        body = self._register_section(v, "visualisation", "Visualisation")
+        body.addWidget(self.vis_widget)
+        self._set_section_visible("visualisation", False)
 
         v.addStretch(1)
 
@@ -462,6 +531,33 @@ class CCDAF(QtWidgets.QMainWindow):
             self._reposition_update3d_overlay()
         return super().eventFilter(obj, event)
 
+    def _build_mesh_tools(self) -> None:
+        """(Re)bind the mesh-side tools to whichever plotter is current.
+
+        The clipper and the editor both hold the plotter they were built
+        against, so both die with it and both have to be remade whenever it
+        is rebuilt. Only the clipper was, which left manual correction bound
+        to nothing after any trip through the segmentation: tagging re-enables
+        the button regardless, so it looked live and swallowed every click.
+        """
+        if self.loader.mesh is None:
+            return
+        self.clipper = ClippingTool(
+            mesh_getter=lambda: self.loader.mesh,
+            mesh_setter=self._replace_mesh,
+            plotter=self.plotter,
+            on_status=self.statusBar().showMessage,
+        )
+        self.editor = ManualEditor(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_render=self._render_mesh,
+            on_state=lambda s: None,
+            on_commit=self._on_edit_committed,
+        )
+        self.manual_widget.set_active(True)
+        self.manual_widget.set_undo_enabled(False)
+
     def _enter_segmentation_mode(self) -> None:
         if self._segmentation_mode:
             return
@@ -471,13 +567,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self._segmentation_mode = True
         self._build_plotter((2, 2))
         if self.loader.mesh is not None:
-            self._render_mesh()
-            self.clipper = ClippingTool(
-                mesh_getter=lambda: self.loader.mesh,
-                mesh_setter=self._replace_mesh,
-                plotter=self.plotter,
-                on_status=self.statusBar().showMessage,
-            )
+            self._render_field()
+            self._build_mesh_tools()
         self._create_update3d_overlay()
 
     def _exit_segmentation_mode(self) -> None:
@@ -491,14 +582,9 @@ class CCDAF(QtWidgets.QMainWindow):
         self._seg_3d_actors = []
         self._build_plotter((1, 1))
         if self.loader.mesh is not None:
-            self._render_mesh()
+            self._render_field()
             self.plotter.reset_camera()
-            self.clipper = ClippingTool(
-                mesh_getter=lambda: self.loader.mesh,
-                mesh_setter=self._replace_mesh,
-                plotter=self.plotter,
-                on_status=self.statusBar().showMessage,
-            )
+            self._build_mesh_tools()
 
     def _teardown_mesh_tools(self, *, rebuild_clipper: bool) -> None:
         """Drop refs to selector/editor/clipper bound to the old plotter."""
@@ -619,6 +705,10 @@ class CCDAF(QtWidgets.QMainWindow):
             on_status=self.statusBar().showMessage,
         )
         self._reset_view()
+        # A plain mesh has fields too (elemTag, and whatever the file carried),
+        # so the visualisation panel applies to it just as much as to a mapping.
+        self._populate_fields()
+        self._set_section_visible("visualisation", True)
         self._render_mesh()
         self._focus_3d()
         self.plotter.reset_camera()
@@ -646,11 +736,18 @@ class CCDAF(QtWidgets.QMainWindow):
     def _action_save(self) -> None:
         if self.loader.mesh is None:
             return
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save mesh", str(self.recent_folder), "VTK (*.vtk);;All files (*)",
+        mesh = self.loader.mesh
+        dlg = SaveMeshDialog(
+            point_fields=list(mesh.point_data.keys()),
+            cell_fields=list(mesh.cell_data.keys()),
+            start_dir=str(self.recent_folder), parent=self,
         )
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        fn = dlg.selected_path()
         if not fn:
             return
+        fields = dlg.selected_fields()
         self.recent_folder = Path(fn).resolve().parent
         if Path(fn).exists():
             reply = QtWidgets.QMessageBox.question(
@@ -664,10 +761,379 @@ class CCDAF(QtWidgets.QMainWindow):
                 return
 
         try:
-            self.loader.save(fn)
-            self.statusBar().showMessage(f"Saved to {fn}")
+            binary = dlg.selected_binary()
+            self.loader.save(fn, fields=fields, binary=binary)
+            written = ", ".join(fields) if fields else "no fields"
+            self.statusBar().showMessage(
+                f"Saved to {fn} ({'binary' if binary else 'ASCII'}) "
+                f"— wrote {written}")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
+
+    # ==================================================================
+    # EAM actions
+    # ==================================================================
+    def _action_load_eam(self) -> None:
+        """Pick an EAM source, resolve the map name, and load the mapping.
+
+        * ``Carto-Study``    — the picked study XML feeds
+          ``extract_map_list_names``; the user then chooses one mapping from a
+          radio-button pop-up.
+        * ``Carto-mappings`` — the map name is the picked ``.mesh`` file's stem.
+        """
+        dlg = EAMLoadDialog(start_dir=str(self.recent_folder), parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        path = dlg.selected_path()
+        if not path:
+            return
+        self._eam_selected_file = path
+        self._eam_directory = str(Path(path).parent)
+        self._eam_format = dlg.selected_format()
+        self.recent_folder = Path(self._eam_directory)
+
+        if self._eam_format == FORMAT_CARTO_STUDY:
+            try:
+                map_names = extract_map_list_names(path)
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(
+                    self, "EAM", f"Could not read the study file:\n{exc}")
+                return
+            if not map_names:
+                QtWidgets.QMessageBox.warning(
+                    self, "EAM", "This study lists no mappings.")
+                return
+            sel = MappingSelectDialog(map_names, parent=self)
+            if sel.exec_() != QtWidgets.QDialog.Accepted:
+                return
+            map_name = sel.selected_mapping()
+        elif self._eam_format == FORMAT_CARTO_MAPPINGS:
+            map_name = Path(path).stem
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "EAM",
+                "Loading is supported for the Carto-Study and Carto-mappings "
+                "formats. Pick one of those to load a mapping.")
+            return
+
+        if not map_name:
+            QtWidgets.QMessageBox.warning(self, "EAM", "No mapping selected.")
+            return
+        self._load_eam_mapping(self._eam_directory, map_name)
+
+    def _load_eam_mapping(self, directory: str, map_name: str) -> None:
+        """Read ``<map_name>.mesh`` + electrodes and adopt them as the working
+        mesh, then show the EAM panel and render the first field + electrodes."""
+        self.statusBar().showMessage(f"Loading EAM mapping '{map_name}'…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            eam = load_carto_mapping(directory, map_name)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "EAM load failed",
+                f"Could not load mapping '{map_name}':\n{exc}")
+            self.statusBar().showMessage("EAM load failed.")
+            return
+
+        mesh = eam.mesh
+        self._eam_data = eam
+        self._eam_electrode_points = eam.electrode_points
+
+        # Adopt as the working mesh and (re)build the mesh-side tools.
+        self.loader.mesh = mesh
+        self.loader.path = None
+        self.tagger = RegionTagger(mesh)
+        self.clipper = ClippingTool(
+            mesh_getter=lambda: self.loader.mesh,
+            mesh_setter=self._replace_mesh,
+            plotter=self.plotter,
+            on_status=self.statusBar().showMessage,
+        )
+        self.editor = ManualEditor(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_render=self._render_mesh,
+            on_state=lambda s: None,
+            on_commit=self._on_edit_committed,
+        )
+        self.manual_widget.set_active(True)
+        self.manual_widget.set_undo_enabled(False)
+        self.seed_widget.set_start_enabled(True)
+        self.seed_widget.set_reset_enabled(True)
+        self.seed_widget.set_prompt(
+            "EAM mapping loaded. Click 'Start seed selection'.")
+        self.act_save.setEnabled(True)
+        self.act_seg_from_mesh.setEnabled(True)
+        self.mesh_info.update_info(mesh)
+
+        # EAM display panel: populate fields and reveal it.
+        self._populate_fields()
+        if eam.field_names:
+            self.vis_widget.select_field(eam.field_names[0])
+        self._set_section_visible("visualisation", True)
+        self.act_eam_export.setEnabled(True)
+
+        # Render coloured by the first field, with electrode spheres.
+        self._reset_view()
+        self._render_field()
+        self._focus_3d()
+        self.plotter.reset_camera()
+        self.plotter.render()
+        self.statusBar().showMessage(
+            f"Loaded EAM mapping '{map_name}': {mesh.n_points} points, "
+            f"{len(self._eam_electrode_points)} electrodes.")
+
+    def _clear_scalar_bars(self) -> None:
+        """Drop every scalar bar on the plotter.
+
+        The mesh is always the single 'atrium' actor, so at most one bar is
+        ever meant to be on screen. Bars are keyed by title, so without this
+        each new title (another EAM field, or Regions) stacks a further bar.
+
+        An interactive bar is two props: the actor pyvista tracks by title,
+        and the widget's representation, which is what actually draws it.
+        Taking the mesh actor away makes pyvista forget the bar its mapper
+        fed — it drops the actor and the title, and leaves the representation
+        on screen with nothing left that names it. So the widgets are
+        disabled from their own dict rather than through the titles pyvista
+        still admits to; going by title alone leaves the old bar painted
+        beside the new one.
+        """
+        widgets = getattr(self.plotter.scalar_bars, "_scalar_bar_widgets", {})
+        for widget in list(widgets.values()):
+            try:
+                widget.SetEnabled(0)
+            except Exception:
+                pass
+        for title in list(self.plotter.scalar_bars.keys()):
+            try:
+                self.plotter.remove_scalar_bar(title, render=False)
+            except Exception:
+                pass
+        widgets.clear()
+
+    def _eam_bar_widget(self, title: Optional[str]):
+        """The interactive widget behind a scalar bar, or None.
+
+        pyvista keeps these in a private dict on the ScalarBars collection;
+        there is no public accessor.
+        """
+        if title is None:
+            return None
+        widgets = getattr(self.plotter.scalar_bars, "_scalar_bar_widgets", {})
+        return widgets.get(title)
+
+    def _remember_eam_bar_geom(self) -> None:
+        """Note where the user dragged/resized the EAM bar, so the next render
+        restores it instead of snapping back to the default corner."""
+        widget = self._eam_bar_widget(self._eam_bar_title)
+        if widget is None:
+            return
+        try:
+            rep = widget.GetRepresentation()
+            self._eam_bar_geom = (tuple(rep.GetPosition()),
+                                  tuple(rep.GetPosition2()))
+        except Exception:
+            pass
+
+    def _eam_bar_default_geom(self):
+        """Where a fresh EAM bar goes: horizontal, EAM_BAR_ASPECT:1 on screen.
+
+        VTK sizes the bar in viewport fractions, so the height fraction that
+        reads as 20:1 depends on the window's aspect. A 2x2 segmentation grid
+        halves both sides and so leaves the ratio — and this formula — intact.
+        """
+        try:
+            win_w, win_h = (float(v) for v in self.plotter.window_size)
+        except Exception:
+            win_w = win_h = 0.0
+        if win_w <= 0.0 or win_h <= 0.0:
+            win_w = win_h = 1.0
+        height = EAM_BAR_WIDTH * (win_w / win_h) / EAM_BAR_ASPECT
+        return (EAM_BAR_POS_X, EAM_BAR_POS_Y), (EAM_BAR_WIDTH, height)
+
+    def _place_eam_scalar_bar(self, title: str) -> None:
+        """Give an interactive scalar bar our geometry and let the mouse resize it.
+
+        An interactive bar is driven by its widget's representation, which
+        resets the actor to VTK's defaults and ignores the width/height passed
+        to ``add_mesh``. Setting the representation keeps our size *and* the
+        dragging; ``BuildRepresentation`` is what copies the values onto the
+        actor. Orientation is left to the representation's AutoOrient, which
+        follows the bar's aspect — so a bar dragged tall turns vertical.
+        """
+        self._eam_bar_title = title
+        try:
+            # pyvista draws an 'above'/'below' swatch whenever the lookup table
+            # carries an out-of-range colour, and offers no kwarg to stop it —
+            # the swatch would show even where no data is out of range.
+            bar = self.plotter.scalar_bars[title]
+            bar.DrawAboveRangeSwatchOff()
+            bar.DrawBelowRangeSwatchOff()
+        except Exception:
+            pass
+
+        widget = self._eam_bar_widget(title)
+        if widget is None:      # non-interactive bar: add_mesh's size stands
+            return
+        (px, py), (w, h) = self._eam_bar_geom or self._eam_bar_default_geom()
+        try:
+            widget.SetResizable(True)
+            widget.SetRepositionable(True)
+            rep = widget.GetRepresentation()
+            rep.ProportionalResizeOff()    # width and height move independently
+            rep.SetShowBorderToActive()    # handles appear on hover, to grab
+            rep.SetPosition(px, py)
+            rep.SetPosition2(w, h)
+            rep.BuildRepresentation()
+        except Exception:
+            pass
+
+    def _populate_fields(self, keep_selection: bool = False) -> None:
+        """Offer every field the current mesh carries, point and cell alike."""
+        mesh = self.loader.mesh
+        if mesh is None:
+            return
+        previous = self.vis_widget.current_field() if keep_selection else None
+        self.vis_widget.set_fields(
+            point_fields=list(mesh.point_data.keys()),
+            cell_fields=[k for k in mesh.cell_data.keys() if k != "render_idx"],
+            categorical=CATEGORICAL_FIELDS,
+        )
+        if previous is not None:
+            self.vis_widget.select_field(previous)
+
+    def _render_field(self, *_args) -> None:
+        """Draw whichever field the visualisation widget has selected.
+
+        Label fields go through the region path — discrete colours and names —
+        because a continuous ramp over labels says nothing. Everything else is
+        a measurement and gets the colour map.
+        """
+        if self.loader.mesh is None:
+            return
+        if self.vis_widget.current_field() is None:
+            self._render_mesh()
+            return
+        if self.vis_widget.is_categorical():
+            self._render_mesh()
+        else:
+            self._render_scalar_field()
+
+    def _render_scalar_field(self, *_args) -> None:
+        """Colour the working mesh by the selected measured field and (re)draw
+        the EAM electrodes. Falls back to a plain surface when the field is
+        absent or all no-data.
+
+        Works for a field on either association: point values are interpolated
+        across each triangle by the mapper, cell values are flat over it.
+
+        The range is the field's own when *auto* is ticked, otherwise the
+        widget's; values outside a manual range are flagged brown (below) and
+        magenta (above).
+        """
+        mesh = self.loader.mesh
+        if mesh is None:
+            return
+        self._focus_3d()
+        # Bars first: removing the mesh actor makes pyvista forget the bar it
+        # fed, and a forgotten bar can no longer be cleared by title.
+        self._remember_eam_bar_geom()
+        self._clear_scalar_bars()
+        try:
+            self.plotter.remove_actor("atrium", reset_camera=False)
+        except Exception:
+            pass
+        self._mesh_actor = None
+
+        field = self.vis_widget.current_field()
+        arr = None
+        if field and field in mesh.point_data:
+            arr = np.asarray(mesh.point_data[field], dtype=float)
+        elif field and field in mesh.cell_data:
+            arr = np.asarray(mesh.cell_data[field], dtype=float)
+        if arr is not None and np.isfinite(arr).any():
+            finite = arr[np.isfinite(arr)]
+            if self.vis_widget.is_auto():
+                lo, hi = float(finite.min()), float(finite.max())
+                self.vis_widget.set_range_display(lo, hi)
+            else:
+                lo, hi = self.vis_widget.clim()
+            if hi <= lo:   # constant field, or min/max typed the wrong way round
+                lo, hi = min(lo, hi) - 0.5, max(lo, hi) + 0.5
+            n_bands = self.vis_widget.n_isolines()
+            # The bar spans the data as well as the chosen range, so data left
+            # outside the range stays visible on it as a flat brown/magenta run.
+            bar_lo = min(lo, float(finite.min()))
+            bar_hi = max(hi, float(finite.max()))
+            lut = _eam_lookup_table(self.vis_widget.current_cmap(),
+                                    lo, hi, bar_lo, bar_hi, n_bands)
+            # Interactive scalar bars are unsupported on multi-renderer
+            # plotters — disable them when in 4-quadrant mode.
+            interactive = not self._segmentation_mode
+            (px, py), (bw, bh) = self._eam_bar_geom or self._eam_bar_default_geom()
+            self._mesh_actor = self.plotter.add_mesh(
+                mesh, scalars=field, cmap=lut, clim=(bar_lo, bar_hi),
+                nan_color="lightgrey", show_edges=False, name="atrium",
+                reset_camera=False,
+                scalar_bar_args={
+                    "title": str(field),
+                    "n_labels": 3,        # min, mid, max
+                    # n_colors is left out on purpose: the bar then takes the
+                    # table's own entry count, so the brown/magenta runs land
+                    # on the boundaries rather than being resampled across them.
+                    # 'vertical' must be explicit: pyvista only sets it from a
+                    # vertical theme, and its None branches misplace the bar.
+                    "vertical": False,
+                    "width": bw,
+                    "height": bh,
+                    "position_x": px,
+                    "position_y": py,
+                    # The theme's font is black and the 3D view is black.
+                    "color": "white",
+                    "interactive": interactive,
+                },
+            )
+            self._place_eam_scalar_bar(str(field))
+        else:
+            self._mesh_actor = self.plotter.add_mesh(
+                mesh, color="lightgrey", show_edges=False, name="atrium",
+                reset_camera=False,
+            )
+        self._draw_electrodes()
+        self.plotter.render()
+
+    def _draw_electrodes(self) -> None:
+        """(Re)draw the EAM electrode positions as Gaussian points.
+
+        ``points_gaussian`` is pyvista's equivalent of ParaView's Point
+        Gaussian representation; spheres are its sphere shader preset. The
+        default gaussian-blur preset washes the electrodes out against the
+        surface, leaving them visible only where they overhang the background.
+        """
+        try:
+            self.plotter.remove_actor("eam_electrodes", reset_camera=False)
+        except Exception:
+            pass
+        self._eam_electrode_actor = None
+        pts = self._eam_electrode_points
+        if pts is None or len(pts) == 0 or self.loader.mesh is None:
+            return
+        self._focus_3d()
+        b = self.loader.mesh.bounds
+        diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
+        radius = max(EAM_ELECTRODE_RADIUS_FRAC * diag, 1e-6)
+        cloud = pv.PolyData(np.asarray(pts, dtype=float))
+        # The Gaussian mapper scales by point_size * dataset.length / 1300;
+        # invert that so the blobs keep a fixed size in world units.
+        length = float(cloud.length) or 1.0
+        point_size = radius * 1300.0 / length
+        self._eam_electrode_actor = self.plotter.add_mesh(
+            cloud, style="points_gaussian", color=EAM_ELECTRODE_COLOR,
+            point_size=point_size, emissive=False,
+            render_points_as_spheres=True, name="eam_electrodes",
+            reset_camera=False, pickable=False,
+        )
 
     # ==================================================================
     # Seed actions
@@ -928,6 +1394,9 @@ class CCDAF(QtWidgets.QMainWindow):
     # ==================================================================
     def _replace_mesh(self, new_mesh: pv.PolyData) -> None:
         self.loader.mesh = new_mesh
+        # Post-processing can add or drop arrays, so re-offer what the new
+        # mesh actually has — keeping the user on their field if it survived.
+        self._populate_fields(keep_selection=True)
         self.tagger = RegionTagger(new_mesh)
         if self.editor is not None:
             self.editor = ManualEditor(
@@ -940,14 +1409,96 @@ class CCDAF(QtWidgets.QMainWindow):
             self.manual_widget.set_undo_enabled(False)
         self.mesh_info.update_info(new_mesh)
 
+    def _action_export_eam(self) -> None:
+        """Write the loaded mapping out as it currently stands — repairs,
+        smoothing and the electrode displacement included."""
+        if self._eam_data is None or self.loader.mesh is None:
+            return
+        dlg = EAMExportDialog(
+            start_dir=str(self.recent_folder),
+            default_name=str(self._eam_data.map_name).strip().replace(" ", "_"),
+            parent=self,
+        )
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        path = dlg.selected_path()
+        if not path:
+            QtWidgets.QMessageBox.warning(self, "Export", "Give the file a name.")
+            return
+        if not os.path.isdir(os.path.dirname(path)):
+            QtWidgets.QMessageBox.warning(
+                self, "Export", f"No such directory:\n{os.path.dirname(path)}")
+            return
+        if os.path.exists(path):
+            reply = QtWidgets.QMessageBox.question(
+                self, "Overwrite file", f"{path} already exists. Overwrite?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if reply != QtWidgets.QMessageBox.Yes:
+                return
+        try:
+            if dlg.selected_format() == EXPORT_BINARY:
+                export_binary(path, self.loader.mesh,
+                              electrodes=self._eam_data.electrodes,
+                              electrode_points=self._eam_electrode_points)
+            else:
+                export_vtk(path, self.loader.mesh, binary=dlg.selected_binary())
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Exported to {path}")
+
+    def _on_surface_moved(self, old_mesh, new_mesh) -> None:
+        """Carry the EAM electrodes when the wall moves under them.
+
+        One path for both callers — post-processing's smoothing, and a
+        segmentation round trip — because the electrodes are read from the
+        two surfaces as shapes, which is all a marching-cubes result has in
+        common with the Carto mesh it came from.
+
+        Neither mesh is altered; this only moves the electrodes. No-op when
+        no mapping is loaded.
+        """
+        pts = self._eam_electrode_points
+        if self._eam_data is None or pts is None or len(pts) == 0:
+            return
+        if (old_mesh is None or new_mesh is None
+                or old_mesh.n_cells == 0 or new_mesh.n_cells == 0):
+            return
+        self._eam_warp_note = None
+        try:
+            self._eam_electrode_points = displace_electrodes_for(
+                pts, old_mesh, new_mesh,
+                on_status=lambda msg: setattr(self, "_eam_warp_note", msg))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "EAM",
+                f"The surface moved, but the electrodes could not follow "
+                f"it:\n{exc}\n\nThey are left where they were.")
+
     def _on_postproc_applied(self) -> None:
-        self._render_mesh()
+        # Post-processing keeps the point fields, so an EAM mapping stays
+        # displayable — put back whichever view the user chose rather than
+        # dropping them into the region view.
+        self._render_field()
         self._focus_3d()
         self.plotter.reset_camera()
+        # Report the warp last. This runs from mesh_changed, and the widget
+        # posts its own "done" message straight after emitting it — so defer
+        # by one event-loop pass or the note is buried immediately.
+        note = getattr(self, "_eam_warp_note", None)
+        if note:
+            self._eam_warp_note = None
+            QtCore.QTimer.singleShot(
+                0, lambda: self.statusBar().showMessage(note, 20000))
 
     def _reset_view(self) -> None:
         """Clear the 3D viewport — preserves segmentation slice views in 2×2 mode."""
         self._focus_3d()
+        # plotter.clear() forgets the scalar-bar widgets without disabling
+        # them, which leaves their representations drawn over the next mesh.
+        self._clear_scalar_bars()
         self.plotter.clear()
         self.plotter.set_background("black")
         self.plotter.add_axes()
@@ -963,6 +1514,8 @@ class CCDAF(QtWidgets.QMainWindow):
         if mesh is None:
             return
         self._focus_3d()
+        # Same ordering as _render_scalar_field, and for the same reason.
+        self._clear_scalar_bars()
         if self._mesh_actor is not None:
             try:
                 self.plotter.remove_actor(self._mesh_actor, reset_camera=False)
@@ -997,7 +1550,10 @@ class CCDAF(QtWidgets.QMainWindow):
                 "title": "Regions",
                 "n_labels": 0,
                 "label_font_size": 18,
-                "fmt": "%d",
+                # No "fmt": this bar labels regions through `annotations` and
+                # draws no tick labels. VTK still formats them internally, and
+                # applies the format to a double — "%d" is invalid there and
+                # aborts (fatally, from VTK 9.6: "invalid format specifier").
                 "shadow": True,
                 # Interactive scalar bars are unsupported on multi-renderer
                 # plotters — disable them when in 4-quadrant mode.
@@ -1027,6 +1583,10 @@ class CCDAF(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
             return
         self._set_segmentation(img)
+        # A segmentation off disk has no source surface, so nothing can be
+        # carried onto the mesh it converts to — whatever is loaded is
+        # unrelated geometry, and matching against it would be nonsense.
+        self._seg_source = None
         self.statusBar().showMessage(f"Loaded segmentation {Path(fn).name}")
 
     def _action_seg_save(self) -> None:
@@ -1062,6 +1622,15 @@ class CCDAF(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Voxelisation failed", str(exc))
             return
         self._set_segmentation(img)
+        # Remember what this segmentation was made from. Converting it back
+        # needs all three: the surface to read the fields off, the flip to
+        # undo (the export prompt asks again, and may disagree), and the
+        # spacing, which sets how far a rebuilt wall can honestly stray.
+        self._seg_source = {
+            "mesh": self.loader.mesh.copy(deep=True),
+            "flip": bool(flip),
+            "spacing": tuple(float(s) for s in spacing),
+        }
         self.statusBar().showMessage(
             f"Voxelisation complete — {img.GetSize()} @ spacing {spacing} (flip={flip})."
         )
@@ -1121,15 +1690,71 @@ class CCDAF(QtWidgets.QMainWindow):
         new_mesh.cell_data["elemTag"] = np.full(
             new_mesh.n_cells, BODY_LABEL, dtype=np.int32
         )
+        # Marching cubes attaches its own point normals, for shading. They are
+        # not a field of this mesh: they would show up in the visualisation
+        # list beside the measured quantities, and be written as three unnamed
+        # columns of a Carto export. Saving recomputes normals from the
+        # geometry when asked, exactly as it does for a Carto mapping.
+        if "Normals" in new_mesh.point_data:
+            new_mesh.point_data.remove("Normals")
+        self._carry_source_onto(new_mesh, export_flip=flip)
         self._replace_mesh(new_mesh)
-        self._render_mesh()
+        self._render_field()
         self.act_save.setEnabled(True)
         self.plotter.reset_camera()
         self.plotter.render()
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
-        self.statusBar().showMessage("Segmentation converted and visualised.")
+        notes = [n for n in (getattr(self, "_transfer_note", None),
+                             getattr(self, "_eam_warp_note", None)) if n]
+        self._eam_warp_note = self._transfer_note = None
+        self.statusBar().showMessage(
+            " ".join(["Segmentation converted and visualised."] + notes),
+            20000 if notes else 0)
+
+    # ------------------------------------------------------------------
+    def _carry_source_onto(self, new_mesh: pv.PolyData, *,
+                           export_flip: bool) -> None:
+        """Carry the voxelised surface's fields and electrodes onto the
+        surface rebuilt from the segmentation.
+
+        Does nothing unless this segmentation was made from a mesh here: one
+        loaded from disk has no source to read, and the mesh that happens to
+        be open is unrelated geometry.
+
+        The two flip prompts are independent, so the round trip mirrors the
+        anatomy whenever they disagree. The source is brought into the
+        rebuilt surface's frame first — otherwise every match is made against
+        a mirror image, and the result looks plausible and is wrong.
+        """
+        src = self._seg_source
+        if src is None:
+            return
+        source_mesh = src["mesh"]
+        electrodes = self._eam_electrode_points
+
+        if bool(src["flip"]) != bool(export_flip):
+            source_mesh = source_mesh.copy(deep=True)
+            self._negate_xy_inplace(source_mesh)
+            if electrodes is not None and len(electrodes):
+                electrodes = np.asarray(electrodes, dtype=float).copy()
+                electrodes[:, :2] *= -1.0
+                self._eam_electrode_points = electrodes
+
+        max_distance = guard_distance(source_mesh, src["spacing"])
+
+        self._on_surface_moved(source_mesh, new_mesh)
+        self._transfer_note = None
+        try:
+            transfer_fields(
+                source_mesh, new_mesh, max_distance=max_distance,
+                on_status=lambda msg: setattr(self, "_transfer_note", msg))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Field transfer",
+                f"The surface was rebuilt, but its fields could not be "
+                f"carried over:\n{exc}\n\nThe new surface has geometry only.")
 
     # ------------------------------------------------------------------
     def _prompt_voxelise_options(self) -> Optional[Tuple[Tuple[float, float, float], bool]]:
@@ -2071,12 +2696,17 @@ class CCDAF(QtWidgets.QMainWindow):
         img = vtk.vtkImageData()
         img.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
         img.SetDimensions(int(dims[0]), int(dims[1]), int(dims[2]))
-        # +1 voxel buffer on the upper extent — matches reference behaviour
-        # so the stencil never clips a face that lies on the bbox max.
-        img.SetExtent(0, int(dims[0]) + 1,
-                      0, int(dims[1]) + 1,
-                      0, int(dims[2]) + 1)
-        img.SetOrigin(float(bounds[0]), float(bounds[2]), float(bounds[4]))
+        # One voxel of background on every side. The upper buffer was always
+        # here, so the stencil never clips a face lying on the bbox max; the
+        # lower one matches it, rather than leaving the mesh's min bound
+        # sitting exactly on the grid's first plane with no background
+        # outside it for the distance transform to measure against.
+        img.SetExtent(0, int(dims[0]) + 2,
+                      0, int(dims[1]) + 2,
+                      0, int(dims[2]) + 2)
+        img.SetOrigin(float(bounds[0] - spacing[0]),
+                      float(bounds[2] - spacing[1]),
+                      float(bounds[4] - spacing[2]))
         img.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
         return img
 
@@ -2255,6 +2885,50 @@ class CCDAF(QtWidgets.QMainWindow):
 def _discrete_cmap(hex_colors):
     from matplotlib.colors import ListedColormap
     return ListedColormap(hex_colors)
+
+
+def _eam_lookup_table(cmap_name: str, lo: float, hi: float,
+                      bar_lo: float, bar_hi: float, n_bands: int):
+    """Colour table for an EAM field, spanning ``bar_lo..bar_hi``.
+
+    The table covers the *union* of the data range and the chosen min/max, so
+    the bar keeps showing data that falls outside the chosen range instead of
+    rescaling to it. Inside ``lo..hi`` it is ``cmap_name`` in ``n_bands``
+    steps; below ``lo`` a flat brown and above ``hi`` a flat magenta. When the
+    chosen range covers the data, ``bar_lo/bar_hi`` are ``lo/hi`` and neither
+    flat band exists — the ordinary fixed-range colour map.
+    """
+    from matplotlib import colormaps
+    from pyvista import Color
+
+    span, inner = bar_hi - bar_lo, hi - lo
+    # Enough entries that the coloured part still resolves n_bands steps, since
+    # it only occupies inner/span of the table. Capped: a very narrow range
+    # over a wide bar would otherwise ask for a huge table.
+    total = n_bands
+    if span > inner > 0:
+        total = int(round(n_bands * span / inner))
+    total = int(min(max(total, n_bands), 4096))
+
+    cmap = colormaps[cmap_name]
+    below, above = Color(EAM_BELOW_COLOR).float_rgb, Color(EAM_ABOVE_COLOR).float_rgb
+
+    lut = pv.LookupTable()
+    lut.SetNumberOfTableValues(total)
+    lut.SetTableRange(bar_lo, bar_hi)
+    for i in range(total):
+        value = bar_lo + (i + 0.5) * span / total
+        if value < lo:
+            rgb = below
+        elif value > hi:
+            rgb = above
+        else:
+            frac = 0.0 if inner <= 0 else (value - lo) / inner
+            band = min(int(frac * n_bands), n_bands - 1)   # quantise to n_bands
+            rgb = cmap((band + 0.5) / n_bands)[:3]
+        lut.SetTableValue(i, rgb[0], rgb[1], rgb[2], 1.0)
+    lut.SetNanColor(*Color("lightgrey").float_rgb, 1.0)
+    return lut
 
 
 def _label_name(tag: int) -> str:
