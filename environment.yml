@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.9
+  - python>=3.12   # validated on 3.14; floored with the VTK/pyvista stack below
   - numpy>=1.23
   - scipy>=1.10
   # Floors follow the validated stack (VTK 9.6.2 / pyvista 0.48.4 — see

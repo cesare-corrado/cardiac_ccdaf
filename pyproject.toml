@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Cardiac Clinical Data Analysis Framework"
 readme = "README.md"
 license = {file = "LICENSE"}
-requires-python = ">=3.9"
+# Validated on Python 3.14; floored at 3.12 alongside the VTK/pyvista floors,
+# below which the stack behaves differently (see environment.yml).
+requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.23",
     "scipy>=1.10",
@@ -31,7 +33,17 @@ dependencies = [
 ccdaf = "ccdaf.app.ccdaf:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+# Tier-1: the synthetic, headless suite — the default collection, run in CI.
+# Tier-2 lives under tests/nightly (empty for now) and is selected explicitly
+# by a local runner against private Carto data.
+testpaths = ["tests/unit"]
+markers = [
+    "nightly: real Carto-data regressions, run by a local/self-hosted runner",
+]
