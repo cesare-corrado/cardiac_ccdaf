@@ -28,12 +28,19 @@ import pytest
 import pyvista as pv
 
 from ccdaf.core.eam_export import polydata_to_carto_dict
-from ccdaf.core.field_transfer import transfer_fields
+from ccdaf.core.field_transfer import guard_distance, transfer_fields
 
 
 def _sphere(radius=10.0, theta=30, phi=30):
     return pv.Sphere(radius=radius, theta_resolution=theta,
                      phi_resolution=phi).triangulate()
+
+
+def _median_edge(mesh):
+    pts = np.asarray(mesh.points)
+    f = np.asarray(mesh.faces).reshape(-1, 4)[:, 1:]
+    e = np.vstack([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
+    return float(np.median(np.linalg.norm(pts[e[:, 0]] - pts[e[:, 1]], axis=1)))
 
 
 def _source():
@@ -106,6 +113,55 @@ def test_nodata_does_not_spread_across_whole_triangles():
     # Plain interpolation would blank every triangle around vertex 0; with
     # renormalisation almost nothing is lost.
     assert np.isnan(out).sum() < 0.01 * len(out)
+
+
+# ---------------------------------------------------------------------
+# choosing the guard
+# ---------------------------------------------------------------------
+def test_guard_clears_the_source_sampling_however_fine_the_voxels():
+    """The regression that started this: the guard was 2x the voxel spacing,
+    so refining the voxels shrank it past the source's own triangles and the
+    *better* reconstruction began discarding real measurement. A rebuilt
+    vertex within one edge of the source is inside interpolation's reach, so
+    the guard must clear that no matter how fine the grid."""
+    src = _source()                       # sphere, edges around 1.5 units
+    edge = _median_edge(src)
+    for spacing in (0.05, 0.1, 0.5):      # all far finer than the source
+        assert guard_distance(src, (spacing,) * 3) > edge
+
+
+def test_guard_follows_the_voxels_when_they_are_the_coarser_scale():
+    """The other error scale: marching cubes can only place the wall to
+    within the grid, so a coarse voxelisation needs the room it asks for."""
+    src = _source()
+    assert guard_distance(src, (10.0,) * 3) == pytest.approx(20.0)
+
+
+def test_guard_is_unchanged_where_the_voxels_already_dominated():
+    """This reduces to the old rule wherever the old rule was right, which is
+    what keeps the earlier real-data validation standing."""
+    src = _source()
+    coarse = (_median_edge(src) * 2.0,) * 3
+    assert guard_distance(src, coarse) == pytest.approx(2.0 * coarse[0])
+
+
+def test_guard_never_depends_on_the_voxels_once_they_are_the_finer_scale():
+    """Two different fine grids must give the same answer — the whole point
+    is that the threshold stops tracking a quantity that does not move the
+    wall."""
+    src = _source()
+    assert guard_distance(src, (0.1,) * 3) == pytest.approx(
+        guard_distance(src, (0.2,) * 3))
+
+
+def test_guard_takes_the_coarsest_axis_of_an_anisotropic_voxelisation():
+    src = _source()
+    assert guard_distance(src, (0.1, 0.1, 9.0)) == pytest.approx(18.0)
+
+
+def test_guard_survives_a_mesh_with_no_faces():
+    assert guard_distance(pv.PolyData(np.zeros((3, 3))), (1.0,) * 3) \
+        == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------------------

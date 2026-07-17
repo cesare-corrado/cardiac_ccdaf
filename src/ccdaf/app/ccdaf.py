@@ -82,7 +82,7 @@ from ccdaf.gui.eam_export_dialog import EAMExportDialog
 from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
 from ccdaf.io.carto_functions import extract_map_list_names
 from ccdaf.core.eam_loader import load_carto_mapping, displace_electrodes_for
-from ccdaf.core.field_transfer import transfer_fields
+from ccdaf.core.field_transfer import guard_distance, transfer_fields
 
 
 # ---------------------------------------------------------------------------
@@ -1742,10 +1742,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 electrodes[:, :2] *= -1.0
                 self._eam_electrode_points = electrodes
 
-        # Rebuilt wall cannot be truer to the anatomy than the voxels it came
-        # from, so twice the coarsest spacing is comfortably past any faithful
-        # reconstruction and only catches surface an edit invented.
-        max_distance = 2.0 * max(src["spacing"])
+        max_distance = guard_distance(source_mesh, src["spacing"])
 
         self._on_surface_moved(source_mesh, new_mesh)
         self._transfer_note = None

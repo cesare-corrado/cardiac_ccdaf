@@ -34,9 +34,11 @@ mapping system never measured. Its closest point on the source is the rim of
 whatever it grew from, so interpolation would hand it that rim's activation
 times: in range, smoothly varying, and indistinguishable from real data.
 Beyond ``max_distance`` a point field is NaN instead, which says what is
-true — nothing was measured here. A faithful round trip stays well inside
-any sane threshold (a 1mm voxelisation reproduces the wall to under 1mm), so
-the guard fires only on geometry that was invented.
+true — nothing was measured here.
+
+Choosing it is :func:`guard_distance`'s job, and getting it wrong is not
+symmetric: too wide and invented wall quietly reads as measurement, too tight
+and real measurement is thrown away.
 
 Labels are exempt: new wall is still part of the body, so inheriting the
 nearest ``elemTag`` states a fact rather than fabricating a measurement.
@@ -56,6 +58,44 @@ from scipy.spatial import cKDTree
 # resurfaces as a selectable field. mesh_postprocessor._transfer_arrays skips
 # it for the same reason.
 _INTERNAL_ARRAYS = frozenset({"render_idx"})
+
+
+def _median_edge_length(mesh: pv.PolyData) -> float:
+    """Median triangle edge — how far apart this mesh's measurements sit."""
+    pts = np.asarray(mesh.points, dtype=float)
+    faces = np.asarray(mesh.faces).reshape(-1, 4)[:, 1:]
+    if not len(faces):
+        return 0.0
+    e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    return float(np.median(np.linalg.norm(pts[e[:, 0]] - pts[e[:, 1]], axis=1)))
+
+
+def guard_distance(src: pv.PolyData, spacing) -> float:
+    """How far off ``src`` a rebuilt vertex may sit and still be believed.
+
+    A rebuilt vertex is legitimately off the source wall for two independent
+    reasons, and the guard has to clear both or it discards real data:
+
+    * **the voxels** — marching cubes can only place the wall to within the
+      grid it was rasterised on;
+    * **the measurements** — the source is itself a sampling of the anatomy,
+      and a point closer to it than one triangle's edge is inside the reach of
+      the interpolation, not beyond it.
+
+    Scaling on the voxels alone — which this did — ties the guard to the wrong
+    quantity, because what actually moves the wall is the smoothing and the
+    morphology, in millimetres. Refine the voxels and the drift stays put while
+    the threshold shrinks past it, so the *better* reconstruction throws away
+    more data. At 0.5mm it drops under the map's own sampling (~0.9-1.3mm here)
+    and starts calling points no-data that sit within a single source triangle,
+    1.3mm from a real measurement.
+
+    Taking the larger of the two is what the guard meant all along. At a 1mm
+    voxelisation of a Carto shell the voxels win and this is the old rule
+    exactly; it only opens up where the source is coarser than the grid.
+    """
+    scale = max(float(max(spacing)), _median_edge_length(src))
+    return 2.0 * scale
 
 
 def _closest_on_surface(src: pv.PolyData, points: np.ndarray):
@@ -182,4 +222,4 @@ def transfer_fields(src: pv.PolyData,
         )
 
 
-__all__ = ["transfer_fields"]
+__all__ = ["guard_distance", "transfer_fields"]
