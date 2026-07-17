@@ -56,14 +56,13 @@ from pyvistaqt import QtInteractor
 
 import SimpleITK as sitk
 import vtk
-from vtk.util import numpy_support
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ccdaf.core.mesh_loader import MeshLoader, BODY_LABEL
 from ccdaf.interaction.seed_selector import SeedSelector, Seed, SEED_ORDER, SEED_PROMPT, SEED_COLOR
 from ccdaf.core.region_tagger import RegionTagger, LABELS
-from ccdaf.interaction.manual_editor import ManualEditor, EditState, ALLOWED_LABELS
+from ccdaf.interaction.manual_editor import ManualEditor, ALLOWED_LABELS
 from ccdaf.interaction.clipping_tool import ClippingTool, ClipMode
 from ccdaf.gui.postprocessing_widget import PostprocessingWidget
 from ccdaf.gui.segmentation_widget import SegmentationWidget
@@ -73,7 +72,7 @@ from ccdaf.gui.tagging_widget import TaggingWidget
 from ccdaf.gui.manual_correction_widget import ManualCorrectionWidget
 from ccdaf.gui.clipping_widget import ClippingWidget
 from ccdaf.gui.eam_load_dialog import (
-    EAMLoadDialog, FORMAT_NONE, FORMAT_CARTO_STUDY, FORMAT_CARTO_MAPPINGS,
+    EAMLoadDialog, FORMAT_CARTO_STUDY, FORMAT_CARTO_MAPPINGS,
 )
 from ccdaf.gui.visualisation_widget import VisualisationWidget
 from ccdaf.gui.mapping_select_dialog import MappingSelectDialog
@@ -2366,12 +2365,6 @@ class CCDAF(QtWidgets.QMainWindow):
         ox, oy, oz = self._seg_origin
         sx, sy, sz = self._seg_spacing
         nz, ny, nx = self._seg_array.shape
-        cx = ox + 0.5 * nx * sx
-        cy = oy + 0.5 * ny * sy
-        cz = oz + 0.5 * nz * sz
-        ix = int(np.clip(self._seg_idx["sagittal"], 0, nx - 1))
-        iy = int(np.clip(self._seg_idx["coronal"], 0, ny - 1))
-        iz = int(np.clip(self._seg_idx["axial"], 0, nz - 1))
 
         # Reuse the same slice ImageData built for the 2D views.
         plane_specs = {
