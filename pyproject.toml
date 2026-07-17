@@ -12,8 +12,11 @@ requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.23",
     "scipy>=1.10",
-    "vtk>=9.2",
-    "pyvista>=0.43",
+    # Floors follow the validated stack (VTK 9.6.2 / pyvista 0.48.4); the two
+    # 9.6-specific behaviours are handled in code, not avoided by pinning —
+    # see environment.yml for the full reasoning. No exact pin on purpose.
+    "vtk>=9.6",
+    "pyvista>=0.48",
     "pyvistaqt>=0.11",
     "PyQt5>=5.15",
     "matplotlib>=3.7",

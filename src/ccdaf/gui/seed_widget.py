@@ -15,6 +15,8 @@ class SeedWidget(QtWidgets.QGroupBox):
     start_requested = QtCore.pyqtSignal()
     undo_requested  = QtCore.pyqtSignal()
     reset_requested = QtCore.pyqtSignal()
+    save_requested  = QtCore.pyqtSignal()
+    load_requested  = QtCore.pyqtSignal()
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -37,6 +39,25 @@ class SeedWidget(QtWidgets.QGroupBox):
         row.addWidget(self.btn_reset)
         layout.addLayout(row)
 
+        row = QtWidgets.QHBoxLayout()
+        self.btn_save = QtWidgets.QPushButton("Save seeds…")
+        self.btn_save.setToolTip(
+            "Save the six seeds as names and coordinates — no vertex ids, "
+            "so they reload onto a clipped or refined mesh."
+        )
+        self.btn_save.clicked.connect(self.save_requested.emit)
+        self.btn_save.setEnabled(False)
+        row.addWidget(self.btn_save)
+        self.btn_load = QtWidgets.QPushButton("Load seeds…")
+        self.btn_load.setToolTip(
+            "Load saved seeds; each is snapped to the current surface by "
+            "nearest point."
+        )
+        self.btn_load.clicked.connect(self.load_requested.emit)
+        self.btn_load.setEnabled(False)
+        row.addWidget(self.btn_load)
+        layout.addLayout(row)
+
         self.lbl_prompt = QtWidgets.QLabel("Load a mesh to begin.")
         self.lbl_prompt.setWordWrap(True)
         self.lbl_prompt.setStyleSheet("QLabel { padding: 6px; }")
@@ -53,6 +74,12 @@ class SeedWidget(QtWidgets.QGroupBox):
 
     def set_reset_enabled(self, enabled: bool) -> None:
         self.btn_reset.setEnabled(enabled)
+
+    def set_save_enabled(self, enabled: bool) -> None:
+        self.btn_save.setEnabled(enabled)
+
+    def set_load_enabled(self, enabled: bool) -> None:
+        self.btn_load.setEnabled(enabled)
 
     def set_prompt(self, text: str) -> None:
         self.lbl_prompt.setText(text)

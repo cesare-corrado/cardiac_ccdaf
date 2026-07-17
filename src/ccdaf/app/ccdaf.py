@@ -87,6 +87,7 @@ from ccdaf.core.segmentation import (
     binary_mask_image, negate_xy_inplace, segmentation_to_polydata,
     sync_sitk_from_array, voxelise_polydata,
 )
+from ccdaf.core.seed_io import load_seeds, save_seeds
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
@@ -352,6 +353,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.start_requested.connect(self._action_start_seeds)
         self.seed_widget.undo_requested.connect(self._action_undo_seed)
         self.seed_widget.reset_requested.connect(self._action_reset_seeds)
+        self.seed_widget.save_requested.connect(self._action_save_seeds)
+        self.seed_widget.load_requested.connect(self._action_load_seeds)
         body = self._register_section(v, "seeds", "Seed selection")
         body.addWidget(self.seed_widget)
 
@@ -635,6 +638,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipper = None
         # Reset UI controls that depended on those tools.
         self.seed_widget.set_undo_enabled(False)
+        self.seed_widget.set_save_enabled(False)
         self.tagging_widget.set_seeds_complete(False)
         self.manual_widget.reset_state()
         self.clipping_widget.reset_state()
@@ -737,7 +741,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.mesh_info.update_info(mesh)
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
         self.statusBar().showMessage(f"Loaded {Path(filename).name}")
-        
+
         ################ manual editor active from beginning ######
         self.editor = ManualEditor(
             mesh=self.loader.mesh,
@@ -752,6 +756,7 @@ class CCDAF(QtWidgets.QMainWindow):
 
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
+        self.seed_widget.set_load_enabled(True)
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
         self._sync_close_action()
@@ -796,6 +801,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.set_active(False)
         self.seed_widget.set_start_enabled(False)
         self.seed_widget.set_reset_enabled(False)
+        self.seed_widget.set_load_enabled(False)
         self.seed_widget.set_prompt("Load a mesh to begin.")
         self.seed_widget.set_progress("Seeds: 0 / 6")
         self.act_save.setEnabled(False)
@@ -935,6 +941,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.set_reset_enabled(True)
         self.seed_widget.set_prompt(
             "EAM mapping loaded. Click 'Start seed selection'.")
+        self.seed_widget.set_load_enabled(True)
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
         self.mesh_info.update_info(mesh)
@@ -1274,6 +1281,9 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _on_seed_progress(self, next_name: str, done: int, total: int) -> None:
         self.seed_widget.set_progress(f"Seeds: {done} / {total}")
+        # Saving means something only for a complete selection; progress is
+        # emitted on every transition, so this tracks undo and reset too.
+        self.seed_widget.set_save_enabled(done == total)
         if done < total and next_name:
             color = SEED_COLOR.get(next_name, "#ffffff")
             self.seed_widget.set_prompt(
@@ -1286,6 +1296,78 @@ class CCDAF(QtWidgets.QMainWindow):
     def _on_seeds_complete(self, seeds: Dict[str, Seed]) -> None:
         self.tagging_widget.set_seeds_complete(True)
         self.statusBar().showMessage("All seeds collected. Ready to tag.")
+
+    def _action_save_seeds(self) -> None:
+        if self.selector is None or not self.selector.is_complete:
+            return
+        stem = Path(self.loader.path).stem if self.loader.path else "mesh"
+        default = str(Path(self.recent_folder) / f"{stem}.seeds.json")
+        fn, filt = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save seeds", default,
+            "Seeds JSON (*.json);;Surface + seeds pickle (*.pkl)",
+        )
+        if not fn:
+            return
+        if not fn.lower().endswith((".json", ".pkl", ".pickle")):
+            fn += ".pkl" if "pickle" in filt else ".json"
+        self.recent_folder = Path(fn).resolve().parent
+        seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
+        try:
+            save_seeds(fn, seeds, mesh=self.loader.mesh)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Save seeds failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved {len(seeds)} seeds to {fn}")
+
+    def _action_load_seeds(self) -> None:
+        if self.loader.mesh is None:
+            return
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load seeds", str(self.recent_folder),
+            "Seed files (*.json *.pkl *.pickle);;All files (*)",
+        )
+        if not fn:
+            return
+        self.recent_folder = Path(fn).resolve().parent
+        try:
+            positions = load_seeds(fn)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load seeds failed", str(exc))
+            return
+        self._apply_loaded_seeds(positions, Path(fn).name)
+
+    def _apply_loaded_seeds(self, positions: Dict[str, np.ndarray],
+                            source_name: str) -> None:
+        """Rebuild the seed selection from saved coordinates on the live mesh.
+
+        Each coordinate is snapped to the current surface; a validation
+        failure stops there, keeps the earlier seeds and resumes picking.
+        Shared by the seed panel's Load and the pickle-bundle load.
+        """
+        if self.selector is not None:
+            self.selector.stop()
+        self._focus_3d()
+        self.tagging_widget.set_seeds_complete(False)
+        self.selector = SeedSelector(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_progress=self._on_seed_progress,
+            on_complete=self._on_seeds_complete,
+        )
+        problems = self.selector.apply_positions(positions)
+        self.seed_widget.set_undo_enabled(True)
+        if problems:
+            self.selector.resume()
+            QtWidgets.QMessageBox.warning(
+                self, "Seeds partially loaded",
+                "\n".join(problems)
+                + "\n\nThe seeds before the failure are placed — pick the "
+                  "remaining ones in the 3D view.",
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Loaded {len(SEED_ORDER)} seeds from {source_name} "
+                "(snapped to the current surface).")
 
     # ==================================================================
     # Tagging
