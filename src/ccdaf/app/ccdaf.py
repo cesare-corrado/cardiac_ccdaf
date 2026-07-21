@@ -85,8 +85,8 @@ from ccdaf.core.eam_loader import (
 )
 from ccdaf.core.field_transfer import guard_distance, transfer_fields
 from ccdaf.core.segmentation import (
-    binary_mask_image, negate_xy_inplace, segmentation_to_polydata,
-    sync_sitk_from_array, voxelise_polydata,
+    binary_mask_image, negate_xy_inplace, relabel_halfspace,
+    segmentation_to_polydata, sync_sitk_from_array, voxelise_polydata,
 )
 from ccdaf.core.seed_io import load_seeds, save_seeds
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
@@ -193,6 +193,9 @@ class CCDAF(QtWidgets.QMainWindow):
         self._seg_origin: Tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._seg_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0)
         self._seg_undo_stack: list = []  # up to 2 snapshots of _seg_array
+        self._seg_plane_widget = None                       # plane-relabel gizmo
+        self._seg_plane_normal: Optional[tuple] = None
+        self._seg_plane_point: Optional[tuple] = None
         # The mesh this segmentation was voxelised from, with the flip and
         # spacing used — what converting it back needs to carry the fields
         # and electrodes over. None ⇔ the segmentation came off disk.
@@ -394,6 +397,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seg_widget.morphology_requested.connect(self._action_seg_morphology)
         self.seg_widget.fill_holes_requested.connect(self._action_seg_fill_holes)
         self.seg_widget.convert_all_requested.connect(self._action_seg_convert_all)
+        self.seg_widget.plane_relabel_toggled.connect(self._action_seg_plane_toggle)
+        self.seg_widget.plane_relabel_apply.connect(self._action_seg_plane_apply)
         self.seg_widget.paint_mode_changed.connect(self._action_seg_paint_toggled)
         self.seg_widget.undo_requested.connect(self._action_seg_undo)
         # update_3d_requested is wired by the overlay button instead — see
@@ -919,6 +924,16 @@ class CCDAF(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
 
+    def _collect_seeds(self) -> "Optional[dict]":
+        """Seeds as ``{name: xyz}`` when the selection is complete, else None.
+
+        Shared by the pickle-bundle save and the EAM binary export so both
+        carry the seeds the same way.
+        """
+        if self.selector is not None and self.selector.is_complete:
+            return {name: s.xyz for name, s in self.selector.seeds.items()}
+        return None
+
     def _save_bundle(self, fn: str, fields: "list[str]") -> None:
         """Write the pickle bundle: surface (chosen point fields), seeds,
         electrodes and elemTag, so the mesh reloads with all of them."""
@@ -930,9 +945,7 @@ class CCDAF(QtWidgets.QMainWindow):
             if name not in keep:
                 surface.point_data.remove(name)
 
-        seeds = None
-        if self.selector is not None and self.selector.is_complete:
-            seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
+        seeds = self._collect_seeds()
 
         electrodes = self._eam_data.electrodes if self._eam_data else None
         export_binary(
@@ -1760,9 +1773,16 @@ class CCDAF(QtWidgets.QMainWindow):
                 return
         try:
             if dlg.selected_format() == EXPORT_BINARY:
+                # Carry the seeds and tagging too, as the pickle bundle does:
+                # the reference downstream reads only surface/electrodes and
+                # ignores the extra keys, while ccdaf reads them back — so an
+                # export/reload keeps the work rather than resetting elemTag to
+                # body and dropping the seeds.
                 export_binary(path, self.loader.mesh,
                               electrodes=self._eam_data.electrodes,
-                              electrode_points=self._eam_electrode_points)
+                              electrode_points=self._eam_electrode_points,
+                              seeds=self._collect_seeds(),
+                              include_elem_tag=True)
             else:
                 export_vtk(path, self.loader.mesh, binary=dlg.selected_binary())
         except Exception as exc:
@@ -2167,6 +2187,13 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _action_seg_close(self) -> None:
         """Drop the active segmentation and revert the plotter to 1×1."""
+        if self._seg_plane_widget is not None or self.seg_widget.btn_plane.isChecked():
+            try:
+                self.plotter.clear_plane_widgets()
+            except Exception:
+                pass
+            self._seg_plane_widget = None
+            self.seg_widget.btn_plane.setChecked(False)
         self._seg_sitk = None
         self._seg_array = None
         self._seg_undo_stack.clear()
@@ -2872,6 +2899,78 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Converted {count} voxel(s) from label {actual_label} to label {new_label}."
         )
+
+    def _action_seg_plane_toggle(self, on: bool) -> None:
+        """Show/hide a freely orientable plane in the 3D quadrant.
+
+        The plane is the selector for a half-space relabel: its callback keeps
+        the current centre and normal, which ``_action_seg_plane_apply`` reads.
+        """
+        if self._seg_plane_widget is not None:
+            try:
+                self.plotter.clear_plane_widgets()
+            except Exception:
+                pass
+            self._seg_plane_widget = None
+        if not on or self._seg_array is None:
+            self.plotter.render()
+            return
+
+        ox, oy, oz = self._seg_origin
+        sx, sy, sz = self._seg_spacing
+        nz, ny, nx = self._seg_array.shape
+        bounds = (ox, ox + (nx - 1) * sx, oy, oy + (ny - 1) * sy,
+                  oz, oz + (nz - 1) * sz)
+        centre = (ox + 0.5 * (nx - 1) * sx, oy + 0.5 * (ny - 1) * sy,
+                  oz + 0.5 * (nz - 1) * sz)
+        self._seg_plane_normal = (0.0, 0.0, 1.0)
+        self._seg_plane_point = centre
+
+        def _on_plane(normal, origin):
+            self._seg_plane_normal = tuple(float(v) for v in normal)
+            self._seg_plane_point = tuple(float(v) for v in origin)
+
+        self._focus_3d()
+        try:
+            self._seg_plane_widget = self.plotter.add_plane_widget(
+                _on_plane, normal=self._seg_plane_normal, origin=centre,
+                bounds=bounds, factor=1.1, implicit=True,
+                outline_translation=False, tubing=False,
+            )
+        except Exception as exc:
+            self.seg_widget.btn_plane.setChecked(False)
+            QtWidgets.QMessageBox.warning(
+                self, "Plane relabel",
+                f"Could not create the plane widget in this view:\n{exc}")
+            return
+        self.plotter.render()
+        self.statusBar().showMessage(
+            "Orient the plane, set Actual/New label, then 'Apply plane relabel'. "
+            "The normal side is relabelled.")
+
+    def _action_seg_plane_apply(self) -> None:
+        """Relabel Actual→New on the normal side of the current plane."""
+        if self._seg_array is None or self._seg_plane_normal is None:
+            return
+        actual = self.seg_widget.actual_label()
+        new = self.seg_widget.new_label()
+        out = relabel_halfspace(
+            self._seg_array, self._seg_origin, self._seg_spacing,
+            self._seg_plane_point, self._seg_plane_normal, actual, new)
+        changed = int(np.count_nonzero(out != self._seg_array))
+        if changed == 0:
+            self.statusBar().showMessage(
+                f"No label-{actual} voxels on the plane's normal side — nothing to do.")
+            return
+        self._seg_push_undo()
+        self._seg_array = out
+        self._sync_sitk_from_array()
+        self._refresh_slices()
+        self._action_seg_update_3d()
+        self.seg_widget.set_undo_enabled(True)
+        self.statusBar().showMessage(
+            f"Relabelled {changed} voxel(s) from {actual} to {new} on the plane's "
+            "normal side.")
 
     def _action_seg_update_3d(self) -> None:
         """Refresh the 3D-quadrant rendering from the current voxel volume.

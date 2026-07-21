@@ -28,6 +28,8 @@ class SegmentationWidget(QtWidgets.QGroupBox):
     morphology_requested = QtCore.pyqtSignal(str)            # 'dilate' | 'erode'
     fill_holes_requested = QtCore.pyqtSignal()
     convert_all_requested = QtCore.pyqtSignal(int, int)      # actual_label, new_label
+    plane_relabel_toggled = QtCore.pyqtSignal(bool)          # show/hide plane widget
+    plane_relabel_apply = QtCore.pyqtSignal()                # commit the half-space relabel
     update_3d_requested = QtCore.pyqtSignal()
     paint_mode_changed = QtCore.pyqtSignal(bool)
     label_changed = QtCore.pyqtSignal(int)
@@ -160,6 +162,22 @@ class SegmentationWidget(QtWidgets.QGroupBox):
         self.btn_convert_all.clicked.connect(self._on_convert_all_clicked)
         layout.addWidget(self.btn_convert_all)
 
+        # --- Plane relabel: 'Convert All' restricted to one side of a plane ---
+        self.btn_plane = QtWidgets.QPushButton("Plane relabel")
+        self.btn_plane.setCheckable(True)
+        self.btn_plane.setToolTip(
+            "Show a freely orientable plane in the 3D view. Set its centre and "
+            "normal, then Apply to turn 'Actual label' into 'New label' on the "
+            "side the normal points to — an oblique cut the axis planes cannot make."
+        )
+        self.btn_plane.toggled.connect(self._on_plane_toggled)
+        layout.addWidget(self.btn_plane)
+
+        self.btn_plane_apply = QtWidgets.QPushButton("Apply plane relabel")
+        self.btn_plane_apply.setEnabled(False)
+        self.btn_plane_apply.clicked.connect(self.plane_relabel_apply.emit)
+        layout.addWidget(self.btn_plane_apply)
+
         self.btn_undo = QtWidgets.QPushButton("Undo")
         self.btn_undo.setEnabled(False)
         self.btn_undo.clicked.connect(self.undo_requested.emit)
@@ -237,6 +255,11 @@ class SegmentationWidget(QtWidgets.QGroupBox):
     def _on_paint_toggled(self, on: bool) -> None:
         self.btn_paint.setText("Deactivate paint mode" if on else "Activate paint mode")
         self.paint_mode_changed.emit(on)
+
+    def _on_plane_toggled(self, on: bool) -> None:
+        self.btn_plane.setText("Hide plane" if on else "Plane relabel")
+        self.btn_plane_apply.setEnabled(on)
+        self.plane_relabel_toggled.emit(on)
 
     def _emit_brush(self, *_) -> None:
         shape = self.brush_shape()
