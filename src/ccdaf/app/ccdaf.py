@@ -1539,10 +1539,25 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self.editor.accept()
         self.editor.deactivate()
+        # Guard the export: reduce each PV label to a single connected patch.
+        # tag() enforces this, but a manual edit or a segmentation round trip
+        # can strand a stray cell that tag() never re-checks, and CemrgApp's
+        # label check rejects a label split across two regions. Runs on accept
+        # so no accepted tagging carries an island; re-runs on every re-accept.
+        stray = 0
+        if self.tagger is not None and self.loader.mesh is not None:
+            tags = np.asarray(self.loader.mesh.cell_data["elemTag"])
+            cleaned = self.tagger.reduce_to_single_components(tags)
+            stray = int(np.count_nonzero(cleaned != tags))
+            if stray:
+                self.loader.mesh.cell_data["elemTag"] = cleaned
         self.manual_widget.on_accepted()
         self._render_mesh()
         self.clipping_widget.set_enabled_after_accept()
-        self.statusBar().showMessage("Tagging accepted. Proceed to clipping.")
+        note = (f" — reassigned {stray} stray label cell{'s' if stray != 1 else ''} "
+                "to keep each region connected") if stray else ""
+        self.statusBar().showMessage(
+            f"Tagging accepted{note}. Proceed to clipping.")
 
     def _on_edit_committed(self) -> None:
         if self.editor is not None:
