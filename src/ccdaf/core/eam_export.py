@@ -18,9 +18,14 @@ recorded here because they look like omissions and are not:
 * **No-data is NaN**, where a raw Carto export carries ``+/-10000``. The
   sentinel is masked at load. Nothing downstream is worse off: the pickled
   electrodes — the only part read back — keep the raw sentinel, so the
-  ``LAT > -1000`` artifact filter still works, and the scripts that consume
-  the vtk already use NaN as their own no-data marker. A magic number that
+  ``LAT > -1000`` artifact filter still works, and a binary vtk carries NaN
+  natively for anything that reads the surface. A magic number that
   interpolates to a plausible wrong answer is the worse of the two.
+  The one exception is *ASCII* vtk, whose legacy reader cannot parse a ``nan``
+  token at all: there no-data is written back as ``CARTO_NODATA`` and folded
+  to NaN on read (see :func:`mesh_loader.nodata_to_sentinel`). That is a
+  transport encoding, not a change of decision — in memory, and in binary,
+  no-data stays NaN.
 * **LAT is not zero-based.** ``generate_polydata`` subtracts the smallest
   valid LAT so its exported field starts at 0; ours stays in Carto's own
   frame. That shift has no numerical consumer — the Gaussian-process step
@@ -153,8 +158,20 @@ def export_vtk(path: str, mesh: pv.PolyData, binary: bool = True) -> None:
 
     ``binary`` is the default because this file carries every field and a
     text copy of it is large; pass ``False`` where a reader needs ASCII.
+
+    Binary carries Carto's NaN no-data natively. ASCII cannot — VTK's own
+    ASCII reader mis-parses ``nan`` and drops every field after the first
+    no-data one — so no-data is encoded as the Carto sentinel, which
+    :meth:`MeshLoader.load` folds back to NaN. See
+    :func:`mesh_loader.nodata_to_sentinel`.
     """
-    mesh.save(str(path), binary=binary)
+    if binary:
+        mesh.save(str(path), binary=True)
+        return
+    from ccdaf.core.mesh_loader import nodata_to_sentinel
+    out = mesh.copy(deep=True)             # never mutate the live mesh's NaN
+    nodata_to_sentinel(out)
+    out.save(str(path), binary=False)
 
 
 __all__ = [

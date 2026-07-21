@@ -191,6 +191,25 @@ rather than a threshold.
   and unit-length across all cells. Ticking `LAT`+`Bipolar` keeps both with
   ranges intact.
 - `writevtk` defaults to `binary=False`; `mesh.save()` defaults to binary.
+- **No-data across ASCII vtk.** VTK's legacy *ASCII* reader cannot parse a
+  `nan` token: the first one trips the stream's failbit, every value after it
+  misreads, the tuple count drifts, and a leftover `nan` is taken as the next
+  array's *name* — so every field past the first no-data field is lost and a
+  phantom `nan` field appears. ParaView uses the same reader, so the file
+  opens nowhere. On `Q110011/1-Pre-PVI_SR_ANALYSE` (30056 pts, 13 point
+  fields, 10 of them entirely no-data) an all-fields ASCII save kept only
+  `Unipolar, Bipolar, LAT, Impedance` + a phantom `nan`; binary kept all 13.
+  Confirmed minimally: a single all-`nan` field breaks ASCII, and no textual
+  spelling (`nan/NaN/-nan/inf`) reads back, while XML `.vtp` and binary both
+  round-trip NaN. The fix: `MeshLoader.save` encodes no-data as `CARTO_NODATA`
+  for ASCII only, and `MeshLoader.load` folds `|v| >= CARTO_NODATA` back to
+  NaN for an ASCII legacy `.vtk`. Binary is untouched — raw NaN in and out,
+  never folded. Verified on the real mesh: ASCII now carries all 13 fields to
+  a raw reader with no `nan` token, and both encodings round-trip NaN-mask and
+  real values exactly (real max err 5e-5, float32 ASCII precision). Note the
+  `µBi` field name is a red herring — it percent-encodes to `%C2%B5Bi` on disk
+  and decodes back on read; it round-trips through ASCII fine once the NaN is
+  gone.
 
 ## Known, accepted
 

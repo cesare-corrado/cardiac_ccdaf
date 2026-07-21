@@ -102,9 +102,12 @@ class SaveMeshDialog(QtWidgets.QFileDialog):
         self.chk_ascii = QtWidgets.QCheckBox("ASCII")
         self.chk_ascii.setChecked(True)
         self.chk_ascii.setToolTip(
-            "Write a text VTK rather than a binary one. The project format is "
-            "read as ASCII; untick for a smaller, faster file where whatever "
-            "reads it back does not care. A pickle bundle is binary regardless."
+            "Write a text VTK rather than a binary one. ASCII cannot store NaN, "
+            "so no-data is written as the Carto sentinel (±10000) and folded "
+            "back to NaN when ccdaf reloads it; in ParaView those points show as "
+            "±10000, not blank. Untick for binary, which keeps NaN natively "
+            "(blank no-data in ParaView) in a smaller file. A pickle bundle is "
+            "binary regardless."
         )
 
         layout = self.layout()
