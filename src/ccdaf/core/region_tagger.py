@@ -676,6 +676,55 @@ class RegionTagger:
 
         return out
 
+    def reduce_to_single_components(self, tri_label: np.ndarray) -> np.ndarray:
+        """Each PV label as one connected patch, seed-free.
+
+        For every label in :data:`LABELS`, keep its largest connected
+        component and reassign each smaller island to the majority label
+        bordering it — BODY when it borders nothing else, which is the usual
+        case (a stray triangle sitting in the body). Returns a new array;
+        ``tri_label`` is untouched.
+
+        :meth:`_enforce_contiguity` already does this during ``tag``, but it
+        needs the seeds and runs only there. A manual edit paints picked
+        cells with no connectivity check, and a segmentation round trip's
+        nearest-cell ``elemTag`` copy can strand a single cell across a
+        crevice — either leaves an island that ``tag`` never sees. CemrgApp's
+        label check requires exactly one region per PV label and its auto-fix
+        crashes on a one-cell region, so this runs on the way out of manual
+        correction to keep an export from carrying one.
+        """
+        out = np.asarray(tri_label).copy()
+        for lbl in LABELS.values():
+            mask = out == lbl
+            if not np.any(mask):
+                continue
+            sub = self._tri_adj[mask][:, mask]
+            n_comp, comp = connected_components(sub, directed=False)
+            if n_comp <= 1:
+                continue
+            global_idx = np.where(mask)[0]
+            keep = int(np.argmax(np.bincount(comp)))
+            for c in range(n_comp):
+                if c == keep:
+                    continue
+                island = global_idx[comp == c]
+                out[island] = self._border_majority_label(island, out)
+        return out
+
+    def _border_majority_label(self, cells: np.ndarray,
+                               tri_label: np.ndarray) -> int:
+        """Majority label among the cells bordering ``cells`` but not in it.
+
+        A component's external edge-neighbours never share its label (they
+        would be in the component), so this is always a different label —
+        BODY when the island borders only body.
+        """
+        external = np.setdiff1d(np.unique(self._tri_adj[cells, :].indices), cells)
+        if external.size == 0:
+            return BODY_LABEL
+        vals, counts = np.unique(tri_label[external], return_counts=True)
+        return int(vals[int(np.argmax(counts))])
 
     def _fill_holes(self, tri_label: np.ndarray) -> np.ndarray:
         """
