@@ -371,6 +371,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.label_changed.connect(self._action_label_changed)
         self.manual_widget.edit_toggled.connect(self._action_edit_toggle)
         self.manual_widget.fill_holes_requested.connect(self._action_fill_holes)
+        self.manual_widget.smooth_requested.connect(self._action_smooth_boundary)
         self.manual_widget.accept_requested.connect(self._action_edit_accept)
         self.manual_widget.undo_requested.connect(self._action_undo_edit)
         body = self._register_section(v, "manual", "Manual correction")
@@ -1573,6 +1574,25 @@ class CCDAF(QtWidgets.QMainWindow):
         if self.editor and self.tagger:
             self.editor.fill_holes(self.tagger)
             self.statusBar().showMessage("Holes filled while preserving boundaries.")
+
+    def _action_smooth_boundary(self, dilate: bool, erode: bool) -> None:
+        """Smooth the active label's boundary — one dilate/erode pass per click."""
+        if self.editor is None or self.tagger is None:
+            return
+        label = self.manual_widget.current_label()
+        if label == BODY_LABEL:
+            self.statusBar().showMessage(
+                "Select a PV label to smooth — body is the background.")
+            return
+        ops = "+".join(w for w, on in (("dilate", dilate), ("erode", erode)) if on)
+        if not ops:
+            self.statusBar().showMessage("Tick Dilate and/or Erode first.")
+            return
+        n = self.editor.smooth_label(self.tagger, label, dilate, erode)
+        self.manual_widget.set_undo_enabled(self.editor.can_undo)
+        self.statusBar().showMessage(
+            f"Smoothed label {label} ({ops}): {n} cell{'s' if n != 1 else ''} changed"
+            if n else f"Label {label} ({ops}): nothing to smooth.")
 
     # ==================================================================
     # Clipping — PV

@@ -20,6 +20,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
     label_changed      = QtCore.pyqtSignal(int)
     edit_toggled       = QtCore.pyqtSignal(bool)
     fill_holes_requested = QtCore.pyqtSignal()
+    smooth_requested   = QtCore.pyqtSignal(bool, bool)   # (dilate, erode)
     accept_requested   = QtCore.pyqtSignal()
     undo_requested     = QtCore.pyqtSignal()
 
@@ -52,6 +53,30 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_fill_holes.setEnabled(False)
         layout.addWidget(self.btn_fill_holes)
 
+        # Boundary smoothing of the *active* label. Dilate fills the jagged
+        # body fringe, erode shaves spikes; the button applies whichever are
+        # ticked (both = a closing) one pass per click, so the user smooths by
+        # eye. Body does nothing — it is the background, not a region.
+        smooth_row = QtWidgets.QHBoxLayout()
+        self.chk_dilate = QtWidgets.QCheckBox("Dilate")
+        self.chk_dilate.setChecked(True)
+        self.chk_erode = QtWidgets.QCheckBox("Erode")
+        self.btn_smooth = QtWidgets.QPushButton("Smooth active label")
+        self.btn_smooth.setToolTip(
+            "Smooth the boundary of the label selected above, one pass per "
+            "click. Dilate grows it into the jagged fringe, Erode shaves "
+            "spikes; both ticked de-jags without net growth. Body does nothing."
+        )
+        self.btn_smooth.clicked.connect(
+            lambda: self.smooth_requested.emit(
+                self.chk_dilate.isChecked(), self.chk_erode.isChecked())
+        )
+        smooth_row.addWidget(self.chk_dilate)
+        smooth_row.addWidget(self.chk_erode)
+        smooth_row.addWidget(self.btn_smooth, 1)
+        layout.addLayout(smooth_row)
+        self.btn_smooth.setEnabled(False)
+
         self.btn_accept = QtWidgets.QPushButton("Accept tagging")
         self.btn_accept.clicked.connect(self.accept_requested.emit)
         self.btn_accept.setEnabled(False)
@@ -72,6 +97,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
             "Deactivate selection mode" if on else "Activate selection mode"
         )
         self.btn_fill_holes.setEnabled(on)
+        self.btn_smooth.setEnabled(on)
         self.edit_toggled.emit(on)
 
     def current_label(self) -> int:
@@ -84,6 +110,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         """Enable/disable the editing controls (called after mesh load or tagging)."""
         self.btn_edit_toggle.setEnabled(enabled)
         self.btn_fill_holes.setEnabled(enabled)
+        self.btn_smooth.setEnabled(enabled)
         self.btn_accept.setEnabled(enabled)
 
     def set_undo_enabled(self, enabled: bool) -> None:
@@ -97,6 +124,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_edit_toggle.setText("Activate selection mode")
         self.btn_edit_toggle.setEnabled(False)
         self.btn_fill_holes.setEnabled(False)
+        self.btn_smooth.setEnabled(False)
         self.btn_accept.setEnabled(False)
         self.btn_undo.setEnabled(False)
 

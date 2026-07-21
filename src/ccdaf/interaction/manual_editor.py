@@ -168,6 +168,37 @@ class ManualEditor:
 
 
 
+    def smooth_label(self, tagger: 'RegionTagger', label: int,
+                     dilate: bool = True, erode: bool = False) -> int:
+        """Morphologically smooth one label's boundary, undoably.
+
+        ``dilate`` grows the label into its jagged body fringe, ``erode``
+        shaves its spikes; both together run dilate-then-erode (a closing)
+        that de-jags without net growth. Body is not a smoothing target — it
+        is the background, not a region. Snapshots for undo only when it
+        actually changes something. Returns the number of cells changed.
+        """
+        if label not in ALLOWED_LABELS or label == BODY_LABEL:
+            return 0
+        if not (dilate or erode):
+            return 0
+        before = np.asarray(self.mesh.cell_data["elemTag"]).copy()
+        out = before.copy()
+        if dilate:
+            out = tagger.dilate_label(out, label)
+        if erode:
+            out = tagger.erode_label(out, label)
+        changed = int(np.count_nonzero(out != before))
+        if changed == 0:
+            return 0
+        self._undo_stack.append(before)
+        self.mesh.cell_data["elemTag"] = out
+        if self.on_render is not None:
+            self.on_render()
+        if self.on_commit is not None:
+            self.on_commit()
+        return changed
+
     # ------------------------------------------------------------------
     # Picking
     # ------------------------------------------------------------------

@@ -712,6 +712,43 @@ class RegionTagger:
                 out[island] = self._border_majority_label(island, out)
         return out
 
+    def dilate_label(self, tri_label: np.ndarray, label: int) -> np.ndarray:
+        """Grow ``label`` one pass into the background fringe, seam-safe.
+
+        A background cell (BODY or UNASSIGNED) becomes ``label`` when at least
+        two of its edge-neighbours already carry ``label`` **and** none carries
+        a *different* PV label. The majority rule fills the ``\\/`` gaps that
+        make a per-triangle boundary zigzag; the other-PV guard keeps ``label``
+        from bridging a thin body seam into a neighbouring region and merging
+        the two. Returns a new array; ``tri_label`` is untouched.
+        """
+        out = np.asarray(tri_label).copy()
+        if label not in LABELS.values():
+            return out
+        is_label = (out == label).astype(np.int64)
+        is_bg = (out == BODY_LABEL) | (out == UNASSIGNED)
+        is_other_pv = np.isin(out, list(LABELS.values())) & (out != label)
+        n_label = self._tri_adj.dot(is_label)
+        n_other = self._tri_adj.dot(is_other_pv.astype(np.int64))
+        out[is_bg & (n_label >= 2) & (n_other == 0)] = label
+        return out
+
+    def erode_label(self, tri_label: np.ndarray, label: int) -> np.ndarray:
+        """Shrink ``label`` one pass off the background, the inverse of
+        :meth:`dilate_label`.
+
+        A ``label`` cell with at least two background edge-neighbours reverts
+        to BODY, which shaves the lone spikes a per-triangle boundary leaves.
+        Returns a new array; ``tri_label`` is untouched.
+        """
+        out = np.asarray(tri_label).copy()
+        if label not in LABELS.values():
+            return out
+        is_bg = ((out == BODY_LABEL) | (out == UNASSIGNED)).astype(np.int64)
+        n_bg = self._tri_adj.dot(is_bg)
+        out[(out == label) & (n_bg >= 2)] = BODY_LABEL
+        return out
+
     def _border_majority_label(self, cells: np.ndarray,
                                tri_label: np.ndarray) -> int:
         """Majority label among the cells bordering ``cells`` but not in it.
