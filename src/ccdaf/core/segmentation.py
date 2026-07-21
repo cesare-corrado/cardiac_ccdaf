@@ -195,6 +195,43 @@ def sync_sitk_from_array(array: np.ndarray,
     return new
 
 
+def relabel_halfspace(array: np.ndarray,
+                      origin, spacing, point, normal,
+                      from_label: int, to_label: int) -> np.ndarray:
+    """Relabel voxels on the normal-positive side of a plane.
+
+    Every voxel whose label equals ``from_label`` and whose centre lies on the
+    side the ``normal`` points to — the plane passing through ``point`` — is
+    set to ``to_label``. The cut direction is the normal, so flipping the
+    normal relabels the other half. Other labels and the other half are left
+    untouched, and the input array is not modified.
+
+    Voxel centres are ``origin + index * spacing`` with the array in
+    ``(Z, Y, X)`` order — identity direction, the same assumption every slice
+    in the segmentation view is placed under. A zero-length normal selects
+    nothing (returns a copy). No mask matches when ``from_label`` is absent, so
+    the call is a safe no-op there.
+    """
+    arr = np.asarray(array)
+    nz, ny, nx = arr.shape
+    ox, oy, oz = (float(v) for v in origin)
+    sx, sy, sz = (float(v) for v in spacing)
+    px, py, pz = (float(v) for v in point)
+    n = np.asarray(normal, dtype=float)
+    norm = float(np.linalg.norm(n))
+    out = arr.copy()
+    if norm == 0.0:
+        return out
+    n = n / norm
+    xs = (ox + np.arange(nx) * sx - px) * n[0]
+    ys = (oy + np.arange(ny) * sy - py) * n[1]
+    zs = (oz + np.arange(nz) * sz - pz) * n[2]
+    # Signed distance to the plane, broadcast to (Z, Y, X) only at compare time.
+    signed = xs[None, None, :] + ys[None, :, None] + zs[:, None, None]
+    out[(signed > 0.0) & (out == int(from_label))] = int(to_label)
+    return out
+
+
 def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
                              filt_stdev: "list[float]",
                              filt_rfact: "list[float]",
@@ -292,4 +329,5 @@ __all__ = [
     "negate_xy_inplace", "define_image_from_mesh", "vtk_image_to_sitk",
     "sitk_to_vtk_image", "voxelise_polydata", "binary_mask_image",
     "label_mask_image", "sync_sitk_from_array", "segmentation_to_polydata",
+    "relabel_halfspace",
 ]
