@@ -676,6 +676,92 @@ class RegionTagger:
 
         return out
 
+    def reduce_to_single_components(self, tri_label: np.ndarray) -> np.ndarray:
+        """Each PV label as one connected patch, seed-free.
+
+        For every label in :data:`LABELS`, keep its largest connected
+        component and reassign each smaller island to the majority label
+        bordering it — BODY when it borders nothing else, which is the usual
+        case (a stray triangle sitting in the body). Returns a new array;
+        ``tri_label`` is untouched.
+
+        :meth:`_enforce_contiguity` already does this during ``tag``, but it
+        needs the seeds and runs only there. A manual edit paints picked
+        cells with no connectivity check, and a segmentation round trip's
+        nearest-cell ``elemTag`` copy can strand a single cell across a
+        crevice — either leaves an island that ``tag`` never sees. CemrgApp's
+        label check requires exactly one region per PV label and its auto-fix
+        crashes on a one-cell region, so this runs on the way out of manual
+        correction to keep an export from carrying one.
+        """
+        out = np.asarray(tri_label).copy()
+        for lbl in LABELS.values():
+            mask = out == lbl
+            if not np.any(mask):
+                continue
+            sub = self._tri_adj[mask][:, mask]
+            n_comp, comp = connected_components(sub, directed=False)
+            if n_comp <= 1:
+                continue
+            global_idx = np.where(mask)[0]
+            keep = int(np.argmax(np.bincount(comp)))
+            for c in range(n_comp):
+                if c == keep:
+                    continue
+                island = global_idx[comp == c]
+                out[island] = self._border_majority_label(island, out)
+        return out
+
+    def dilate_label(self, tri_label: np.ndarray, label: int) -> np.ndarray:
+        """Grow ``label`` one pass into the background fringe, seam-safe.
+
+        A background cell (BODY or UNASSIGNED) becomes ``label`` when at least
+        two of its edge-neighbours already carry ``label`` **and** none carries
+        a *different* PV label. The majority rule fills the ``\\/`` gaps that
+        make a per-triangle boundary zigzag; the other-PV guard keeps ``label``
+        from bridging a thin body seam into a neighbouring region and merging
+        the two. Returns a new array; ``tri_label`` is untouched.
+        """
+        out = np.asarray(tri_label).copy()
+        if label not in LABELS.values():
+            return out
+        is_label = (out == label).astype(np.int64)
+        is_bg = (out == BODY_LABEL) | (out == UNASSIGNED)
+        is_other_pv = np.isin(out, list(LABELS.values())) & (out != label)
+        n_label = self._tri_adj.dot(is_label)
+        n_other = self._tri_adj.dot(is_other_pv.astype(np.int64))
+        out[is_bg & (n_label >= 2) & (n_other == 0)] = label
+        return out
+
+    def erode_label(self, tri_label: np.ndarray, label: int) -> np.ndarray:
+        """Shrink ``label`` one pass off the background, the inverse of
+        :meth:`dilate_label`.
+
+        A ``label`` cell with at least two background edge-neighbours reverts
+        to BODY, which shaves the lone spikes a per-triangle boundary leaves.
+        Returns a new array; ``tri_label`` is untouched.
+        """
+        out = np.asarray(tri_label).copy()
+        if label not in LABELS.values():
+            return out
+        is_bg = ((out == BODY_LABEL) | (out == UNASSIGNED)).astype(np.int64)
+        n_bg = self._tri_adj.dot(is_bg)
+        out[(out == label) & (n_bg >= 2)] = BODY_LABEL
+        return out
+
+    def _border_majority_label(self, cells: np.ndarray,
+                               tri_label: np.ndarray) -> int:
+        """Majority label among the cells bordering ``cells`` but not in it.
+
+        A component's external edge-neighbours never share its label (they
+        would be in the component), so this is always a different label —
+        BODY when the island borders only body.
+        """
+        external = np.setdiff1d(np.unique(self._tri_adj[cells, :].indices), cells)
+        if external.size == 0:
+            return BODY_LABEL
+        vals, counts = np.unique(tri_label[external], return_counts=True)
+        return int(vals[int(np.argmax(counts))])
 
     def _fill_holes(self, tri_label: np.ndarray) -> np.ndarray:
         """

@@ -371,6 +371,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.label_changed.connect(self._action_label_changed)
         self.manual_widget.edit_toggled.connect(self._action_edit_toggle)
         self.manual_widget.fill_holes_requested.connect(self._action_fill_holes)
+        self.manual_widget.smooth_requested.connect(self._action_smooth_boundary)
         self.manual_widget.accept_requested.connect(self._action_edit_accept)
         self.manual_widget.undo_requested.connect(self._action_undo_edit)
         body = self._register_section(v, "manual", "Manual correction")
@@ -1539,10 +1540,25 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self.editor.accept()
         self.editor.deactivate()
+        # Guard the export: reduce each PV label to a single connected patch.
+        # tag() enforces this, but a manual edit or a segmentation round trip
+        # can strand a stray cell that tag() never re-checks, and CemrgApp's
+        # label check rejects a label split across two regions. Runs on accept
+        # so no accepted tagging carries an island; re-runs on every re-accept.
+        stray = 0
+        if self.tagger is not None and self.loader.mesh is not None:
+            tags = np.asarray(self.loader.mesh.cell_data["elemTag"])
+            cleaned = self.tagger.reduce_to_single_components(tags)
+            stray = int(np.count_nonzero(cleaned != tags))
+            if stray:
+                self.loader.mesh.cell_data["elemTag"] = cleaned
         self.manual_widget.on_accepted()
         self._render_mesh()
         self.clipping_widget.set_enabled_after_accept()
-        self.statusBar().showMessage("Tagging accepted. Proceed to clipping.")
+        note = (f" — reassigned {stray} stray label cell{'s' if stray != 1 else ''} "
+                "to keep each region connected") if stray else ""
+        self.statusBar().showMessage(
+            f"Tagging accepted{note}. Proceed to clipping.")
 
     def _on_edit_committed(self) -> None:
         if self.editor is not None:
@@ -1558,6 +1574,25 @@ class CCDAF(QtWidgets.QMainWindow):
         if self.editor and self.tagger:
             self.editor.fill_holes(self.tagger)
             self.statusBar().showMessage("Holes filled while preserving boundaries.")
+
+    def _action_smooth_boundary(self, dilate: bool, erode: bool) -> None:
+        """Smooth the active label's boundary — one dilate/erode pass per click."""
+        if self.editor is None or self.tagger is None:
+            return
+        label = self.manual_widget.current_label()
+        if label == BODY_LABEL:
+            self.statusBar().showMessage(
+                "Select a PV label to smooth — body is the background.")
+            return
+        ops = "+".join(w for w, on in (("dilate", dilate), ("erode", erode)) if on)
+        if not ops:
+            self.statusBar().showMessage("Tick Dilate and/or Erode first.")
+            return
+        n = self.editor.smooth_label(self.tagger, label, dilate, erode)
+        self.manual_widget.set_undo_enabled(self.editor.can_undo)
+        self.statusBar().showMessage(
+            f"Smoothed label {label} ({ops}): {n} cell{'s' if n != 1 else ''} changed"
+            if n else f"Label {label} ({ops}): nothing to smooth.")
 
     # ==================================================================
     # Clipping — PV

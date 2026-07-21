@@ -19,6 +19,7 @@ import numpy as np
 import pyvista as pv
 
 from ccdaf.io.vtkfunctions import readvtk, writevtk
+from ccdaf.core.eam_loader import CARTO_NODATA
 
 
 BODY_LABEL: int = 1
@@ -46,6 +47,76 @@ def compute_normals(mesh: pv.PolyData) -> pv.PolyData:
         inplace=False,
     )
 
+# --------------------------------------------------------------------------
+# No-data across ASCII VTK
+# --------------------------------------------------------------------------
+# VTK's legacy *ASCII* reader cannot parse a ``nan`` token: the first one trips
+# the stream's failbit, every value after it misreads, the tuple count drifts,
+# and a leftover ``nan`` is taken as the next array's *name* — so every field
+# past the first no-data field is lost and a phantom ``nan`` field appears.
+# ParaView uses that same reader, so the file opens nowhere. (Binary carries
+# NaN as raw IEEE-754 bits and is unaffected; XML .vtp parses ``nan`` fine.)
+#
+# So no-data is encoded on the way to ASCII as the Carto sentinel and folded
+# back to NaN on the way in. The sentinel is purely an ASCII-transport detail:
+# in memory, and in binary, no-data is always NaN. Real Carto data is
+# ``|v| < CARTO_NODATA`` by the format's own convention (the loader masks
+# ``|v| >= CARTO_NODATA`` to NaN), which is what makes the fold unambiguous;
+# elemTag labels and unit Normals never approach it, so they are untouched.
+
+
+def nodata_to_sentinel(mesh: pv.PolyData) -> None:
+    """In place: set non-finite float field values to ``CARTO_NODATA``.
+
+    For writing ASCII VTK only — binary carries NaN natively and must be left
+    alone. Mutates ``mesh``; callers writing a live mesh pass a copy.
+    """
+    for attr in (mesh.point_data, mesh.cell_data):
+        for name in list(attr.keys()):
+            a = np.asarray(attr[name])
+            if np.issubdtype(a.dtype, np.floating) and not np.isfinite(a).all():
+                a = a.copy()
+                a[~np.isfinite(a)] = CARTO_NODATA
+                attr[name] = a
+
+
+def sentinel_to_nodata(mesh: pv.PolyData) -> None:
+    """In place: fold the Carto no-data sentinel back to NaN.
+
+    The inverse of :func:`nodata_to_sentinel` for a mesh read from an ASCII
+    VTK. Applied only to ASCII legacy ``.vtk`` (see :func:`_is_ascii_legacy_vtk`);
+    binary and XML files carry NaN natively and are read untouched.
+    """
+    for attr in (mesh.point_data, mesh.cell_data):
+        for name in list(attr.keys()):
+            a = np.asarray(attr[name])
+            if np.issubdtype(a.dtype, np.floating):
+                mask = np.abs(a) >= CARTO_NODATA
+                if mask.any():
+                    a = a.copy()
+                    a[mask] = np.nan
+                    attr[name] = a
+
+
+def _is_ascii_legacy_vtk(filename: Union[str, Path]) -> bool:
+    """True only for a legacy ``.vtk`` whose header declares ``ASCII``.
+
+    Line 3 of the legacy header is ``ASCII`` or ``BINARY``. Any other
+    extension (``.vtp``, ``.ply``, …) or an unreadable header returns False,
+    so the sentinel fold never touches a format that carries NaN natively.
+    """
+    if not str(filename).lower().endswith(".vtk"):
+        return False
+    try:
+        with open(filename, "rb") as fh:
+            line = b""
+            for _ in range(3):
+                line = fh.readline()
+        return line.strip().upper() == b"ASCII"
+    except OSError:
+        return False
+
+
 class MeshLoader:
     """Load / save atrial surface meshes and manage the ``elemTag`` array."""
 
@@ -65,6 +136,8 @@ class MeshLoader:
 
         self._validate_triangles(mesh)
         self._ensure_elem_tag(mesh)
+        if _is_ascii_legacy_vtk(filename):
+            sentinel_to_nodata(mesh)       # ASCII stores no-data as CARTO_NODATA
 
         self.path = filename
         self.mesh = mesh
@@ -122,6 +195,10 @@ class MeshLoader:
             mesh0.cell_data['elemTag'] = elem
             mesh0.set_active_scalars('elemTag', preference='cell')
 
+        # ASCII cannot carry NaN; encode no-data as the sentinel. mesh0 is a
+        # private copy, so mutate it directly. Binary keeps NaN untouched.
+        if not binary:
+            nodata_to_sentinel(mesh0)
         writevtk(mesh0, str(filename), binary=binary)
 
     # ------------------------------------------------------------------
@@ -148,4 +225,5 @@ class MeshLoader:
             )
 
 
-__all__ = ["MeshLoader", "BODY_LABEL", "DEFAULT_SAVE_FIELDS", "compute_normals"]
+__all__ = ["MeshLoader", "BODY_LABEL", "DEFAULT_SAVE_FIELDS", "compute_normals",
+           "nodata_to_sentinel", "sentinel_to_nodata"]
