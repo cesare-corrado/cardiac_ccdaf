@@ -919,6 +919,16 @@ class CCDAF(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
 
+    def _collect_seeds(self) -> "Optional[dict]":
+        """Seeds as ``{name: xyz}`` when the selection is complete, else None.
+
+        Shared by the pickle-bundle save and the EAM binary export so both
+        carry the seeds the same way.
+        """
+        if self.selector is not None and self.selector.is_complete:
+            return {name: s.xyz for name, s in self.selector.seeds.items()}
+        return None
+
     def _save_bundle(self, fn: str, fields: "list[str]") -> None:
         """Write the pickle bundle: surface (chosen point fields), seeds,
         electrodes and elemTag, so the mesh reloads with all of them."""
@@ -930,9 +940,7 @@ class CCDAF(QtWidgets.QMainWindow):
             if name not in keep:
                 surface.point_data.remove(name)
 
-        seeds = None
-        if self.selector is not None and self.selector.is_complete:
-            seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
+        seeds = self._collect_seeds()
 
         electrodes = self._eam_data.electrodes if self._eam_data else None
         export_binary(
@@ -1760,9 +1768,16 @@ class CCDAF(QtWidgets.QMainWindow):
                 return
         try:
             if dlg.selected_format() == EXPORT_BINARY:
+                # Carry the seeds and tagging too, as the pickle bundle does:
+                # the reference downstream reads only surface/electrodes and
+                # ignores the extra keys, while ccdaf reads them back — so an
+                # export/reload keeps the work rather than resetting elemTag to
+                # body and dropping the seeds.
                 export_binary(path, self.loader.mesh,
                               electrodes=self._eam_data.electrodes,
-                              electrode_points=self._eam_electrode_points)
+                              electrode_points=self._eam_electrode_points,
+                              seeds=self._collect_seeds(),
+                              include_elem_tag=True)
             else:
                 export_vtk(path, self.loader.mesh, binary=dlg.selected_binary())
         except Exception as exc:
