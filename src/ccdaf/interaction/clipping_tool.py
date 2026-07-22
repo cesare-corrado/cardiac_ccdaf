@@ -203,6 +203,13 @@ class ClippingTool:
         self._path: List[int] = []
         self._snake_actor = None
 
+        # Per-pick history for "undo last point" while building the snake.
+        # Each entry is a pre-mutation snapshot (path, head, tail, pick_count);
+        # popping it reverts exactly one placed point. Distinct from the
+        # mesh-level ``_history`` used by restore()/undo().
+        self._pick_history: List[tuple] = []
+        self._pick_count: int = 0
+
         # Tag-constrained subgraph (cached per PV session).
         self._point_tag: Optional[np.ndarray] = None
         self._boundary: Optional[np.ndarray] = None
@@ -228,6 +235,14 @@ class ClippingTool:
     @property
     def mode(self) -> ClipMode:
         return self._mode
+
+    @property
+    def can_undo(self) -> bool:
+        """True when a previous mesh state is available to restore.
+
+        Both PV and mitral clips push a snapshot before modifying the mesh,
+        so this gates the host's revert/undo button for either clip type."""
+        return bool(self._history)
 
     def _status(self, msg: str) -> None:
         if self.on_status is not None:
@@ -351,6 +366,8 @@ class ClippingTool:
         self._head = -1
         self._tail = -1
         self._path = []
+        self._pick_history = []
+        self._pick_count = 0
         self._snapshot()
 
         mesh = self.get_mesh()
@@ -414,12 +431,24 @@ class ClippingTool:
             )
             return
 
+        # A pick that lands on an existing endpoint is a no-op. This also
+        # absorbs pyvista firing the callback twice for a single X press:
+        # enable_point_picking installs an EndPickEvent observer, and
+        # pick_at_cursor both calls picker.Pick() (which fires it) and invokes
+        # the callback directly. Without this guard the phantom second call
+        # would record a duplicate undo step per placed point. Returns silently
+        # so the real pick's status message is preserved.
+        if p == self._head or p == self._tail:
+            return
+
         if self._tail < 0:
+            self._pick_history.append(self._capture_pick_state())
             self._tail = p
             self._head = p
             self._path = [p]
+            self._pick_count += 1
             self._redraw_snake()
-            self._status(f"PV clip: snake started ({len(self._path)} vertex).")
+            self._status(f"PV clip: snake started ({self._pick_count} point).")
             return
 
         if len(self._path) == 1:
@@ -429,10 +458,15 @@ class ClippingTool:
                     "PV clip: no tag-restricted geodesic to that point."
                 )
                 return
+            self._pick_history.append(self._capture_pick_state())
             self._path = path
             self._head = p
+            self._pick_count += 1
             self._redraw_snake()
-            self._status(f"PV clip: snake has {len(self._path)} vertices.")
+            self._status(
+                f"PV clip: {self._pick_count} points, "
+                f"{len(self._path)} vertices."
+            )
             return
 
         g1 = _subgraph_path(self._subgraph, self._head, p)   # head → P
@@ -451,6 +485,7 @@ class ClippingTool:
         else:
             chose_head = len(g1) <= len(g2)
 
+        self._pick_history.append(self._capture_pick_state())
         if chose_head:
             # Append head → P (skip g1[0] = old head, already at path end).
             self._path = self._path + g1[1:]
@@ -460,11 +495,43 @@ class ClippingTool:
             self._path = g2[:-1] + self._path
             self._tail = p
 
+        self._pick_count += 1
         self._redraw_snake()
-        self._status(f"PV clip: snake has {len(self._path)} vertices.")
+        self._status(
+            f"PV clip: {self._pick_count} points, {len(self._path)} vertices."
+        )
+
+    # ------------------------------------------------------------------
+    def _capture_pick_state(self) -> tuple:
+        """Snapshot the snake state prior to a pick, for undo_last_point."""
+        return (list(self._path), self._head, self._tail, self._pick_count)
+
+    def undo_last_point(self) -> int:
+        """Remove the most recently placed PV snake point.
+
+        Returns the number of placed points remaining afterwards, or -1 when
+        there is nothing to undo (or no PV contour is in progress)."""
+        if self._mode is not ClipMode.PV_CONTOUR:
+            return -1
+        if not self._pick_history:
+            self._status("PV clip: no points to undo.")
+            return -1
+        path, head, tail, count = self._pick_history.pop()
+        self._path = path
+        self._head = head
+        self._tail = tail
+        self._pick_count = count
+        self._redraw_snake()
+        if count == 0:
+            self._status("PV clip: removed last point — snake is empty.")
+        else:
+            self._status(f"PV clip: removed last point — {count} left.")
+        return count
 
     # ------------------------------------------------------------------
     def _redraw_snake(self) -> None:
+        if self.plotter is None:
+            return
         if self._snake_actor is not None:
             try:
                 self.plotter.remove_actor(self._snake_actor, reset_camera=False)
@@ -495,6 +562,8 @@ class ClippingTool:
         self._head = -1
         self._tail = -1
         self._path = []
+        self._pick_history = []
+        self._pick_count = 0
         if self._snake_actor is not None:
             try:
                 self.plotter.remove_actor(self._snake_actor, reset_camera=False)

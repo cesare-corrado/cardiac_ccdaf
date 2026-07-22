@@ -387,6 +387,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # --- Clipping ---------------------------------------------------
         self.clipping_widget = ClippingWidget(pv_names=list(PV_NAMES))
         self.clipping_widget.pv_start_requested.connect(self._action_pv_start)
+        self.clipping_widget.pv_undo_point_requested.connect(self._action_pv_undo_point)
         self.clipping_widget.pv_finish_requested.connect(self._action_pv_finish)
         self.clipping_widget.mv_sphere_requested.connect(self._action_mv_sphere_start)
         self.clipping_widget.mv_plane_requested.connect(self._action_mv_plane_start)
@@ -1707,8 +1708,23 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._focus_3d()
         self.clipper.start_pv_contour(pv_label=pv_label)
+        self.clipping_widget.set_pv_undo_point_enabled(True)
         self.clipping_widget.set_pv_finish_enabled(True)
         self.clipping_widget.set_clip_revert_enabled(True)
+
+    def _action_pv_undo_point(self) -> None:
+        if self.clipper is None:
+            return
+        n = self.clipper.undo_last_point()
+        self.plotter.render()
+        if n < 0:
+            self.statusBar().showMessage("PV clip: no point to undo.")
+        elif n == 0:
+            self.statusBar().showMessage(
+                "PV clip: removed last point — snake is empty.")
+        else:
+            self.statusBar().showMessage(
+                f"PV clip: removed last point — {n} point(s) left.")
 
     def _action_pv_finish(self) -> None:
         if self.clipper is None or self.selector is None:
@@ -1725,7 +1741,9 @@ class CCDAF(QtWidgets.QMainWindow):
         if res is None:
             return
         self._render_mesh()
+        self.clipping_widget.set_pv_undo_point_enabled(False)
         self.clipping_widget.set_pv_finish_enabled(False)
+        self.clipping_widget.set_clip_revert_enabled(self.clipper.can_undo)
 
     # ==================================================================
     # Clipping — mitral
@@ -1749,6 +1767,8 @@ class CCDAF(QtWidgets.QMainWindow):
         b = self.loader.mesh.bounds
         diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
         self.clipper.start_mv_sphere(center=seed, radius=0.05 * diag)
+        self.clipping_widget.set_pv_undo_point_enabled(False)
+        self.clipping_widget.set_pv_finish_enabled(False)
         self.clipping_widget.set_clip_apply_enabled(True)
         self.clipping_widget.set_clip_revert_enabled(True)
 
@@ -1769,21 +1789,16 @@ class CCDAF(QtWidgets.QMainWindow):
             normal = np.array([0.0, 0.0, 1.0])
         normal /= np.linalg.norm(normal)
         self.clipper.start_mv_plane(origin=seed, normal=normal)
+        self.clipping_widget.set_pv_undo_point_enabled(False)
+        self.clipping_widget.set_pv_finish_enabled(False)
         self.clipping_widget.set_clip_apply_enabled(True)
         self.clipping_widget.set_clip_revert_enabled(True)
 
     def _action_clip_apply(self) -> None:
         if self.clipper is None:
             return
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "Confirm clip",
-            "This will permanently modify the mesh. Continue?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No,
-        )
-        if reply != QtWidgets.QMessageBox.Yes:
-            return
+        # No confirmation dialog: the mitral clip is revertible from the mesh
+        # history (the "Reject / revert clip" button stays live afterwards).
         mode = self.clipper.mode
         if mode is ClipMode.MV_SPHERE:
             self.clipper.apply_mv_sphere()
@@ -1794,8 +1809,11 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._render_mesh()
         self.clipping_widget.set_clip_apply_enabled(False)
-        self.clipping_widget.set_clip_revert_enabled(False)
+        self.clipping_widget.set_pv_undo_point_enabled(False)
         self.clipping_widget.set_pv_finish_enabled(False)
+        # Keep revert available so the applied clip (PV or mitral) can be
+        # undone from the mesh history — gated on there being a snapshot.
+        self.clipping_widget.set_clip_revert_enabled(self.clipper.can_undo)
 
     def _action_clip_revert(self) -> None:
         if self.clipper is None:
@@ -1804,8 +1822,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipper.restore()
         self._render_mesh()
         self.clipping_widget.set_clip_apply_enabled(False)
+        self.clipping_widget.set_pv_undo_point_enabled(False)
         self.clipping_widget.set_pv_finish_enabled(False)
-        self.clipping_widget.set_clip_revert_enabled(False)
+        # Multi-level undo: stay enabled while earlier clips remain to revert.
+        self.clipping_widget.set_clip_revert_enabled(self.clipper.can_undo)
 
     # ==================================================================
     # Mesh rendering (3D quadrant)
@@ -2201,7 +2221,7 @@ class CCDAF(QtWidgets.QMainWindow):
             sp.setRange(0.01, 100.0)
             sp.setDecimals(3)
             sp.setSingleStep(0.1)
-            sp.setValue(1.0)
+            sp.setValue(0.5)
             form.addRow(f"Spacing {axis}:", sp)
             spins.append(sp)
         chk_flip = QtWidgets.QCheckBox("Flip X/Y (MIRTK orientation)")
