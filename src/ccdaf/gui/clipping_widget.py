@@ -16,6 +16,7 @@ from PyQt5 import QtCore, QtWidgets
 class ClippingWidget(QtWidgets.QGroupBox):
 
     pv_start_requested   = QtCore.pyqtSignal(str)   # emits selected pv_name
+    pv_undo_point_requested = QtCore.pyqtSignal()
     pv_finish_requested  = QtCore.pyqtSignal()
     mv_sphere_requested  = QtCore.pyqtSignal()
     mv_plane_requested   = QtCore.pyqtSignal()
@@ -57,6 +58,15 @@ class ClippingWidget(QtWidgets.QGroupBox):
         self.btn_pv_start.setEnabled(False)
         layout.addWidget(self.btn_pv_start)
 
+        self.btn_pv_undo_point = QtWidgets.QPushButton("Undo last point")
+        self.btn_pv_undo_point.setToolTip(
+            "Remove the most recently placed geodesic point while building the "
+            "PV contour, and redraw the snake through the remaining points."
+        )
+        self.btn_pv_undo_point.clicked.connect(self.pv_undo_point_requested.emit)
+        self.btn_pv_undo_point.setEnabled(False)
+        layout.addWidget(self.btn_pv_undo_point)
+
         self.btn_pv_finish = QtWidgets.QPushButton("Close & Clip PV")
         self.btn_pv_finish.clicked.connect(self.pv_finish_requested.emit)
         self.btn_pv_finish.setEnabled(False)
@@ -89,6 +99,9 @@ class ClippingWidget(QtWidgets.QGroupBox):
     def is_clipping_enabled(self) -> bool:
         return bool(self.chk_active.isChecked())
 
+    def set_pv_undo_point_enabled(self, enabled: bool) -> None:
+        self.btn_pv_undo_point.setEnabled(enabled)
+
     def set_pv_finish_enabled(self, enabled: bool) -> None:
         self.btn_pv_finish.setEnabled(enabled)
 
@@ -111,6 +124,7 @@ class ClippingWidget(QtWidgets.QGroupBox):
         The activation checkbox is the user's choice and survives."""
         self._accepted = False
         self.btn_pv_start.setEnabled(False)
+        self.btn_pv_undo_point.setEnabled(False)
         self.btn_pv_finish.setEnabled(False)
         self.btn_mv_sphere.setEnabled(False)
         self.btn_mv_plane.setEnabled(False)
@@ -127,6 +141,7 @@ class ClippingWidget(QtWidgets.QGroupBox):
         self._sync_start_buttons()
         if not on:
             # Whatever was mid-flight is being abandoned by the host.
+            self.btn_pv_undo_point.setEnabled(False)
             self.btn_pv_finish.setEnabled(False)
             self.btn_apply.setEnabled(False)
         self.clipping_toggled.emit(on)
