@@ -67,6 +67,26 @@ class ManualEditor:
         self._sphere_actor = None
         self._undo_stack: Deque[np.ndarray] = deque(maxlen=3)
 
+        # Snake (geodesic tag) sub-mode. X drops anchor vertices; the open
+        # geodesic through them is redrawn live; commit tags every triangle
+        # touching the path with the active label. Kept separate from the
+        # cell-selection picker above — the two are mutually exclusive modes.
+        #
+        # The snake grows *bidirectionally*, like the PV clip: each new anchor
+        # extends whichever endpoint — head or tail — is geodesically closer,
+        # so the path stays open (head → tail) and never doubles back.
+        self._snake_active: bool = False
+        self._snake_tagger = None
+        self._snake_anchors: list[int] = []   # picked vertices (for the spheres)
+        self._snake_path: list[int] = []      # geodesic vertex ids, head → tail
+        self._snake_head: int = -1
+        self._snake_tail: int = -1
+        # Pre-extend snapshots so a single anchor can be undone — the last
+        # anchor may have grown either endpoint, so we restore state wholesale.
+        self._snake_history: list[tuple] = []
+        self._snake_anchor_actor = None
+        self._snake_line_actor = None
+
         # The X key is bound by the host, not here: clipping wants the same
         # key, and when both tools bound it themselves whoever came last
         # won — or wiped the other's binding outright. The host owns the
@@ -198,6 +218,240 @@ class ManualEditor:
         if self.on_commit is not None:
             self.on_commit()
         return changed
+
+    # ------------------------------------------------------------------
+    # Snake (geodesic tag) sub-mode
+    # ------------------------------------------------------------------
+    @property
+    def snake_active(self) -> bool:
+        return self._snake_active
+
+    @property
+    def snake_point_count(self) -> int:
+        return len(self._snake_anchors)
+
+    def _snake_reset(self) -> None:
+        self._snake_anchors = []
+        self._snake_path = []
+        self._snake_head = -1
+        self._snake_tail = -1
+        self._snake_history = []
+
+    def start_snake(self, tagger: 'RegionTagger') -> None:
+        """Enter snake mode: X drops geodesic anchors on the surface.
+
+        Left-drag keeps rotating (point picking with ``left_clicking=False``);
+        the host routes the X key to :meth:`snake_pick_at_cursor`. Mutually
+        exclusive with cell-selection mode — the host turns that off first.
+        """
+        self._snake_tagger = tagger
+        self._snake_reset()
+        self._snake_active = True
+        self.plotter.enable_trackball_style()
+        self.plotter.enable_point_picking(
+            callback=lambda *a, **k: None,   # X drives picks, not the click
+            use_picker=True,
+            show_message=False,
+            show_point=False,
+            left_clicking=False,
+            pickable_window=False,
+        )
+        self._clear_snake_actors()
+
+    def stop_snake(self) -> None:
+        """Leave snake mode, drop anchors, and release the picker."""
+        self._snake_active = False
+        self._snake_reset()
+        self._clear_snake_actors()
+        try:
+            self.plotter.disable_picking()
+        except Exception:
+            pass
+
+    def clear_snake(self) -> None:
+        """Discard the current anchors without leaving snake mode."""
+        self._snake_reset()
+        self._clear_snake_actors()
+        self.plotter.render()
+
+    def _snake_extend(self, tagger: 'RegionTagger', vid: int) -> int:
+        """Grow the snake with a new anchor ``vid``, bidirectionally.
+
+        The new anchor extends whichever endpoint — head or tail — reaches it
+        by the shorter geodesic, exactly like the PV clip snake. Pure with
+        respect to rendering (no plotter calls), so it is unit-testable.
+
+        Returns the anchor count (>0) on success, ``0`` for a no-op (a repeat
+        pick on an endpoint), or ``-1`` when ``vid`` is unreachable from both
+        endpoints (a disconnected mesh component).
+        """
+        vid = int(vid)
+        # Snapshot the pre-extend state so this anchor can be undone; recorded
+        # only on the branches that actually mutate (the successful ones).
+        snap = (list(self._snake_anchors), list(self._snake_path),
+                self._snake_head, self._snake_tail)
+        # First anchor: seed head == tail.
+        if self._snake_tail < 0:
+            self._snake_history.append(snap)
+            self._snake_tail = self._snake_head = vid
+            self._snake_path = [vid]
+            self._snake_anchors = [vid]
+            return 1
+        # Ignore a repeat pick on an existing endpoint.
+        if vid == self._snake_head or vid == self._snake_tail:
+            return 0
+        # Second anchor: the first real geodesic segment (tail → vid).
+        if len(self._snake_path) == 1:
+            g = tagger.geodesic_path(self._snake_tail, vid)
+            if len(g) < 2:
+                return -1
+            self._snake_history.append(snap)
+            self._snake_path = g
+            self._snake_head = vid
+            self._snake_anchors.append(vid)
+            return len(self._snake_anchors)
+        # Later anchors: extend the nearer endpoint.
+        g1 = tagger.geodesic_path(self._snake_head, vid)   # head → P
+        g2 = tagger.geodesic_path(vid, self._snake_tail)   # P → tail
+        if not g1 and not g2:
+            return -1
+        if not g1:
+            chose_head = False
+        elif not g2:
+            chose_head = True
+        else:
+            chose_head = len(g1) <= len(g2)
+        self._snake_history.append(snap)
+        if chose_head:
+            # Append head → P (skip g1[0] = old head, already at path end).
+            self._snake_path = self._snake_path + g1[1:]
+            self._snake_head = vid
+        else:
+            # Prepend P → tail (skip g2[-1] = old tail, already at path start).
+            self._snake_path = g2[:-1] + self._snake_path
+            self._snake_tail = vid
+        self._snake_anchors.append(vid)
+        return len(self._snake_anchors)
+
+    def undo_last_point(self) -> int:
+        """Remove the most recently added snake anchor, restoring the previous
+        geodesic. Returns the anchor count after undo (``0`` once emptied), or
+        ``-1`` when there is nothing to undo."""
+        if not self._snake_history:
+            return -1
+        anchors, path, head, tail = self._snake_history.pop()
+        self._snake_anchors = anchors
+        self._snake_path = path
+        self._snake_head = head
+        self._snake_tail = tail
+        self._redraw_snake()
+        return len(self._snake_anchors)
+
+    def snake_pick_at_cursor(self) -> int:
+        """Drop a snake anchor at the mouse position and grow the geodesic.
+
+        Returns the anchor count (>0) when one was placed, ``0`` for a no-op
+        (body active label — body builds no geodesic — or a repeat pick), or
+        ``-1`` when the pick is unreachable from the current snake.
+        """
+        if not self._snake_active:
+            return 0
+        if self._active_label == BODY_LABEL or self._active_label not in ALLOWED_LABELS:
+            return 0
+        interactor = self.plotter.iren.interactor
+        click_pos = interactor.GetEventPosition()
+        picker = self.plotter.picker
+        picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
+        picked = picker.GetPickPosition()
+        if picked == (0.0, 0.0, 0.0):
+            return 0
+        vid = int(self.mesh.find_closest_point(np.asarray(picked, dtype=float)))
+        code = self._snake_extend(self._snake_tagger, vid)
+        if code > 0:
+            self._redraw_snake()
+        return code
+
+    def commit_snake(self, tagger: 'RegionTagger') -> int:
+        """Tag every triangle touching the geodesic with the active label.
+
+        The open head → tail geodesic is already built (grown anchor by
+        anchor); commit extracts the triangles with at least one vertex on it
+        and assigns the active label. Undoable. Returns the number of cells
+        changed, or ``0`` when there is nothing to do (fewer than two anchors,
+        body label, or no net change).
+        """
+        if self._active_label == BODY_LABEL or self._active_label not in ALLOWED_LABELS:
+            return 0
+        if len(self._snake_path) < 2:
+            return 0
+        cells = tagger.triangles_incident_to(self._snake_path)
+        if cells.size == 0:
+            return 0
+        before = np.asarray(self.mesh.cell_data["elemTag"]).copy()
+        tags = before.copy()
+        tags[cells] = self._active_label
+        changed = int(np.count_nonzero(tags != before))
+        if changed == 0:
+            self._snake_reset()
+            self._clear_snake_actors()
+            return 0
+        self._undo_stack.append(before)
+        self.mesh.cell_data["elemTag"] = tags   # force VTK update
+        self._snake_reset()
+        self._clear_snake_actors()
+        if self.on_render is not None:
+            self.on_render()
+        if self.on_commit is not None:
+            self.on_commit()
+        return changed
+
+    def _redraw_snake(self) -> None:
+        if self.plotter is None:
+            return
+        self._clear_snake_actors()
+        if not self._snake_anchors:
+            self.plotter.render()
+            return
+
+        # Anchor spheres at the picked vertices.
+        anchor_pts = np.asarray(self.mesh.points[self._snake_anchors], dtype=float)
+        glyphs = pv.PolyData(anchor_pts).glyph(
+            geom=pv.Sphere(radius=self._sphere_radius * 1.5),
+            scale=False,
+            orient=False,
+        )
+        self._snake_anchor_actor = self.plotter.add_mesh(
+            glyphs,
+            color="lime",
+            name="snake_anchors",
+            reset_camera=False,
+            pickable=False,
+        )
+
+        # Geodesic polyline head → tail (green tube).
+        if len(self._snake_path) >= 2:
+            line_pts = np.asarray(self.mesh.points[self._snake_path], dtype=float)
+            poly = pv.lines_from_points(line_pts)
+            self._snake_line_actor = self.plotter.add_mesh(
+                poly,
+                color="lime",
+                line_width=6,
+                render_lines_as_tubes=True,
+                name="snake_line",
+                reset_camera=False,
+                pickable=False,
+            )
+        self.plotter.render()
+
+    def _clear_snake_actors(self) -> None:
+        for attr in ("_snake_anchor_actor", "_snake_line_actor"):
+            actor = getattr(self, attr, None)
+            if actor is not None:
+                try:
+                    self.plotter.remove_actor(actor, reset_camera=False)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     # ------------------------------------------------------------------
     # Picking
