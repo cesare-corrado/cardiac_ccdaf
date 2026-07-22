@@ -62,7 +62,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from ccdaf.core.mesh_loader import MeshLoader, BODY_LABEL
 from ccdaf.interaction.seed_selector import SeedSelector, Seed, SEED_ORDER, SEED_PROMPT, SEED_COLOR
 from ccdaf.core.region_tagger import RegionTagger, LABELS
-from ccdaf.interaction.manual_editor import ManualEditor, ALLOWED_LABELS
+from ccdaf.interaction.manual_editor import ManualEditor, ALLOWED_LABELS, EditState
 from ccdaf.interaction.clipping_tool import ClippingTool, ClipMode
 from ccdaf.gui.postprocessing_widget import PostprocessingWidget
 from ccdaf.gui.segmentation_widget import SegmentationWidget
@@ -375,6 +375,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.edit_toggled.connect(self._action_edit_toggle)
         self.manual_widget.fill_holes_requested.connect(self._action_fill_holes)
         self.manual_widget.smooth_requested.connect(self._action_smooth_boundary)
+        self.manual_widget.snake_toggled.connect(self._action_snake_toggle)
+        self.manual_widget.snake_undo_point_requested.connect(self._action_snake_undo_point)
+        self.manual_widget.snake_clear_requested.connect(self._action_snake_clear)
+        self.manual_widget.snake_commit_requested.connect(self._action_snake_commit)
         self.manual_widget.accept_requested.connect(self._action_edit_accept)
         self.manual_widget.undo_requested.connect(self._action_undo_edit)
         body = self._register_section(v, "manual", "Manual correction")
@@ -501,6 +505,19 @@ class CCDAF(QtWidgets.QMainWindow):
             self.clipper.pick_at_cursor()
             return
         if self.editor is not None:
+            if self.editor.snake_active:
+                code = self.editor.snake_pick_at_cursor()
+                if code > 0:
+                    self.statusBar().showMessage(
+                        f"Snake: {code} point(s) — Commit snake when done.")
+                elif code == -1:
+                    self.statusBar().showMessage(
+                        "Snake: that point isn't reachable from the current "
+                        "line — pick closer.")
+                elif self.manual_widget.current_label() == BODY_LABEL:
+                    self.statusBar().showMessage(
+                        "Snake: body builds no geodesic — pick a PV/LAA label.")
+                return
             self.editor.commit_pending()
 
     def _on_clipping_toggled(self, enabled: bool) -> None:
@@ -1544,13 +1561,80 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._focus_3d()
         if on:
+            # Selection and snake both drive the surface picker — only one at
+            # a time. Turning selection on abandons any snake in progress.
+            if self.editor.snake_active:
+                self.manual_widget.uncheck_snake()
+                self.editor.stop_snake()
             self.editor.activate()
         else:
             self.editor.deactivate()
 
+    def _action_snake_toggle(self, on: bool) -> None:
+        if self.editor is None or self.tagger is None:
+            return
+        self._focus_3d()
+        if on:
+            # Mutually exclusive with cell-selection mode.
+            if self.editor.state is EditState.SELECTING:
+                self.manual_widget.uncheck_edit_toggle()
+                self.editor.deactivate()
+            self.editor.start_snake(self.tagger)
+            if self.manual_widget.current_label() == BODY_LABEL:
+                self.statusBar().showMessage(
+                    "Snake: choose a PV/LAA label — body builds no geodesic.")
+            else:
+                self.statusBar().showMessage(
+                    "Snake: press X to drop geodesic points, then Commit snake.")
+        else:
+            self.editor.stop_snake()
+            self.plotter.render()
+
+    def _action_snake_undo_point(self) -> None:
+        if self.editor is None:
+            return
+        n = self.editor.undo_last_point()
+        if n < 0:
+            self.statusBar().showMessage("Snake: no points to undo.")
+        elif n == 0:
+            self.statusBar().showMessage("Snake: removed last point — snake is empty.")
+        else:
+            self.statusBar().showMessage(
+                f"Snake: removed last point — {n} point(s) left.")
+
+    def _action_snake_clear(self) -> None:
+        if self.editor is None:
+            return
+        self.editor.clear_snake()
+        self.statusBar().showMessage("Snake cleared.")
+
+    def _action_snake_commit(self) -> None:
+        if self.editor is None or self.tagger is None:
+            return
+        label = self.manual_widget.current_label()
+        if label == BODY_LABEL:
+            self.statusBar().showMessage(
+                "Snake: body builds no geodesic — pick a PV/LAA label.")
+            return
+        if self.editor.snake_point_count < 2:
+            self.statusBar().showMessage(
+                "Snake: drop at least two points (press X) first.")
+            return
+        n = self.editor.commit_snake(self.tagger)
+        self.manual_widget.set_undo_enabled(self.editor.can_undo)
+        if n == 0:
+            self.statusBar().showMessage(
+                f"Snake: those triangles were already label {label}.")
+            return
+        self.statusBar().showMessage(
+            f"Snake tagged {n} triangle{'s' if n != 1 else ''} as label {label}.")
+
     def _action_edit_accept(self) -> None:
         if self.editor is None:
             return
+        if self.editor.snake_active:
+            self.manual_widget.uncheck_snake()
+            self.editor.stop_snake()
         self.editor.accept()
         self.editor.deactivate()
         # Guard the export: reduce each PV label to a single connected patch.

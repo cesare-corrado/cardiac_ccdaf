@@ -712,6 +712,41 @@ class RegionTagger:
                 out[island] = self._border_majority_label(island, out)
         return out
 
+    def geodesic_path(self, a: int, b: int) -> list[int]:
+        """Shortest vertex path ``a`` → ``b`` over the mesh 1-skeleton.
+
+        Uses the same Euclidean-weighted vertex graph the tagger built for
+        segmentation (``self._graph``), with no tag restriction — a manual
+        snake draws a line freely across the surface. Returns ``[a]`` when
+        ``a == b`` and ``[]`` when the two vertices are disconnected.
+        """
+        a = int(a)
+        b = int(b)
+        if a == b:
+            return [a]
+        dist, pred = dijkstra(
+            self._graph, indices=a, directed=False, return_predecessors=True
+        )
+        if not np.isfinite(dist[b]):
+            return []
+        path = [b]
+        v = b
+        while v != a:
+            v = int(pred[v])
+            if v < 0:
+                return []
+            path.append(v)
+        path.reverse()
+        return path
+
+    def triangles_incident_to(self, vertex_ids: Sequence[int]) -> np.ndarray:
+        """Indices of triangles with at least one vertex in ``vertex_ids``."""
+        vids = np.asarray(list(vertex_ids), dtype=np.int64)
+        if vids.size == 0:
+            return np.empty(0, dtype=np.int64)
+        mask = np.any(np.isin(self._triangles, vids), axis=1)
+        return np.where(mask)[0]
+
     def dilate_label(self, tri_label: np.ndarray, label: int) -> np.ndarray:
         """Grow ``label`` one pass into the background fringe, seam-safe.
 

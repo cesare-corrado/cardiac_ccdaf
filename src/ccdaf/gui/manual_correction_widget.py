@@ -21,6 +21,10 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
     edit_toggled       = QtCore.pyqtSignal(bool)
     fill_holes_requested = QtCore.pyqtSignal()
     smooth_requested   = QtCore.pyqtSignal(bool, bool)   # (dilate, erode)
+    snake_toggled      = QtCore.pyqtSignal(bool)
+    snake_undo_point_requested = QtCore.pyqtSignal()
+    snake_clear_requested  = QtCore.pyqtSignal()
+    snake_commit_requested = QtCore.pyqtSignal()
     accept_requested   = QtCore.pyqtSignal()
     undo_requested     = QtCore.pyqtSignal()
 
@@ -77,6 +81,42 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         layout.addLayout(smooth_row)
         self.btn_smooth.setEnabled(False)
 
+        # Snake (geodesic tag). Toggle on, press X to drop points on the
+        # surface; the open geodesic through them is drawn live. Commit tags
+        # every triangle touching that line with the label selected above.
+        # Body builds no geodesic — pick a PV/LAA label. Mutually exclusive
+        # with selection mode (both drive the surface picker).
+        self.btn_snake = QtWidgets.QPushButton("Snake tag: off")
+        self.btn_snake.setCheckable(True)
+        self.btn_snake.setToolTip(
+            "Toggle geodesic tagging. Press X to drop points on the surface; "
+            "the open geodesic between them is drawn live. Commit tags every "
+            "triangle touching that line with the selected label. Body builds "
+            "no geodesic."
+        )
+        self.btn_snake.toggled.connect(self._on_snake_toggled)
+        self.btn_snake.setEnabled(False)
+        layout.addWidget(self.btn_snake)
+
+        snake_row = QtWidgets.QHBoxLayout()
+        self.btn_snake_undo_point = QtWidgets.QPushButton("Undo last point")
+        self.btn_snake_undo_point.setToolTip(
+            "Remove the most recently dropped snake point and redraw the "
+            "geodesic through the remaining points."
+        )
+        self.btn_snake_undo_point.clicked.connect(self.snake_undo_point_requested.emit)
+        self.btn_snake_undo_point.setEnabled(False)
+        self.btn_snake_clear = QtWidgets.QPushButton("Clear snake")
+        self.btn_snake_clear.clicked.connect(self.snake_clear_requested.emit)
+        self.btn_snake_clear.setEnabled(False)
+        self.btn_snake_commit = QtWidgets.QPushButton("Commit snake")
+        self.btn_snake_commit.clicked.connect(self.snake_commit_requested.emit)
+        self.btn_snake_commit.setEnabled(False)
+        snake_row.addWidget(self.btn_snake_undo_point)
+        snake_row.addWidget(self.btn_snake_clear)
+        snake_row.addWidget(self.btn_snake_commit, 1)
+        layout.addLayout(snake_row)
+
         self.btn_accept = QtWidgets.QPushButton("Accept tagging")
         self.btn_accept.clicked.connect(self.accept_requested.emit)
         self.btn_accept.setEnabled(False)
@@ -100,6 +140,30 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_smooth.setEnabled(on)
         self.edit_toggled.emit(on)
 
+    def _on_snake_toggled(self, on: bool) -> None:
+        self.btn_snake.setText("Snake tag: on (press X)" if on else "Snake tag: off")
+        self.btn_snake_undo_point.setEnabled(on)
+        self.btn_snake_clear.setEnabled(on)
+        self.btn_snake_commit.setEnabled(on)
+        self.snake_toggled.emit(on)
+
+    def uncheck_edit_toggle(self) -> None:
+        """Programmatically leave selection mode without re-emitting the signal."""
+        self.btn_edit_toggle.blockSignals(True)
+        self.btn_edit_toggle.setChecked(False)
+        self.btn_edit_toggle.blockSignals(False)
+        self.btn_edit_toggle.setText("Activate selection mode")
+
+    def uncheck_snake(self) -> None:
+        """Programmatically leave snake mode without re-emitting the signal."""
+        self.btn_snake.blockSignals(True)
+        self.btn_snake.setChecked(False)
+        self.btn_snake.blockSignals(False)
+        self.btn_snake.setText("Snake tag: off")
+        self.btn_snake_undo_point.setEnabled(False)
+        self.btn_snake_clear.setEnabled(False)
+        self.btn_snake_commit.setEnabled(False)
+
     def current_label(self) -> int:
         return int(self.cmb_label.currentData())
 
@@ -111,7 +175,10 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_edit_toggle.setEnabled(enabled)
         self.btn_fill_holes.setEnabled(enabled)
         self.btn_smooth.setEnabled(enabled)
+        self.btn_snake.setEnabled(enabled)
         self.btn_accept.setEnabled(enabled)
+        if not enabled:
+            self.uncheck_snake()
 
     def set_undo_enabled(self, enabled: bool) -> None:
         self.btn_undo.setEnabled(enabled)
@@ -125,6 +192,8 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_edit_toggle.setEnabled(False)
         self.btn_fill_holes.setEnabled(False)
         self.btn_smooth.setEnabled(False)
+        self.uncheck_snake()
+        self.btn_snake.setEnabled(False)
         self.btn_accept.setEnabled(False)
         self.btn_undo.setEnabled(False)
 
@@ -135,6 +204,8 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_edit_toggle.blockSignals(False)
         self.btn_edit_toggle.setText("Activate selection mode")
         self.btn_edit_toggle.setEnabled(True)
+        self.uncheck_snake()
+        self.btn_snake.setEnabled(True)
         self.btn_accept.setEnabled(True)
         self.btn_fill_holes.setEnabled(False)
 
