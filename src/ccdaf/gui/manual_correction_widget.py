@@ -38,6 +38,10 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Label:"))
         self.cmb_label = QtWidgets.QComboBox()
+        self.cmb_label.setToolTip(
+            "Active label for tagging — selection mode and the snake both apply "
+            "this label to the triangles they pick."
+        )
         for lbl, name in label_entries:
             self.cmb_label.addItem(f"{lbl} — {name}", userData=int(lbl))
         self.cmb_label.currentIndexChanged.connect(
@@ -47,12 +51,20 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         layout.addLayout(row)
 
         self.btn_edit_toggle = QtWidgets.QPushButton("Activate selection mode")
+        self.btn_edit_toggle.setToolTip(
+            "Toggle triangle selection: click triangles to add them to a pending "
+            "batch, then press X to commit them to the active label."
+        )
         self.btn_edit_toggle.setCheckable(True)
         self.btn_edit_toggle.toggled.connect(self._on_edit_toggled)
         self.btn_edit_toggle.setEnabled(False)
         layout.addWidget(self.btn_edit_toggle)
 
         self.btn_fill_holes = QtWidgets.QPushButton("Fill Holes (Protect Boundaries)")
+        self.btn_fill_holes.setToolTip(
+            "Fill unassigned triangles by region growing, keeping existing "
+            "region boundaries separate so neighbouring labels do not merge."
+        )
         self.btn_fill_holes.clicked.connect(self.fill_holes_requested.emit)
         self.btn_fill_holes.setEnabled(False)
         layout.addWidget(self.btn_fill_holes)
@@ -63,8 +75,16 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         # eye. Body does nothing — it is the background, not a region.
         smooth_row = QtWidgets.QHBoxLayout()
         self.chk_dilate = QtWidgets.QCheckBox("Dilate")
+        self.chk_dilate.setToolTip(
+            "Include a dilation pass when smoothing — grows the active label "
+            "into its jagged fringe."
+        )
         self.chk_dilate.setChecked(True)
         self.chk_erode = QtWidgets.QCheckBox("Erode")
+        self.chk_erode.setToolTip(
+            "Include an erosion pass when smoothing — shaves spikes off the "
+            "active label."
+        )
         self.btn_smooth = QtWidgets.QPushButton("Smooth active label")
         self.btn_smooth.setToolTip(
             "Smooth the boundary of the label selected above, one pass per "
@@ -91,8 +111,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_snake.setToolTip(
             "Toggle geodesic tagging. Press X to drop points on the surface; "
             "the open geodesic between them is drawn live. Commit tags every "
-            "triangle touching that line with the selected label. Body builds "
-            "no geodesic."
+            "triangle touching that line with the selected label (body included)."
         )
         self.btn_snake.toggled.connect(self._on_snake_toggled)
         self.btn_snake.setEnabled(False)
@@ -107,9 +126,16 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_snake_undo_point.clicked.connect(self.snake_undo_point_requested.emit)
         self.btn_snake_undo_point.setEnabled(False)
         self.btn_snake_clear = QtWidgets.QPushButton("Clear snake")
+        self.btn_snake_clear.setToolTip(
+            "Discard the current snake's points without leaving snake mode."
+        )
         self.btn_snake_clear.clicked.connect(self.snake_clear_requested.emit)
         self.btn_snake_clear.setEnabled(False)
         self.btn_snake_commit = QtWidgets.QPushButton("Commit snake")
+        self.btn_snake_commit.setToolTip(
+            "Tag every triangle touching the current geodesic with the active "
+            "label."
+        )
         self.btn_snake_commit.clicked.connect(self.snake_commit_requested.emit)
         self.btn_snake_commit.setEnabled(False)
         snake_row.addWidget(self.btn_snake_undo_point)
@@ -118,6 +144,10 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         layout.addLayout(snake_row)
 
         self.btn_accept = QtWidgets.QPushButton("Accept tagging")
+        self.btn_accept.setToolTip(
+            "Finish manual correction: commit any pending batch and assign the "
+            "body label to all still-unassigned triangles."
+        )
         self.btn_accept.clicked.connect(self.accept_requested.emit)
         self.btn_accept.setEnabled(False)
         layout.addWidget(self.btn_accept)

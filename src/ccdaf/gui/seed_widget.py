@@ -24,16 +24,22 @@ class SeedWidget(QtWidgets.QGroupBox):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.btn_start = QtWidgets.QPushButton("Start seed selection")
+        self.btn_start.setToolTip(
+            "Begin picking the six seeds (LSPV, LIPV, RSPV, RIPV, LAA, MV) in "
+            "order by clicking on the surface."
+        )
         self.btn_start.clicked.connect(self.start_requested.emit)
         self.btn_start.setEnabled(False)
         layout.addWidget(self.btn_start)
 
         row = QtWidgets.QHBoxLayout()
         self.btn_undo = QtWidgets.QPushButton("Undo")
+        self.btn_undo.setToolTip("Remove the last placed seed so you can re-pick it.")
         self.btn_undo.clicked.connect(self.undo_requested.emit)
         self.btn_undo.setEnabled(False)
         row.addWidget(self.btn_undo)
         self.btn_reset = QtWidgets.QPushButton("Reset")
+        self.btn_reset.setToolTip("Clear all placed seeds and start the selection over.")
         self.btn_reset.clicked.connect(self.reset_requested.emit)
         self.btn_reset.setEnabled(False)
         row.addWidget(self.btn_reset)

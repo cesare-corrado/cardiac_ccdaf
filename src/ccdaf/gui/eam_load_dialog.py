@@ -125,6 +125,10 @@ class EAMLoadDialog(QtWidgets.QFileDialog):
 
         # EAM-format drop-down, appended as a new row of the dialog's grid.
         self._cmb_format = QtWidgets.QComboBox()
+        self._cmb_format.setToolTip(
+            "Electro-anatomical map format to load; filters the file list to "
+            "matching files."
+        )
         for fmt in _FORMATS:
             self._cmb_format.addItem(fmt, userData=fmt)
         self._cmb_format.currentIndexChanged.connect(self._on_format_changed)

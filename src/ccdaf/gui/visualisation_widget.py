@@ -73,6 +73,7 @@ class VisualisationWidget(QtWidgets.QGroupBox):
 
         grid.addWidget(QtWidgets.QLabel("Colour map:"), row, 0)
         self.cmb_cmap = QtWidgets.QComboBox()
+        self.cmb_cmap.setToolTip("Colour map used to render the selected field.")
         for name in CMAPS:
             self.cmb_cmap.addItem(name, name)
         self.cmb_cmap.setCurrentIndex(CMAPS.index(DEFAULT_CMAP))
@@ -89,11 +90,17 @@ class VisualisationWidget(QtWidgets.QGroupBox):
 
         grid.addWidget(QtWidgets.QLabel("Min:"), row, 0)
         self.spn_min = self._make_range_spin()
+        self.spn_min.setToolTip(
+            "Lower limit of the colour range (used when 'Auto min/max' is off)."
+        )
         grid.addWidget(self.spn_min, row, 1)
         row += 1
 
         grid.addWidget(QtWidgets.QLabel("Max:"), row, 0)
         self.spn_max = self._make_range_spin()
+        self.spn_max.setToolTip(
+            "Upper limit of the colour range (used when 'Auto min/max' is off)."
+        )
         grid.addWidget(self.spn_max, row, 1)
         row += 1
 
