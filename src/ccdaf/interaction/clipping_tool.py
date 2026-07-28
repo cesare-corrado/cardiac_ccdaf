@@ -381,6 +381,7 @@ class ClippingTool:
 
         self.plotter.enable_point_picking(
             callback=self._on_contour_pick,
+            picker="hardware",               # z-buffer pick of the VISIBLE surface
             use_picker=True,
             show_message=False,
             show_point=False,

@@ -39,10 +39,6 @@ from ccdaf.core.seed_state_machine import (
 from ccdaf.core.seed_geometry import SeedGeometryResolver, GeometryError
 
 
-# Picker tolerance as a fraction of the render window (VTK convention).
-DEFAULT_PICK_TOLERANCE: float = 0.01
-
-
 SEED_PROMPT: Dict[str, str] = {
     "LSPV": "Click INSIDE the left superior pulmonary vein (LSPV)",
     "LIPV": "Click INSIDE the left inferior pulmonary vein (LIPV)",
@@ -90,21 +86,25 @@ class SeedSelector:
     # Public API (unchanged surface)
     # ------------------------------------------------------------------
     def _enable_picking(self) -> None:
-        """(Re)install the point-picking callback on the plotter."""
+        """(Re)install the point-picking callback on the plotter.
+
+        ``picker="hardware"`` selects VTK's z-buffer picker: it returns the
+        front-most *visible* surface point under the cursor, so a pick can
+        never bleed through to an occluded back-wall vertex (the old
+        ``vtkPointPicker`` default snapped to the nearest vertex to the pick
+        *ray*, including hidden ones). ``pickable_window=False`` means the
+        callback fires only on a real surface hit — clicks on empty space are
+        dropped by PyVista before reaching :meth:`_on_pick`.
+        """
         self.plotter.enable_point_picking(
             callback=self._on_pick,
+            picker="hardware",
             use_picker=True,
             show_message=False,
             show_point=False,
             pickable_window=False,
             left_clicking=True,
         )
-        try:
-            picker = getattr(self.plotter, "picker", None)
-            if picker is not None and hasattr(picker, "SetTolerance"):
-                picker.SetTolerance(DEFAULT_PICK_TOLERANCE)
-        except Exception:
-            pass
 
     def start(self) -> None:
         """Begin seed selection from a clean slate — wipes any existing seeds."""
@@ -237,17 +237,11 @@ class SeedSelector:
         if self._state.is_complete:
             return
 
-
-        # --- Ray tracing logic to ensure we pick the visible surface ---
-        camera_pos = self.plotter.camera_position[0]
-        direction = np.array(picked_point) - np.array(camera_pos)
-        far_point = np.array(camera_pos) + direction * 1.5        
-        points, _ = self.mesh.ray_trace(camera_pos, far_point, first_point=True)
-        # Use the ray-traced point if a hit occurred; otherwise, use the raw pick
-        target_point = points if len(points) > 0 else picked_point
-
+        # ``picked_point`` is already the front-most *visible* surface hit
+        # (hardware/z-buffer picker), so no camera ray-trace correction is
+        # needed — snap it straight to the nearest mesh vertex.
         try:
-            snap = self._geom.snap(target_point) #picked_point)
+            snap = self._geom.snap(picked_point)
         except GeometryError as exc:
             self._warn(f"Pick rejected: {exc}")
             return

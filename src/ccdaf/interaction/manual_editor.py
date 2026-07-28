@@ -24,7 +24,6 @@ from __future__ import annotations
 from collections import deque
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Callable, Deque, Optional, Set
-from scipy.spatial import cKDTree
 import numpy as np
 import pyvista as pv
 
@@ -250,6 +249,7 @@ class ManualEditor:
         self.plotter.enable_trackball_style()
         self.plotter.enable_point_picking(
             callback=lambda *a, **k: None,   # X drives picks, not the click
+            picker="hardware",               # z-buffer pick of the VISIBLE surface
             use_picker=True,
             show_message=False,
             show_point=False,
@@ -351,12 +351,13 @@ class ManualEditor:
         """Drop a snake anchor at the mouse position and grow the geodesic.
 
         Returns the anchor count (>0) when one was placed, ``0`` for a no-op
-        (body active label — body builds no geodesic — or a repeat pick), or
-        ``-1`` when the pick is unreachable from the current snake.
+        (snake inactive, unsupported label, or a repeat pick), or ``-1`` when
+        the pick is unreachable from the current snake. The body label is
+        supported: a geodesic can be tagged as body too.
         """
         if not self._snake_active:
             return 0
-        if self._active_label == BODY_LABEL or self._active_label not in ALLOWED_LABELS:
+        if self._active_label not in ALLOWED_LABELS:
             return 0
         interactor = self.plotter.iren.interactor
         click_pos = interactor.GetEventPosition()
@@ -376,11 +377,11 @@ class ManualEditor:
 
         The open head → tail geodesic is already built (grown anchor by
         anchor); commit extracts the triangles with at least one vertex on it
-        and assigns the active label. Undoable. Returns the number of cells
-        changed, or ``0`` when there is nothing to do (fewer than two anchors,
-        body label, or no net change).
+        and assigns the active label (body included). Undoable. Returns the
+        number of cells changed, or ``0`` when there is nothing to do (fewer
+        than two anchors, unsupported label, or no net change).
         """
-        if self._active_label == BODY_LABEL or self._active_label not in ALLOWED_LABELS:
+        if self._active_label not in ALLOWED_LABELS:
             return 0
         if len(self._snake_path) < 2:
             return 0
@@ -457,8 +458,8 @@ class ManualEditor:
     # Picking
     # ------------------------------------------------------------------
     def _prepare_search_index(self, mesh: pv.PolyData) -> None:
+        # Triangle centroids drive the yellow highlight spheres (world units).
         self._centroids = self.mesh.cell_centers().points
-        self._search_tree = cKDTree(self._centroids)
         # Mean triangle inradius (r = area / semi-perimeter) used to size
         # the centroid spheres in world units.
         pts = np.asarray(mesh.points, dtype=float)
@@ -474,8 +475,14 @@ class ManualEditor:
 
 
     def _enable_cell_picking(self) -> None:
+        # ``picker="hardware"`` returns the front-most *visible* surface hit
+        # point (z-buffer), via the same PyVista pick path used for vertex
+        # picking. This resolves occlusion and uses the correct device-pixel
+        # coordinates — no manual ``vtkCellPicker.Pick(GetEventPosition())``,
+        # which was prone to a DPI/scale offset (picking a nearby wrong cell).
         self.plotter.enable_point_picking(
             callback=self._on_cell_picked,
+            picker="hardware",
             use_picker=True,
             show_message=False,
             show_point=False,
@@ -486,32 +493,12 @@ class ManualEditor:
     def _on_cell_picked(self, picked, *args, **kwargs) -> None:
         if self._state is not EditState.SELECTING or picked is None:
             return
-        cell_id = None
-        # Primary path: re-pick at the current screen position using vtkCellPicker.
-        # This avoids any dependency on PyVista's internal picker object and the
-        # GetPicker/SetPicker API that is not reliably exposed by PyVista's wrapper.
-        try:
-            import vtk
-            event_pos = self.plotter.iren.GetEventPosition()
-            cell_picker = vtk.vtkCellPicker()
-            cell_picker.SetTolerance(0.001)
-            cell_picker.Pick(event_pos[0], event_pos[1], 0, self.plotter.renderer)
-            cid = cell_picker.GetCellId()
-            if cid >= 0:
-                cell_id = int(cid)
-        except Exception:
-            pass
-        # Fallback: ray-trace from camera through the picked world coord.
-        if cell_id is None:
-            camera_pos = self.plotter.camera_position[0]
-            direction = np.array(picked) - np.array(camera_pos)
-            far_point = np.array(camera_pos) + direction * 1.5
-            _, ind = self.mesh.ray_trace(camera_pos, far_point, first_point=True)
-            if len(ind) > 0:
-                cell_id = int(ind[0])
-            else:
-                _, cell_id = self._search_tree.query(picked)
-                cell_id = int(cell_id)
+        # ``picked`` is the visible surface hit — a point on a triangle's face,
+        # not a vertex. Map it straight to the one containing triangle with a
+        # cell locator (real triangle geometry, so no vertex-sharing ambiguity).
+        cell_id = int(self.mesh.find_closest_cell(np.asarray(picked, dtype=float)))
+        if cell_id < 0:
+            return
         self._pending.add(cell_id)
         self._refresh_highlight()
 

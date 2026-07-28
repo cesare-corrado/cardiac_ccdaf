@@ -515,9 +515,6 @@ class CCDAF(QtWidgets.QMainWindow):
                     self.statusBar().showMessage(
                         "Snake: that point isn't reachable from the current "
                         "line — pick closer.")
-                elif self.manual_widget.current_label() == BODY_LABEL:
-                    self.statusBar().showMessage(
-                        "Snake: body builds no geodesic — pick a PV/LAA label.")
                 return
             self.editor.commit_pending()
 
@@ -1581,12 +1578,8 @@ class CCDAF(QtWidgets.QMainWindow):
                 self.manual_widget.uncheck_edit_toggle()
                 self.editor.deactivate()
             self.editor.start_snake(self.tagger)
-            if self.manual_widget.current_label() == BODY_LABEL:
-                self.statusBar().showMessage(
-                    "Snake: choose a PV/LAA label — body builds no geodesic.")
-            else:
-                self.statusBar().showMessage(
-                    "Snake: press X to drop geodesic points, then Commit snake.")
+            self.statusBar().showMessage(
+                "Snake: press X to drop geodesic points, then Commit snake.")
         else:
             self.editor.stop_snake()
             self.plotter.render()
@@ -1613,10 +1606,6 @@ class CCDAF(QtWidgets.QMainWindow):
         if self.editor is None or self.tagger is None:
             return
         label = self.manual_widget.current_label()
-        if label == BODY_LABEL:
-            self.statusBar().showMessage(
-                "Snake: body builds no geodesic — pick a PV/LAA label.")
-            return
         if self.editor.snake_point_count < 2:
             self.statusBar().showMessage(
                 "Snake: drop at least two points (press X) first.")
