@@ -536,6 +536,10 @@ class CCDAF(QtWidgets.QMainWindow):
         if self.btn_update3d_overlay is not None:
             self._destroy_update3d_overlay()
         btn = QtWidgets.QPushButton("Update 3D", parent=self.plotter.interactor)
+        btn.setToolTip(
+            "Rebuild the 3D surface from the current segmentation and the "
+            "image-smoothing parameters."
+        )
         btn.setStyleSheet(
             "QPushButton {"
             " background-color: rgba(40, 40, 40, 200);"
@@ -2207,6 +2211,9 @@ class CCDAF(QtWidgets.QMainWindow):
         spins = []
         for axis in ("x", "y", "z"):
             sp = QtWidgets.QDoubleSpinBox()
+            sp.setToolTip(
+                f"Voxel spacing along {axis} (smaller = finer and slower)."
+            )
             sp.setRange(0.01, 100.0)
             sp.setDecimals(3)
             sp.setSingleStep(0.1)
@@ -2214,6 +2221,9 @@ class CCDAF(QtWidgets.QMainWindow):
             form.addRow(f"Spacing {axis}:", sp)
             spins.append(sp)
         chk_flip = QtWidgets.QCheckBox("Flip X/Y (MIRTK orientation)")
+        chk_flip.setToolTip(
+            "Swap the X and Y axes to match MIRTK's voxel-orientation convention."
+        )
         form.addRow(chk_flip)
         bb = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
@@ -2231,6 +2241,9 @@ class CCDAF(QtWidgets.QMainWindow):
         dlg.setWindowTitle("Export options")
         form = QtWidgets.QFormLayout(dlg)
         chk_flip = QtWidgets.QCheckBox("Flip X/Y (MIRTK orientation)")
+        chk_flip.setToolTip(
+            "Swap the X and Y axes to match MIRTK's voxel-orientation convention."
+        )
         form.addRow(chk_flip)
         form.addRow(QtWidgets.QLabel(
             "<i>Smoothing iterations and relaxation factor"

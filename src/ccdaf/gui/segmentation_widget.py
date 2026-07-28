@@ -45,12 +45,28 @@ class SegmentationWidget(QtWidgets.QGroupBox):
         layout.addWidget(QtWidgets.QLabel("<b>Morphology</b>"))
         row = QtWidgets.QHBoxLayout()
         self.btn_dilate = QtWidgets.QPushButton("Binary Dilate")
+        self.btn_dilate.setToolTip(
+            "Binary dilation of the segmentation with the kernel radius below — "
+            "grows labelled regions."
+        )
         self.btn_erode = QtWidgets.QPushButton("Binary Erode")
+        self.btn_erode.setToolTip(
+            "Binary erosion of the segmentation with the kernel radius below — "
+            "shrinks labelled regions."
+        )
         self.btn_dilate.clicked.connect(lambda: self.morphology_requested.emit("dilate"))
         self.btn_erode.clicked.connect(lambda: self.morphology_requested.emit("erode"))
 
         self.btn_moprh_opening = QtWidgets.QPushButton("Morph. opening")
+        self.btn_moprh_opening.setToolTip(
+            "Erosion followed by dilation — removes small specks without "
+            "shrinking large regions."
+        )
         self.btn_moprh_closing = QtWidgets.QPushButton("Morph. closing")
+        self.btn_moprh_closing.setToolTip(
+            "Dilation followed by erosion — fills small holes without growing "
+            "large regions."
+        )
         self.btn_moprh_opening.clicked.connect(lambda: self.morphology_requested.emit("morph_open"  ))
         self.btn_moprh_closing.clicked.connect(lambda: self.morphology_requested.emit("morph_close"))
 
@@ -83,6 +99,7 @@ class SegmentationWidget(QtWidgets.QGroupBox):
         # --- Cleanup ---------------------------------------------------
         layout.addWidget(QtWidgets.QLabel("<b>Cleanup</b>"))
         self.btn_fill = QtWidgets.QPushButton("Fill Holes")
+        self.btn_fill.setToolTip("Fill fully-enclosed holes in the segmentation.")
         self.btn_fill.clicked.connect(self.fill_holes_requested.emit)
         layout.addWidget(self.btn_fill)
 
@@ -111,8 +128,11 @@ class SegmentationWidget(QtWidgets.QGroupBox):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Brush:"))
         self.rb_sphere = QtWidgets.QRadioButton("Sphere")
+        self.rb_sphere.setToolTip("Use a spherical paint brush.")
         self.rb_square = QtWidgets.QRadioButton("Square")
+        self.rb_square.setToolTip("Use a square (cube) paint brush.")
         self.rb_cyl = QtWidgets.QRadioButton("Cylinder")
+        self.rb_cyl.setToolTip("Use a cylindrical paint brush.")
         self.rb_sphere.setChecked(True)
         self._brush_group = QtWidgets.QButtonGroup(self)
         for rb in (self.rb_sphere, self.rb_square, self.rb_cyl):
@@ -124,6 +144,7 @@ class SegmentationWidget(QtWidgets.QGroupBox):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Brush radius:"))
         self.spn_radius = QtWidgets.QSpinBox()
+        self.spn_radius.setToolTip("Paint brush radius, in voxels.")
         self.spn_radius.setRange(1, 50)
         self.spn_radius.setValue(3)
         self.spn_radius.valueChanged.connect(self._emit_brush)
@@ -132,7 +153,11 @@ class SegmentationWidget(QtWidgets.QGroupBox):
 
         row = QtWidgets.QHBoxLayout()
         self.rb_2d = QtWidgets.QRadioButton("2D (current plane)")
+        self.rb_2d.setToolTip("Paint only within the current slice plane.")
         self.rb_3d = QtWidgets.QRadioButton("3D (extended)")
+        self.rb_3d.setToolTip(
+            "Paint through several slices at once (see '3D depth')."
+        )
         self.rb_2d.setChecked(True)
         self._depth_group = QtWidgets.QButtonGroup(self)
         for rb in (self.rb_2d, self.rb_3d):
@@ -144,6 +169,9 @@ class SegmentationWidget(QtWidgets.QGroupBox):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("3D depth:"))
         self.spn_depth = QtWidgets.QSpinBox()
+        self.spn_depth.setToolTip(
+            "How many voxels deep the 3D brush reaches (used in 3D mode)."
+        )
         self.spn_depth.setRange(1, 200)
         self.spn_depth.setValue(3)
         self.spn_depth.valueChanged.connect(self._emit_brush)
@@ -151,6 +179,10 @@ class SegmentationWidget(QtWidgets.QGroupBox):
         layout.addLayout(row)
 
         self.btn_paint = QtWidgets.QPushButton("Activate paint mode")
+        self.btn_paint.setToolTip(
+            "Toggle voxel painting: drag on a slice to change 'Actual label' "
+            "voxels to 'New label' using the brush above."
+        )
         self.btn_paint.setCheckable(True)
         self.btn_paint.toggled.connect(self._on_paint_toggled)
         layout.addWidget(self.btn_paint)
@@ -174,11 +206,19 @@ class SegmentationWidget(QtWidgets.QGroupBox):
         layout.addWidget(self.btn_plane)
 
         self.btn_plane_apply = QtWidgets.QPushButton("Apply plane relabel")
+        self.btn_plane_apply.setToolTip(
+            "Apply the plane relabel: change 'Actual label' to 'New label' on "
+            "the side the plane normal points to."
+        )
         self.btn_plane_apply.setEnabled(False)
         self.btn_plane_apply.clicked.connect(self.plane_relabel_apply.emit)
         layout.addWidget(self.btn_plane_apply)
 
         self.btn_undo = QtWidgets.QPushButton("Undo")
+        self.btn_undo.setToolTip(
+            "Undo the last segmentation edit (morphology, paint, convert, or "
+            "plane relabel)."
+        )
         self.btn_undo.setEnabled(False)
         self.btn_undo.clicked.connect(self.undo_requested.emit)
         layout.addWidget(self.btn_undo)

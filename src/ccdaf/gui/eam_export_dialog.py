@@ -38,8 +38,10 @@ class EAMExportDialog(QtWidgets.QDialog):
 
         grid.addWidget(QtWidgets.QLabel("directory"), 0, 0)
         self.txt_dir = QtWidgets.QLineEdit(start_dir)
+        self.txt_dir.setToolTip("Destination directory for the exported files.")
         grid.addWidget(self.txt_dir, 0, 1)
         btn_browse = QtWidgets.QPushButton("Browse…")
+        btn_browse.setToolTip("Choose the destination directory.")
         btn_browse.clicked.connect(self._browse)
         grid.addWidget(btn_browse, 0, 2)
 
