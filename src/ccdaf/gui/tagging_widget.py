@@ -60,6 +60,10 @@ class TaggingWidget(QtWidgets.QGroupBox):
         layout.addWidget(self.chk_disable_tag)
 
         self.btn_tag = QtWidgets.QPushButton("Run automatic tagging")
+        self.btn_tag.setToolTip(
+            "Automatically tag the PV/LAA regions from the current seeds and "
+            "the radius factors above."
+        )
         self.btn_tag.clicked.connect(self.tagging_requested.emit)
         self.btn_tag.setEnabled(False)
         layout.addWidget(self.btn_tag)

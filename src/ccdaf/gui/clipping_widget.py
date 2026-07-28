@@ -46,12 +46,20 @@ class ClippingWidget(QtWidgets.QGroupBox):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("PV:"))
         self.cmb_pv = QtWidgets.QComboBox()
+        self.cmb_pv.setToolTip(
+            "Which pulmonary vein the contour runs on — the snake is confined "
+            "to this tagged region."
+        )
         for name in pv_names:
             self.cmb_pv.addItem(name, userData=name)
         row.addWidget(self.cmb_pv, 1)
         layout.addLayout(row)
 
         self.btn_pv_start = QtWidgets.QPushButton("Start PV contour")
+        self.btn_pv_start.setToolTip(
+            "Begin a PV clip on the selected vein: press X to drop points; a "
+            "geodesic contour follows on that tag."
+        )
         self.btn_pv_start.clicked.connect(
             lambda: self.pv_start_requested.emit(str(self.cmb_pv.currentData()))
         )
@@ -68,27 +76,45 @@ class ClippingWidget(QtWidgets.QGroupBox):
         layout.addWidget(self.btn_pv_undo_point)
 
         self.btn_pv_finish = QtWidgets.QPushButton("Close & Clip PV")
+        self.btn_pv_finish.setToolTip(
+            "Close the PV contour into a loop and clip off the vein cuff inside it."
+        )
         self.btn_pv_finish.clicked.connect(self.pv_finish_requested.emit)
         self.btn_pv_finish.setEnabled(False)
         layout.addWidget(self.btn_pv_finish)
 
         row = QtWidgets.QHBoxLayout()
         self.btn_mv_sphere = QtWidgets.QPushButton("Mitral: sphere")
+        self.btn_mv_sphere.setToolTip(
+            "Show an adjustable sphere at the mitral valve; Apply clip removes "
+            "the surface inside it."
+        )
         self.btn_mv_sphere.clicked.connect(self.mv_sphere_requested.emit)
         self.btn_mv_sphere.setEnabled(False)
         row.addWidget(self.btn_mv_sphere)
         self.btn_mv_plane = QtWidgets.QPushButton("Mitral: plane")
+        self.btn_mv_plane.setToolTip(
+            "Show an adjustable cutting plane at the mitral valve; Apply clip "
+            "removes the surface on one side."
+        )
         self.btn_mv_plane.clicked.connect(self.mv_plane_requested.emit)
         self.btn_mv_plane.setEnabled(False)
         row.addWidget(self.btn_mv_plane)
         layout.addLayout(row)
 
         self.btn_apply = QtWidgets.QPushButton("Apply clip")
+        self.btn_apply.setToolTip(
+            "Apply the pending mitral clip (sphere or plane) to the mesh."
+        )
         self.btn_apply.clicked.connect(self.clip_apply_requested.emit)
         self.btn_apply.setEnabled(False)
         layout.addWidget(self.btn_apply)
 
         self.btn_revert = QtWidgets.QPushButton("Reject / revert clip")
+        self.btn_revert.setToolTip(
+            "Discard the pending clip, or undo the last applied clip, restoring "
+            "the previous mesh."
+        )
         self.btn_revert.clicked.connect(self.clip_revert_requested.emit)
         self.btn_revert.setEnabled(False)
         layout.addWidget(self.btn_revert)
