@@ -351,12 +351,13 @@ class ManualEditor:
         """Drop a snake anchor at the mouse position and grow the geodesic.
 
         Returns the anchor count (>0) when one was placed, ``0`` for a no-op
-        (body active label — body builds no geodesic — or a repeat pick), or
-        ``-1`` when the pick is unreachable from the current snake.
+        (snake inactive, unsupported label, or a repeat pick), or ``-1`` when
+        the pick is unreachable from the current snake. The body label is
+        supported: a geodesic can be tagged as body too.
         """
         if not self._snake_active:
             return 0
-        if self._active_label == BODY_LABEL or self._active_label not in ALLOWED_LABELS:
+        if self._active_label not in ALLOWED_LABELS:
             return 0
         interactor = self.plotter.iren.interactor
         click_pos = interactor.GetEventPosition()
@@ -376,11 +377,11 @@ class ManualEditor:
 
         The open head → tail geodesic is already built (grown anchor by
         anchor); commit extracts the triangles with at least one vertex on it
-        and assigns the active label. Undoable. Returns the number of cells
-        changed, or ``0`` when there is nothing to do (fewer than two anchors,
-        body label, or no net change).
+        and assigns the active label (body included). Undoable. Returns the
+        number of cells changed, or ``0`` when there is nothing to do (fewer
+        than two anchors, unsupported label, or no net change).
         """
-        if self._active_label == BODY_LABEL or self._active_label not in ALLOWED_LABELS:
+        if self._active_label not in ALLOWED_LABELS:
             return 0
         if len(self._snake_path) < 2:
             return 0

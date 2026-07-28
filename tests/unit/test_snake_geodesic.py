@@ -13,8 +13,9 @@ Geometry lives on ``RegionTagger`` (reusing the segmentation vertex graph):
 The path is grown *bidirectionally* on ``ManualEditor`` (``_snake_extend``):
 each new anchor extends whichever endpoint — head or tail — reaches it by the
 shorter geodesic, exactly like the PV clip snake. The undoable apply lives on
-``ManualEditor.commit_snake``: it tags the incident triangles and is a no-op
-for body / fewer than two anchors.
+``ManualEditor.commit_snake``: it tags the incident triangles (any active
+label, body included) and is a no-op for fewer than two anchors or no net
+change.
 
 Uses synthetic meshes (no real EAM data required).
 """
@@ -184,19 +185,33 @@ def test_commit_snake_tags_incident_triangles_and_is_undoable():
     assert np.all(np.asarray(mesh.cell_data["elemTag"]) == BODY_LABEL)
 
 
-def test_commit_snake_body_and_too_few_points_are_noops():
-    mesh, tagger = _sphere_tagger()
-    mesh.cell_data["elemTag"] = np.full(mesh.n_cells, BODY_LABEL, dtype=np.int32)
-    editor = ManualEditor(mesh, plotter=None)
+def test_commit_snake_body_label_tags_incident_triangles():
+    """Body is a supported snake label: a geodesic can be tagged as body.
 
-    # body active label: builds no geodesic
+    Start from a non-body surface so tagging to body is a real change.
+    """
+    mesh, tagger = _sphere_tagger()
+    mesh.cell_data["elemTag"] = np.full(mesh.n_cells, 11, dtype=np.int32)
+    editor = ManualEditor(mesh, plotter=None)
     editor.set_active_label(BODY_LABEL)
     editor._snake_extend(tagger, 0)
-    editor._snake_extend(tagger, 50)
-    assert editor.commit_snake(tagger) == 0
-    assert not editor.can_undo
+    editor._snake_extend(tagger, mesh.n_points - 1)
 
-    # fewer than two anchors
+    expected = tagger.triangles_incident_to(editor._snake_path)
+
+    n = editor.commit_snake(tagger)
+    assert n == expected.size and n > 0
+    tags = np.asarray(mesh.cell_data["elemTag"])
+    assert np.all(tags[expected] == BODY_LABEL)
+    assert editor.can_undo
+
+    editor.undo()
+    assert np.all(np.asarray(mesh.cell_data["elemTag"]) == 11)
+
+
+def test_commit_snake_too_few_points_is_noop():
+    mesh, tagger = _sphere_tagger()
+    mesh.cell_data["elemTag"] = np.full(mesh.n_cells, BODY_LABEL, dtype=np.int32)
     editor = ManualEditor(mesh, plotter=None)
     editor.set_active_label(11)
     editor._snake_extend(tagger, 0)
