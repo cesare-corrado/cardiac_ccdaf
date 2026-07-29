@@ -38,3 +38,6 @@ examples/
 # Lint / test caches
 .ruff_cache/
 .pytest_cache/
+
+# MkDocs build output
+site/
