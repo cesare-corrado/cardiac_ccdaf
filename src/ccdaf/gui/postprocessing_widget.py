@@ -4,7 +4,9 @@ PostprocessingWidget
 
 Side-panel widget exposing ``mesh_postprocessor.apply`` to the user:
 
-* three checkboxes (decimate, refine, clean) with per-step parameters
+* three checkboxes (decimate, refine, clean) with per-step parameters,
+  the refine step offering an ``adaptive`` (split only) and a ``resample``
+  (split and collapse) mode
 * an "Apply" button that runs the selected steps in the fixed order
   ``decimate -> refine -> clean`` and swaps the working mesh in-place.
 
@@ -23,6 +25,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from ccdaf.core.mesh_postprocessor import (
     PostprocessOptions, apply as postprocess_apply,
+    REFINE_ADAPTIVE, REFINE_RESAMPLE,
     SMOOTH_TAUBIN, SMOOTH_LAPLACIAN,
 )
 
@@ -93,60 +96,85 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         self.chk_refine = QtWidgets.QCheckBox("Refine")
         self.chk_refine.setToolTip(
             "Adaptively subdivide triangles whose longest edge exceeds "
-            "the target edge length."
+            "the target edge length (adaptive), or resample the whole "
+            "surface into an edge-length band (resample)."
         )
         v.addWidget(self.chk_refine)
-        row = QtWidgets.QHBoxLayout()
-        lbl_edge = QtWidgets.QLabel("edge len")
-        lbl_edge.setToolTip(
-            "Target maximum edge length. Any triangle with a longer edge "
-            "is split. 0 = use the current median edge length of the mesh."
+
+        mode_tip = (
+            "adaptive: split only. Triangles with an edge longer than "
+            "'edge len' are subdivided; no vertex moves and none is "
+            "removed, so the point count can only grow.\n"
+            "resample: split and collapse. The mesh is resampled into an "
+            "edge-length band derived from 'edge len', so over-fine "
+            "regions are coarsened too and vertices move. Label seams and "
+            "open boundaries are preserved."
         )
-        row.addWidget(lbl_edge)
+        edge_tip = (
+            "adaptive: maximum edge length — any triangle with a longer "
+            "edge is split.\n"
+            "resample: target mean edge length — the band is derived from "
+            "it, so the resampled mesh ends up around this length rather "
+            "than below it.\n"
+            "0 = use the current median edge length of the mesh."
+        )
+        grid = QtWidgets.QGridLayout()
+        lbl_mode = QtWidgets.QLabel("mode")
+        lbl_mode.setToolTip(mode_tip)
+        lbl_edge = QtWidgets.QLabel("edge len")
+        lbl_edge.setToolTip(edge_tip)
+        grid.addWidget(lbl_mode, 0, 0)
+        grid.addWidget(lbl_edge, 0, 1)
+
+        self.cmb_refine_mode = QtWidgets.QComboBox()
+        self.cmb_refine_mode.addItem("resample", REFINE_RESAMPLE)
+        self.cmb_refine_mode.addItem("adaptive", REFINE_ADAPTIVE)
+        self.cmb_refine_mode.setToolTip(mode_tip)
+        grid.addWidget(self.cmb_refine_mode, 1, 0)
+
         self.spn_edge = QtWidgets.QDoubleSpinBox()
         self.spn_edge.setDecimals(4)
         self.spn_edge.setRange(0.0, 1.0e6)
-        self.spn_edge.setValue(0.4)
+        self.spn_edge.setValue(0.3)
         self.spn_edge.setSingleStep(0.1)
-        self.spn_edge.setToolTip(
-            "Target maximum edge length. Any triangle with a longer edge "
-            "is split. 0 = use the current median edge length of the mesh."
-        )
-        row.addWidget(self.spn_edge, 1)
-        v.addLayout(row)
+        self.spn_edge.setToolTip(edge_tip)
+        grid.addWidget(self.spn_edge, 1, 1)
+        v.addLayout(grid)
 
         # -- clean ----------------------------------------------------
         self.chk_clean = QtWidgets.QCheckBox("Clean")
         self.chk_clean.setToolTip(
             "Merge duplicate points, drop non-connected points, remove "
             "non-manifold and degenerate cells, orient normals, and "
-            "smooth low-quality triangles while preserving listed labels."
+            "repair low-quality triangles while preserving listed labels."
         )
         v.addWidget(self.chk_clean)
         
         grid = QtWidgets.QGridLayout()
         lbl_quality = QtWidgets.QLabel("quality threshold")
         lbl_quality.setToolTip(
-            "Triangles with radius-ratio quality below this value are "
-            "smoothed. 1.0 = equilateral, 0.0 = disables smoothing."
+            "Triangles whose shape quality is below this value are "
+            "repaired by moving their vertices along the surface. "
+            "1.0 = equilateral, 0.0 = disables the repair."
         )
         grid.addWidget(lbl_quality, 0, 0)
         
         self.spn_quality = QtWidgets.QDoubleSpinBox()
         self.spn_quality.setRange(0.0, 1.0)
         self.spn_quality.setSingleStep(0.05)
-        self.spn_quality.setValue(0.2)
+        self.spn_quality.setValue(0.8)
         self.spn_quality.setToolTip(
-            "Triangles with radius-ratio quality below this value are "
-            "smoothed. 1.0 = equilateral, 0.0 = disables smoothing."
+            "Triangles whose shape quality is below this value are "
+            "repaired by moving their vertices along the surface. "
+            "1.0 = equilateral, 0.0 = disables the repair."
         )
         grid.addWidget(self.spn_quality, 1, 0)
         
         lbl_smooth = QtWidgets.QLabel("smooth iters")
         lbl_smooth.setToolTip(
-            "Maximum Laplacian-smoothing sweeps over bad-triangle "
-            "vertices. Loop exits early when no triangle is below the "
-            "quality threshold."
+            "Maximum quality-repair iterations. The loop stops early "
+            "once no triangle is below the threshold or a step stops "
+            "helping, and returns the best result it saw."
         )
         grid.addWidget(lbl_smooth, 0, 1)
 
@@ -154,16 +182,16 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         self.spn_smooth.setRange(0, 1000)
         self.spn_smooth.setValue(20)
         self.spn_smooth.setToolTip(
-            "Maximum Laplacian-smoothing sweeps over bad-triangle "
-            "vertices. Loop exits early when no triangle is below the "
-            "quality threshold."
+            "Maximum quality-repair iterations. The loop stops early "
+            "once no triangle is below the threshold or a step stops "
+            "helping, and returns the best result it saw."
         )
         grid.addWidget(self.spn_smooth, 1, 1)
 
         lbl_realx = QtWidgets.QLabel("Relaxation factor")
         lbl_realx.setToolTip(
-            "Relaxation factor to move points "
-            "fraction of the distance from the mean point."
+            "Repair step size, as a fraction of the local edge "
+            "length. Larger converges faster but overshoots more."
         )
         grid.addWidget(lbl_realx, 0, 2)
 
@@ -171,10 +199,10 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         self.spn_smooth_relax.setRange(0.0, 1.0)
         self.spn_smooth_relax.setSingleStep(0.05)
         self.spn_smooth_relax.setDecimals(3)
-        self.spn_smooth_relax.setValue(0.1)
+        self.spn_smooth_relax.setValue(0.05)
         self.spn_smooth_relax.setToolTip(
-            "Relaxation factor to move points "
-            "fraction of the distance from the mean point."
+            "Repair step size, as a fraction of the local edge "
+            "length. Larger converges faster but overshoots more."
         )
         grid.addWidget(self.spn_smooth_relax, 1, 2)
 
@@ -362,6 +390,7 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
             decimate_target_points=int(self.spn_target.value()),
             decimate_iters=int(self.spn_iters.value()),
             max_hole_size=float(self.spn_hole.value()),
+            refine_mode=self.cmb_refine_mode.currentData(),
             refine_edge_len=float(self.spn_edge.value()),
             clean_quality_threshold=float(self.spn_quality.value()),
             clean_smooth_iterations=int(self.spn_smooth.value()),
@@ -374,6 +403,9 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
         def _decimate_progress(i: int, n: int) -> None:
+            # Reset the label: a previous run may have left it on a later
+            # stage's text.
+            self.progress.setFormat("annealing %v / %m")
             if not self.progress.isVisible():
                 self.progress.setRange(0, max(n, 1))
                 self.progress.setVisible(True)
@@ -382,6 +414,20 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
             if self.progress.maximum() != n:
                 self.progress.setRange(0, max(n, 1))
             self.progress.setValue(i)
+            QtWidgets.QApplication.processEvents()
+
+        def _stage_progress(stage: str, i: int, n: int) -> None:
+            """Progress for the steps that take minutes on a dense mesh
+            (resampling passes, quality-repair iterations). Both stop early,
+            so the bar can jump straight to full — that is the loop
+            converging, not a glitch."""
+            self.progress.setFormat(f"{stage} %v / %m")
+            if not self.progress.isVisible():
+                self.progress.setVisible(True)
+            if self.progress.maximum() != n:
+                self.progress.setRange(0, max(n, 1))
+            self.progress.setValue(i)
+            self._status(f"Mesh post-processing: {stage} {i}/{n}…")
             QtWidgets.QApplication.processEvents()
 
         # How far smoothing actually moved the wall. Reported because the
@@ -404,6 +450,7 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
             new_mesh = postprocess_apply(
                 mesh, opts, on_decimate_progress=_decimate_progress,
                 on_surface_moved=_surface_moved,
+                on_progress=_stage_progress,
             )
         except Exception as exc:
             self.progress.setVisible(False)
