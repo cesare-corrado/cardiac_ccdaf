@@ -65,6 +65,8 @@ from ccdaf.core.region_tagger import RegionTagger, LABELS
 from ccdaf.interaction.manual_editor import ManualEditor, ALLOWED_LABELS, EditState
 from ccdaf.interaction.clipping_tool import ClippingTool, ClipMode
 from ccdaf.gui.postprocessing_widget import PostprocessingWidget
+from ccdaf.gui import help_dialogs
+from ccdaf import __version__
 from ccdaf.gui.segmentation_widget import SegmentationWidget
 from ccdaf.gui.mesh_info_widget import MeshInfoWidget
 from ccdaf.gui.seed_widget import SeedWidget
@@ -315,6 +317,40 @@ class CCDAF(QtWidgets.QMainWindow):
 
         # Visualise menu — toggles the left-panel sections.
         self.visualise_menu = menubar.addMenu("&Visualise")
+
+        # --- Help menu -------------------------------------------------
+        help_menu = menubar.addMenu("&Help")
+
+        self.act_help_getting_started = QtWidgets.QAction("&Getting started…", self)
+        self.act_help_getting_started.setStatusTip(
+            "A quick walkthrough of the CCDAF workflow.")
+        self.act_help_getting_started.triggered.connect(
+            self._action_help_getting_started)
+        help_menu.addAction(self.act_help_getting_started)
+
+        self.act_help_shortcuts = QtWidgets.QAction("&Keyboard && mouse…", self)
+        self.act_help_shortcuts.setStatusTip("Keyboard and mouse shortcuts.")
+        self.act_help_shortcuts.triggered.connect(self._action_help_shortcuts)
+        help_menu.addAction(self.act_help_shortcuts)
+
+        help_menu.addSeparator()
+        self.act_help_docs = QtWidgets.QAction("&Documentation…", self)
+        self.act_help_docs.setStatusTip(
+            "Open the full documentation in your browser (local build if present).")
+        self.act_help_docs.triggered.connect(self._action_help_docs)
+        help_menu.addAction(self.act_help_docs)
+
+        self.act_help_issue = QtWidgets.QAction("&Report an issue…", self)
+        self.act_help_issue.setStatusTip("Open the issue tracker in your browser.")
+        self.act_help_issue.triggered.connect(
+            lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl(help_dialogs.ISSUES_URL)))
+        help_menu.addAction(self.act_help_issue)
+
+        help_menu.addSeparator()
+        self.act_about = QtWidgets.QAction("&About CCDAF…", self)
+        self.act_about.setStatusTip("Version and licence information.")
+        self.act_about.triggered.connect(self._action_about)
+        help_menu.addAction(self.act_about)
 
         root = QtWidgets.QHBoxLayout(central)
         root.setContentsMargins(4, 4, 4, 4)
@@ -3144,6 +3180,27 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.render()
         self.statusBar().showMessage("3D rendering updated from segmentation.")
 
+    # ------------------------------------------------------------------
+    # Help menu
+    # ------------------------------------------------------------------
+    def _action_help_getting_started(self) -> None:
+        help_dialogs.HelpDialog(
+            "Getting started", help_dialogs.GETTING_STARTED_HTML, self).exec_()
+
+    def _action_help_shortcuts(self) -> None:
+        help_dialogs.HelpDialog(
+            "Keyboard & mouse", help_dialogs.SHORTCUTS_HTML, self).exec_()
+
+    def _action_help_docs(self) -> None:
+        """Open the docs: a local ``mkdocs build`` if present (offline), else
+        the online repository."""
+        index = help_dialogs.local_docs_index()
+        url = (QtCore.QUrl.fromLocalFile(index) if index
+               else QtCore.QUrl(help_dialogs.DOCS_URL))
+        QtGui.QDesktopServices.openUrl(url)
+
+    def _action_about(self) -> None:
+        help_dialogs.AboutDialog(__version__, self).exec_()
 
 
 # ---------------------------------------------------------------------------
