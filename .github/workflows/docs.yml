@@ -1,14 +1,22 @@
 name: Docs
 
-# Build the MkDocs site and publish it to GitHub Pages on every push to main.
+# Build the MkDocs site on pushes and PRs (a docs "lint gate" that catches
+# broken links via --strict), but PUBLISH to GitHub Pages only from main.
 #
 # The API reference is generated from docstrings by mkdocstrings via *static*
 # analysis (griffe reads src/ directly), so the heavy runtime stack
-# (VTK / Qt / SimpleITK) is NOT installed here — only the docs tooling, which
+# (VTK / Qt / SimpleITK) is not installed here — only the docs tooling, which
 # mirrors the [docs] extra in pyproject.toml. That keeps the build to seconds.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'src/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main, develop]
     paths:
       - 'docs/**'
       - 'mkdocs.yml'
@@ -29,7 +37,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build site
+    name: Build & validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,14 +50,21 @@ jobs:
           pip install "mkdocs-material>=9.5" "mkdocstrings[python]>=0.25"
       - name: Build (strict)
         run: mkdocs build --strict
+      # Package for Pages only when this run will actually deploy (from main,
+      # not a pull request). Other runs stop at the strict build above.
       - uses: actions/configure-pages@v5
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
       - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         with:
           path: site
 
   deploy:
     name: Deploy to Pages
     needs: build
+    # Only main publishes to the live site — a dispatch from develop builds but
+    # does not deploy, and pull requests never deploy.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
