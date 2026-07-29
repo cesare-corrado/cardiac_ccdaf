@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="CCDAF logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2733"/>
+      <stop offset="1" stop-color="#0f171f"/>
+    </linearGradient>
+    <linearGradient id="wall" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e94b5a"/>
+      <stop offset="1" stop-color="#b3202f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded badge -->
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bg)"/>
+
+  <!-- stylised left-atrial body as a low-poly shell -->
+  <g transform="translate(256 268)">
+    <path d="M -96 -36 C -120 40 -60 120 0 132 C 60 120 120 40 96 -36
+             C 78 -92 20 -104 0 -66 C -20 -104 -78 -92 -96 -36 Z"
+          fill="url(#wall)" opacity="0.96"/>
+    <!-- mesh triangulation hint -->
+    <g fill="none" stroke="#0f171f" stroke-width="3" opacity="0.55" stroke-linejoin="round">
+      <path d="M -96 -36 L 0 -66 L 0 132 Z"/>
+      <path d="M 96 -36 L 0 -66 L 0 132 Z"/>
+      <path d="M -96 -36 L -60 60 L 0 132"/>
+      <path d="M 96 -36 L 60 60 L 0 132"/>
+      <path d="M 0 -66 L -60 60 M 0 -66 L 60 60"/>
+    </g>
+  </g>
+
+  <!-- the four PV seeds + LAA, in the app's Set1 palette -->
+  <g stroke="#0f171f" stroke-width="4">
+    <circle cx="150" cy="196" r="20" fill="#e41a1c"/> <!-- LSPV -->
+    <circle cx="150" cy="300" r="20" fill="#377eb8"/> <!-- LIPV -->
+    <circle cx="362" cy="196" r="20" fill="#4daf4a"/> <!-- RSPV -->
+    <circle cx="362" cy="300" r="20" fill="#984ea3"/> <!-- RIPV -->
+    <circle cx="256" cy="150" r="20" fill="#ff7f00"/> <!-- LAA -->
+  </g>
+</svg>
