@@ -106,6 +106,20 @@ def test_pickle_bundles_surface_beside_seeds(tmp_path):
     assert np.allclose(back["MV"], POSITIONS["MV"])
 
 
+def test_custom_key_round_trip(tmp_path):
+    # The landmark set uses the same two formats under its own key; the
+    # default "seeds" reader must not see it, and vice versa.
+    landmarks = {"LSPV_BODY_JCN": [1.0, 2.0, 3.0], "SEPTAL_WALL": [4.0, 5.0, 6.0]}
+    path = tmp_path / "case.landmarks_LA_UAC.json"
+    save_seeds(path, landmarks, key="landmarks_LA_UAC")
+    back = load_seeds(path, key="landmarks_LA_UAC")
+    assert set(back) == set(landmarks)
+    for name in landmarks:
+        assert np.allclose(back[name], landmarks[name])
+    with pytest.raises(ValueError):
+        load_seeds(path)                 # default "seeds" key is absent
+
+
 def test_pickle_requires_a_mesh(tmp_path):
     with pytest.raises(ValueError):
         save_seeds(tmp_path / "case.pkl", POSITIONS, mesh=None)

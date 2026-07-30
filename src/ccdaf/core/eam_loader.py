@@ -108,19 +108,39 @@ def carto_mesh_to_polydata(mesh0: dict) -> pv.PolyData:
     return poly
 
 
+def _read_point_set(payload: dict, key: str
+                    ) -> Optional[Dict[str, np.ndarray]]:
+    """Pull a ``{name: xyz}`` mapping stored under *key*, or ``None``.
+
+    Non-finite or wrong-shaped entries are dropped rather than raised on,
+    matching the tolerant read the bundle load has always used for seeds.
+    """
+    raw = payload.get(key)
+    if not raw:
+        return None
+    out: Dict[str, np.ndarray] = {}
+    for name, xyz in raw.items():
+        arr = np.asarray(xyz, dtype=float).reshape(-1)
+        if arr.shape == (3,) and np.isfinite(arr).all():
+            out[str(name)] = arr
+    return out or None
+
+
 def read_bundle(path: str
                 ) -> Tuple[pv.PolyData, Optional[Dict[str, np.ndarray]],
-                           Optional[dict]]:
+                           Optional[Dict[str, np.ndarray]], Optional[dict]]:
     """Read a File → Save pickle bundle back into working objects.
 
     The inverse of :func:`eam_export.export_binary` used with the bundle
     keys: the ``"surface"`` dict becomes a PolyData through
     :func:`carto_mesh_to_polydata`, the ``"elemTag"`` key (if present)
     restores the cell tags the Carto surface dict cannot carry, and the
-    ``"seeds"`` / ``"electrodes"`` keys come back as they were saved.
+    ``"seeds"`` / ``"landmarks_LA_UAC"`` / ``"electrodes"`` keys come back
+    as they were saved.
 
-    Returns ``(mesh, seeds, electrodes)`` — ``seeds`` a name → xyz mapping
-    or ``None``, ``electrodes`` the raw record or ``None``.
+    Returns ``(mesh, seeds, landmarks, electrodes)`` — ``seeds`` and
+    ``landmarks`` each a name → xyz mapping or ``None``, ``electrodes`` the
+    raw record or ``None``.
     """
     with open(path, "rb") as fh:
         payload = pickle.load(fh)
@@ -134,16 +154,10 @@ def read_bundle(path: str
         if tags.shape[0] == mesh.n_cells:
             mesh.cell_data["elemTag"] = tags
 
-    seeds: Optional[Dict[str, np.ndarray]] = None
-    if payload.get("seeds"):
-        seeds = {}
-        for name, xyz in payload["seeds"].items():
-            arr = np.asarray(xyz, dtype=float).reshape(-1)
-            if arr.shape == (3,) and np.isfinite(arr).all():
-                seeds[str(name)] = arr
-
+    seeds = _read_point_set(payload, "seeds")
+    landmarks = _read_point_set(payload, "landmarks_LA_UAC")
     electrodes = payload.get("electrodes")
-    return mesh, seeds, electrodes
+    return mesh, seeds, landmarks, electrodes
 
 
 def load_carto_mapping(directory: str, map_name: str) -> EAMData:

@@ -5,7 +5,7 @@ Side-panel widget for seed selection controls.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from PyQt5 import QtCore, QtWidgets
 
@@ -17,11 +17,24 @@ class SeedWidget(QtWidgets.QGroupBox):
     reset_requested = QtCore.pyqtSignal()
     save_requested  = QtCore.pyqtSignal()
     load_requested  = QtCore.pyqtSignal()
+    type_changed    = QtCore.pyqtSignal(str)
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        type_row = QtWidgets.QHBoxLayout()
+        type_row.addWidget(QtWidgets.QLabel("Seed type:"))
+        self.combo_type = QtWidgets.QComboBox()
+        self.combo_type.setToolTip(
+            "Choose which set of surface points to pick. 'seed' is the "
+            "six-seed workflow used for tagging; other choices pick "
+            "landmark sets that are only saved/exported."
+        )
+        self.combo_type.currentIndexChanged.connect(self._on_type_changed)
+        type_row.addWidget(self.combo_type, 1)
+        layout.addLayout(type_row)
 
         self.btn_start = QtWidgets.QPushButton("Start seed selection")
         self.btn_start.setToolTip(
@@ -71,6 +84,29 @@ class SeedWidget(QtWidgets.QGroupBox):
 
         self.lbl_progress = QtWidgets.QLabel("Seeds: 0 / 6")
         layout.addWidget(self.lbl_progress)
+
+    def set_seed_types(self, items: List[Tuple[str, str]]) -> None:
+        """Populate the seed-type dropdown from ``(type_id, label)`` pairs.
+
+        Signals are blocked while filling so populating does not emit a
+        spurious ``type_changed`` before the caller is wired up.
+        """
+        self.combo_type.blockSignals(True)
+        self.combo_type.clear()
+        for type_id, label in items:
+            self.combo_type.addItem(label, type_id)
+        self.combo_type.blockSignals(False)
+
+    def current_seed_type(self) -> Optional[str]:
+        return self.combo_type.currentData()
+
+    def set_type_enabled(self, enabled: bool) -> None:
+        self.combo_type.setEnabled(enabled)
+
+    def _on_type_changed(self) -> None:
+        type_id = self.combo_type.currentData()
+        if type_id is not None:
+            self.type_changed.emit(str(type_id))
 
     def set_start_enabled(self, enabled: bool) -> None:
         self.btn_start.setEnabled(enabled)

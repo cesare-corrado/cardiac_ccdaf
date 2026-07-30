@@ -60,7 +60,10 @@ import vtk
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ccdaf.core.mesh_loader import MeshLoader, BODY_LABEL
-from ccdaf.interaction.seed_selector import SeedSelector, Seed, SEED_ORDER, SEED_PROMPT, SEED_COLOR
+from ccdaf.interaction.seed_selector import SeedSelector, Seed
+from ccdaf.core.seed_profiles import (
+    SeedProfile, SEED_PROFILES, SEED_PROFILE_ORDER, DEFAULT_PROFILE,
+)
 from ccdaf.core.region_tagger import RegionTagger, LABELS
 from ccdaf.interaction.manual_editor import ManualEditor, ALLOWED_LABELS, EditState
 from ccdaf.interaction.clipping_tool import ClippingTool, ClipMode
@@ -171,6 +174,11 @@ class CCDAF(QtWidgets.QMainWindow):
 
         # ---- mesh state -------------------------------------------------
         self.loader = MeshLoader()
+        # One selector per seed type, keyed by profile.type_id; both sets can
+        # be completed at once. ``self.selector`` is the currently active one
+        # (the type shown in the dropdown), or None if that type is unstarted.
+        self._selectors: Dict[str, SeedSelector] = {}
+        self._seed_type: str = DEFAULT_PROFILE.type_id
         self.selector: Optional[SeedSelector] = None
         self.tagger: Optional[RegionTagger] = None
         self.editor: Optional[ManualEditor] = None
@@ -390,6 +398,9 @@ class CCDAF(QtWidgets.QMainWindow):
 
         # --- Seeds ------------------------------------------------------
         self.seed_widget = SeedWidget()
+        self.seed_widget.set_seed_types(
+            [(p.type_id, p.label) for p in SEED_PROFILE_ORDER])
+        self.seed_widget.type_changed.connect(self._action_seed_type_changed)
         self.seed_widget.start_requested.connect(self._action_start_seeds)
         self.seed_widget.undo_requested.connect(self._action_undo_seed)
         self.seed_widget.reset_requested.connect(self._action_reset_seeds)
@@ -685,12 +696,13 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _teardown_mesh_tools(self, *, rebuild_clipper: bool) -> None:
         """Drop refs to selector/editor/clipper bound to the old plotter."""
-        if self.selector is not None:
+        for sel in self._selectors.values():
             try:
-                self.selector.stop()
+                sel.stop()
             except Exception:
                 pass
-            self.selector = None
+        self._selectors.clear()
+        self.selector = None
         if self.editor is not None:
             try:
                 self.editor.deactivate()
@@ -841,7 +853,7 @@ class CCDAF(QtWidgets.QMainWindow):
     def _load_bundle(self, filename: str) -> None:
         """Load a File → Save pickle bundle: mesh, tagging, seeds, electrodes."""
         try:
-            mesh, seeds, electrodes = read_bundle(filename)
+            mesh, seeds, landmarks, electrodes = read_bundle(filename)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
             return
@@ -867,9 +879,15 @@ class CCDAF(QtWidgets.QMainWindow):
             self.act_eam_export.setEnabled(True)
             self._render_field()
 
-        # Seeds last, so their markers land on the final view.
+        # Seeds last, so their markers land on the final view. Landmarks (if
+        # the bundle carries them) load into their own background set under
+        # the matching profile, whatever the dropdown currently shows.
         if seeds:
-            self._apply_loaded_seeds(seeds, Path(filename).name)
+            self._apply_loaded_seeds(seeds, Path(filename).name,
+                                     profile=SEED_PROFILES["seed"])
+        if landmarks:
+            self._apply_loaded_seeds(landmarks, Path(filename).name,
+                                     profile=SEED_PROFILES["landmarks_LA_UAC"])
 
     @staticmethod
     def _electrode_points_from_record(electrodes):
@@ -933,7 +951,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.set_reset_enabled(False)
         self.seed_widget.set_load_enabled(False)
         self.seed_widget.set_prompt("Load a mesh to begin.")
-        self.seed_widget.set_progress("Seeds: 0 / 6")
+        self.seed_widget.set_progress(
+            f"Seeds: 0 / {self._current_profile().count}")
         self.act_save.setEnabled(False)
         self.act_seg_from_mesh.setEnabled(False)
         self._sync_close_action()
@@ -979,15 +998,24 @@ class CCDAF(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
 
+    def _seeds_for_key(self, type_id: str) -> "Optional[dict]":
+        """Seeds of the *type_id* set as ``{name: xyz}`` when complete, else None."""
+        sel = self._selectors.get(type_id)
+        if sel is not None and sel.is_complete:
+            return {name: s.xyz for name, s in sel.seeds.items()}
+        return None
+
     def _collect_seeds(self) -> "Optional[dict]":
-        """Seeds as ``{name: xyz}`` when the selection is complete, else None.
+        """The six-seed set as ``{name: xyz}`` when complete, else None.
 
         Shared by the pickle-bundle save and the EAM binary export so both
         carry the seeds the same way.
         """
-        if self.selector is not None and self.selector.is_complete:
-            return {name: s.xyz for name, s in self.selector.seeds.items()}
-        return None
+        return self._seeds_for_key(DEFAULT_PROFILE.type_id)
+
+    def _collect_landmarks(self) -> "Optional[dict]":
+        """The LA-UAC landmark set as ``{name: xyz}`` when complete, else None."""
+        return self._seeds_for_key("landmarks_LA_UAC")
 
     def _save_bundle(self, fn: str, fields: "list[str]") -> None:
         """Write the pickle bundle: surface (chosen point fields), seeds,
@@ -1001,6 +1029,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 surface.point_data.remove(name)
 
         seeds = self._collect_seeds()
+        landmarks = self._collect_landmarks()
 
         electrodes = self._eam_data.electrodes if self._eam_data else None
         export_binary(
@@ -1008,11 +1037,14 @@ class CCDAF(QtWidgets.QMainWindow):
             electrodes=electrodes,
             electrode_points=self._eam_electrode_points,
             seeds=seeds,
+            landmarks=landmarks,
             include_elem_tag=("elemTag" in keep),
         )
         parts = []
         if seeds:
             parts.append(f"{len(seeds)} seeds")
+        if landmarks:
+            parts.append(f"{len(landmarks)} landmarks")
         if electrodes is not None:
             parts.append("electrodes")
         extra = f" (+ {', '.join(parts)})" if parts else ""
@@ -1418,23 +1450,87 @@ class CCDAF(QtWidgets.QMainWindow):
     # ==================================================================
     # Seed actions
     # ==================================================================
+    def _current_profile(self) -> SeedProfile:
+        return SEED_PROFILES[self._seed_type]
+
+    def _new_selector(self, profile: SeedProfile) -> SeedSelector:
+        """Build a selector for *profile*, routing its callbacks with the
+        profile bound so a background (non-active) set does not touch the
+        active set's panel."""
+        return SeedSelector(
+            mesh=self.loader.mesh,
+            plotter=self.plotter,
+            on_progress=(lambda n, d, t, p=profile:
+                         self._on_seed_progress(p, n, d, t)),
+            on_complete=lambda s, p=profile: self._on_seeds_complete(p, s),
+            profile=profile,
+        )
+
+    def _action_seed_type_changed(self, type_id: str) -> None:
+        """Switch the active seed set: hide the old one's markers, show the
+        new one's, and sync the panel to whatever that set already holds."""
+        if type_id not in SEED_PROFILES or type_id == self._seed_type:
+            return
+        if self.selector is not None:
+            self.selector.hide()
+        self._seed_type = type_id
+        self.selector = self._selectors.get(type_id)
+        if self.selector is not None:
+            self.selector.show()
+            # Resume picking on a set that was left unfinished, so switching
+            # back to it continues rather than stranding the placed points.
+            if not self.selector.is_complete and self.loader.mesh is not None:
+                self.selector.resume()
+        self._sync_seed_panel()
+
+    def _sync_seed_panel(self) -> None:
+        """Reflect the active set's state on the seed panel (progress,
+        prompt, button enablement). Called after a type switch."""
+        profile = self._current_profile()
+        sel = self.selector
+        mesh_ready = self.loader.mesh is not None
+        done = len(sel.seeds) if sel is not None else 0
+        total = profile.count
+        self.seed_widget.set_progress(f"Seeds: {done} / {total}")
+        self.seed_widget.set_undo_enabled(mesh_ready and done > 0)
+        self.seed_widget.set_save_enabled(sel is not None and sel.is_complete)
+        self.seed_widget.set_reset_enabled(mesh_ready and sel is not None)
+        if sel is not None and not sel.is_complete:
+            self._set_seed_prompt(profile, sel.next_name(), done, total)
+        elif sel is not None:
+            self.seed_widget.set_prompt("All seeds collected.")
+        elif mesh_ready:
+            self.seed_widget.set_prompt("Click 'Start seed selection'.")
+        else:
+            self.seed_widget.set_prompt("Load a mesh to begin.")
+
+    def _set_seed_prompt(self, profile: SeedProfile, next_name: Optional[str],
+                         done: int, total: int) -> None:
+        if done < total and next_name:
+            color = profile.colors.get(next_name, "#ffffff")
+            self.seed_widget.set_prompt(
+                f"<span style='color:{color};font-weight:bold'>Next: {next_name}"
+                f"</span><br>{profile.prompts[next_name]}"
+            )
+        else:
+            self.seed_widget.set_prompt("All seeds collected.")
+
     def _action_start_seeds(self) -> None:
         if self.loader.mesh is None:
             return
         if self.selector is not None:
             self.selector.stop()
 
+        profile = self._current_profile()
         self._focus_3d()
-        self.selector = SeedSelector(
-            mesh=self.loader.mesh,
-            plotter=self.plotter,
-            on_progress=self._on_seed_progress,
-            on_complete=self._on_seeds_complete,
-        )
+        self.selector = self._new_selector(profile)
+        self._selectors[profile.type_id] = self.selector
         self.selector.start()
         self.seed_widget.set_undo_enabled(True)
-        self.tagging_widget.set_seeds_complete(False)
-        self.statusBar().showMessage("Seed selection active — click on the mesh.")
+        if profile.tags:
+            self.tagging_widget.set_seeds_complete(False)
+        self.statusBar().showMessage(
+            f"{profile.label} selection active — click on the mesh.")
 
     def _action_undo_seed(self) -> None:
         if self.selector is None:
@@ -1442,40 +1538,46 @@ class CCDAF(QtWidgets.QMainWindow):
         removed = self.selector.undo_last()
         if removed is not None and not self.selector.is_active:
             self.selector.resume()
-        self.tagging_widget.set_seeds_complete(False)
+        if self._current_profile().tags:
+            self.tagging_widget.set_seeds_complete(False)
 
     def _action_reset_seeds(self) -> None:
         if self.selector is None:
             return
         self.selector.reset()
         self.selector.start()
-        self.tagging_widget.set_seeds_complete(False)
+        if self._current_profile().tags:
+            self.tagging_widget.set_seeds_complete(False)
 
-    def _on_seed_progress(self, next_name: str, done: int, total: int) -> None:
+    def _on_seed_progress(self, profile: SeedProfile, next_name: str,
+                          done: int, total: int) -> None:
+        # Only the active set drives the panel; a background load stays quiet.
+        if profile.type_id != self._seed_type:
+            return
         self.seed_widget.set_progress(f"Seeds: {done} / {total}")
         # Saving means something only for a complete selection; progress is
         # emitted on every transition, so this tracks undo and reset too.
         self.seed_widget.set_save_enabled(done == total)
-        if done < total and next_name:
-            color = SEED_COLOR.get(next_name, "#ffffff")
-            self.seed_widget.set_prompt(
-                f"<span style='color:{color};font-weight:bold'>Next: {next_name}"
-                f"</span><br>{SEED_PROMPT[next_name]}"
-            )
-        else:
-            self.seed_widget.set_prompt("All seeds collected.")
+        self._set_seed_prompt(profile, next_name, done, total)
 
-    def _on_seeds_complete(self, seeds: Dict[str, Seed]) -> None:
-        self.tagging_widget.set_seeds_complete(True)
-        self.statusBar().showMessage("All seeds collected. Ready to tag.")
+    def _on_seeds_complete(self, profile: SeedProfile,
+                           seeds: Dict[str, Seed]) -> None:
+        if profile.tags:
+            self.tagging_widget.set_seeds_complete(True)
+        if profile.type_id == self._seed_type:
+            msg = ("All seeds collected. Ready to tag." if profile.tags
+                   else f"All {profile.label} points collected.")
+            self.statusBar().showMessage(msg)
 
     def _action_save_seeds(self) -> None:
         if self.selector is None or not self.selector.is_complete:
             return
+        profile = self._current_profile()
         stem = Path(self.loader.path).stem if self.loader.path else "mesh"
-        default = str(Path(self.recent_folder) / f"{stem}.seeds.json")
+        default = str(Path(self.recent_folder)
+                      / f"{stem}.{profile.export_key}.json")
         fn, filt = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save seeds", default,
+            self, f"Save {profile.label}", default,
             "Seeds JSON (*.json);;Surface + seeds pickle (*.pkl)",
         )
         if not fn:
@@ -1485,48 +1587,68 @@ class CCDAF(QtWidgets.QMainWindow):
         self.recent_folder = Path(fn).resolve().parent
         seeds = {name: s.xyz for name, s in self.selector.seeds.items()}
         try:
-            save_seeds(fn, seeds, mesh=self.loader.mesh)
+            save_seeds(fn, seeds, mesh=self.loader.mesh, key=profile.export_key)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save seeds failed", str(exc))
             return
-        self.statusBar().showMessage(f"Saved {len(seeds)} seeds to {fn}")
+        self.statusBar().showMessage(f"Saved {len(seeds)} {profile.label} to {fn}")
 
     def _action_load_seeds(self) -> None:
         if self.loader.mesh is None:
             return
+        profile = self._current_profile()
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load seeds", str(self.recent_folder),
+            self, f"Load {profile.label}", str(self.recent_folder),
             "Seed files (*.json *.pkl *.pickle);;All files (*)",
         )
         if not fn:
             return
         self.recent_folder = Path(fn).resolve().parent
         try:
-            positions = load_seeds(fn)
+            positions = load_seeds(fn, key=profile.export_key)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Load seeds failed", str(exc))
             return
-        self._apply_loaded_seeds(positions, Path(fn).name)
+        self._apply_loaded_seeds(positions, Path(fn).name, profile=profile)
 
     def _apply_loaded_seeds(self, positions: Dict[str, np.ndarray],
-                            source_name: str) -> None:
-        """Rebuild the seed selection from saved coordinates on the live mesh.
+                            source_name: str,
+                            profile: Optional[SeedProfile] = None) -> None:
+        """Rebuild a seed set from saved coordinates on the live mesh.
 
         Each coordinate is snapped to the current surface; a validation
         failure stops there, keeps the earlier seeds and resumes picking.
-        Shared by the seed panel's Load and the pickle-bundle load.
+        Shared by the seed panel's Load and the pickle-bundle load. When
+        *profile* is not the active set (a bundle carrying the other set),
+        the selector is built and its markers placed but it stays in the
+        background — the active panel is untouched.
         """
-        if self.selector is not None:
+        if profile is None:
+            profile = self._current_profile()
+        is_active = profile.type_id == self._seed_type
+
+        existing = self._selectors.get(profile.type_id)
+        if existing is not None:
+            existing.stop()
+            existing.hide()
+        if is_active and self.selector is not None and self.selector is not existing:
             self.selector.stop()
+
         self._focus_3d()
-        self.tagging_widget.set_seeds_complete(False)
-        self.selector = SeedSelector(
-            mesh=self.loader.mesh,
-            plotter=self.plotter,
-            on_progress=self._on_seed_progress,
-            on_complete=self._on_seeds_complete,
-        )
-        problems = self.selector.apply_positions(positions)
+        if profile.tags:
+            self.tagging_widget.set_seeds_complete(False)
+
+        sel = self._new_selector(profile)
+        self._selectors[profile.type_id] = sel
+        problems = sel.apply_positions(positions)
+
+        if not is_active:
+            # Background set: keep its markers off-screen until selected.
+            sel.stop()
+            sel.hide()
+            return
+
+        self.selector = sel
         self.seed_widget.set_undo_enabled(True)
         if problems:
             self.selector.resume()
@@ -1538,16 +1660,22 @@ class CCDAF(QtWidgets.QMainWindow):
             )
         else:
             self.statusBar().showMessage(
-                f"Loaded {len(SEED_ORDER)} seeds from {source_name} "
-                "(snapped to the current surface).")
+                f"Loaded {len(profile.order)} {profile.label} from "
+                f"{source_name} (snapped to the current surface).")
 
     # ==================================================================
     # Tagging
     # ==================================================================
+    def _seed_selector(self) -> Optional[SeedSelector]:
+        """The six-seed set's selector — the one tagging and PV/MV clipping
+        use, independent of which set the dropdown currently shows."""
+        return self._selectors.get(DEFAULT_PROFILE.type_id)
+
     def _action_run_tagging(self) -> None:
-        if self.tagger is None or self.selector is None:
+        seed_sel = self._seed_selector()
+        if self.tagger is None or seed_sel is None:
             return
-        if not self.selector.is_complete:
+        if not seed_sel.is_complete:
             QtWidgets.QMessageBox.warning(
                 self, "Seeds incomplete",
                 "Please complete seed selection before tagging.",
@@ -1569,7 +1697,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Running geodesic tagging…")
         QtWidgets.QApplication.processEvents()
         try:
-            self.tagger.tag(self.selector.seeds_for_tagging())
+            self.tagger.tag(seed_sel.seeds_for_tagging())
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Tagging failed", str(exc))
             return
@@ -1756,10 +1884,11 @@ class CCDAF(QtWidgets.QMainWindow):
                 f"PV clip: removed last point — {n} point(s) left.")
 
     def _action_pv_finish(self) -> None:
-        if self.clipper is None or self.selector is None:
+        seed_sel = self._seed_selector()
+        if self.clipper is None or seed_sel is None:
             return
         pv_name = self.clipping_widget.selected_pv()
-        seed = self.selector.seeds.get(pv_name)
+        seed = seed_sel.seeds.get(pv_name)
         if seed is None:
             QtWidgets.QMessageBox.warning(
                 self, "Missing PV seed",
@@ -1778,9 +1907,10 @@ class CCDAF(QtWidgets.QMainWindow):
     # Clipping — mitral
     # ==================================================================
     def _mitral_seed_xyz(self) -> Optional[np.ndarray]:
-        if self.selector is None or "MV" not in self.selector.seeds:
+        seed_sel = self._seed_selector()
+        if seed_sel is None or "MV" not in seed_sel.seeds:
             return None
-        return self.selector.seeds["MV"].xyz
+        return seed_sel.seeds["MV"].xyz
 
     def _action_mv_sphere_start(self) -> None:
         if self.clipper is None:
@@ -1915,6 +2045,7 @@ class CCDAF(QtWidgets.QMainWindow):
                               electrodes=self._eam_data.electrodes,
                               electrode_points=self._eam_electrode_points,
                               seeds=self._collect_seeds(),
+                              landmarks=self._collect_landmarks(),
                               include_elem_tag=True)
             else:
                 export_vtk(path, self.loader.mesh, binary=dlg.selected_binary())
