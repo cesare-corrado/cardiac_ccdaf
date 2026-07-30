@@ -13,7 +13,10 @@ The contract:
   unchanged;
 * ``read_bundle`` rejects a pickle that is not a bundle;
 * a bundle's ``"seeds"`` key is readable by the seed loader too, so the
-  two entry points interoperate.
+  two entry points interoperate;
+* the LA-UAC landmark set rides in the same bundle under its own
+  ``"landmarks_LA_UAC"`` key, alongside the seeds, and round-trips
+  independently.
 
 Synthetic mesh; no display, no Qt.
 """
@@ -44,6 +47,7 @@ def _mesh() -> pv.PolyData:
 
 
 SEEDS = {"LSPV": [5.0, 0.0, 0.0], "MV": [0.0, 0.0, -5.0]}
+LANDMARKS = {"LSPV_BODY_JCN": [0.0, 5.0, 0.0], "SEPTAL_WALL": [-5.0, 0.0, 0.0]}
 
 
 def test_plain_export_is_unchanged(tmp_path):
@@ -59,10 +63,11 @@ def test_bundle_round_trip(tmp_path):
     mesh = _mesh()
     export_binary(path, mesh, seeds=SEEDS, include_elem_tag=True)
 
-    back, seeds, electrodes = read_bundle(path)
+    back, seeds, landmarks, electrodes = read_bundle(path)
     assert back.n_points == mesh.n_points
     assert back.n_cells == mesh.n_cells
     assert electrodes is None
+    assert landmarks is None            # none supplied → key absent
 
     lat0 = np.asarray(mesh.point_data["LAT"], dtype=float)
     lat1 = np.asarray(back.point_data["LAT"], dtype=float)
@@ -84,7 +89,7 @@ def test_field_selection_governs_the_surface(tmp_path):
     mesh = _mesh()
     mesh.point_data.remove("LAT")
     export_binary(path, mesh, include_elem_tag=True)
-    back, _, _ = read_bundle(path)
+    back, _, _, _ = read_bundle(path)
     assert "LAT" not in back.point_data
 
 
@@ -94,9 +99,34 @@ def test_electrodes_round_trip(tmp_path):
                                 [1.0, 0.0, 5.0, 0.0, 43.0]])}
     pts = np.array([[5.0, 0.0, 0.0], [0.0, 5.0, 0.0]])
     export_binary(path, _mesh(), electrodes=record, electrode_points=pts)
-    _, _, electrodes = read_bundle(path)
+    _, _, _, electrodes = read_bundle(path)
     assert electrodes is not None
     assert np.allclose(np.asarray(electrodes["data"])[:, 1:4], pts)
+
+
+def test_landmarks_round_trip_alongside_seeds(tmp_path):
+    # Both point sets ride in one bundle under their own keys and come back
+    # independently, matching the "coexist / both exported" behaviour.
+    path = tmp_path / "both.pkl"
+    export_binary(path, _mesh(), seeds=SEEDS, landmarks=LANDMARKS)
+
+    with open(path, "rb") as fh:
+        payload = pickle.load(fh)
+    assert "seeds" in payload and "landmarks_LA_UAC" in payload
+
+    _, seeds, landmarks, _ = read_bundle(path)
+    assert set(seeds) == set(SEEDS)
+    assert set(landmarks) == set(LANDMARKS)
+    for name in LANDMARKS:
+        assert np.allclose(landmarks[name], LANDMARKS[name])
+
+
+def test_plain_export_has_no_landmarks_key(tmp_path):
+    path = tmp_path / "plain.pkl"
+    export_binary(path, _mesh())
+    with open(path, "rb") as fh:
+        payload = pickle.load(fh)
+    assert "landmarks_LA_UAC" not in payload
 
 
 def test_read_bundle_rejects_non_bundle(tmp_path):
