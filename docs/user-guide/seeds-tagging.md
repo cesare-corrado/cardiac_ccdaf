@@ -2,6 +2,20 @@
 
 ## Seed selection
 
+The **Seed type** dropdown at the top of the panel chooses which set of
+surface points you are placing:
+
+- **seed** (default) — the six anatomical landmarks below that drive region
+  tagging. Exported under the `seeds` key.
+- **landmarks_LA_UAC** — four left-atrium landmarks for a universal-atrial-
+  coordinate step: `LSPV_BODY_JCN`, `RSPV_BODY_JCN`, `SEPTAL_WALL`,
+  `LATERAL_WALL`. Picked, saved and exported exactly like seeds, but under the
+  `landmarks_LA_UAC` key, and **not** used for tagging.
+
+The two sets are independent: you can complete both in one session — switching
+the dropdown keeps each set's picks — and a saved bundle can carry both keys at
+once. The rest of this section describes the default **seed** set.
+
 Tagging needs six anatomical landmarks, placed **in order**:
 
 | # | Seed | Meaning |

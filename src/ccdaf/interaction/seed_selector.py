@@ -31,35 +31,27 @@ import pyvista as pv
 
 from ccdaf.core.seed_state_machine import (
     SEED_ORDER,
-    PV_NAMES,
     Seed,
     SeedStateMachine,
     CommitResult,
 )
 from ccdaf.core.seed_geometry import SeedGeometryResolver, GeometryError
-
-
-SEED_PROMPT: Dict[str, str] = {
-    "LSPV": "Click INSIDE the left superior pulmonary vein (LSPV)",
-    "LIPV": "Click INSIDE the left inferior pulmonary vein (LIPV)",
-    "RSPV": "Click INSIDE the right superior pulmonary vein (RSPV)",
-    "RIPV": "Click INSIDE the right inferior pulmonary vein (RIPV)",
-    "LAA":  "Click INSIDE the left atrial appendage (LAA)",
-    "MV":   "Click NEAR the center of the mitral valve (MV)",
-}
-
-SEED_COLOR: Dict[str, str] = {
-    "LSPV": "#e41a1c",
-    "LIPV": "#377eb8",
-    "RSPV": "#4daf4a",
-    "RIPV": "#984ea3",
-    "LAA":  "#ff7f00",
-    "MV":   "#f7e111",
-}
+from ccdaf.core.seed_profiles import (
+    SeedProfile,
+    SEED_PROFILE,
+    SEED_PROMPT,
+    SEED_COLOR,
+)
 
 
 class SeedSelector:
-    """Sequential seed picker built on SeedStateMachine + SeedGeometryResolver."""
+    """Sequential seed picker built on SeedStateMachine + SeedGeometryResolver.
+
+    The point set to pick — its order, prompts, colours, pulmonary-vein
+    prior and export key — comes from a :class:`SeedProfile`. The default
+    profile reproduces the original six-seed workflow, so callers that do
+    not pass one see no change.
+    """
 
     def __init__(
         self,
@@ -67,13 +59,15 @@ class SeedSelector:
         plotter,
         on_progress: Optional[Callable[[str, int, int], None]] = None,
         on_complete: Optional[Callable[[Dict[str, Seed]], None]] = None,
+        profile: SeedProfile = SEED_PROFILE,
     ) -> None:
         self.mesh = mesh
         self.plotter = plotter
         self.on_progress = on_progress
         self.on_complete = on_complete
+        self._profile = profile
 
-        self._state = SeedStateMachine(SEED_ORDER)
+        self._state = SeedStateMachine(profile.order)
         self._geom = SeedGeometryResolver(mesh)
 
         self._active: bool = False
@@ -141,6 +135,31 @@ class SeedSelector:
             pass
         self._clear_warning()
 
+    def hide(self) -> None:
+        """Remove this selector's actors from the plotter, keeping seed state.
+
+        Used when another seed set becomes the active one: the picks are
+        retained (and re-exportable), only their markers/labels/HUD leave
+        the view so the two sets do not clutter each other.
+        """
+        self.stop()
+        self._clear_markers()  # markers + labels + warning
+        try:
+            self.plotter.remove_actor("seed_hud", reset_camera=False)
+        except Exception:
+            pass
+        self._hud_actor = None
+
+    def show(self) -> None:
+        """Re-draw markers, labels and HUD from the retained seed state.
+
+        The inverse of :meth:`hide`; does not re-enable picking (call
+        :meth:`resume` for that).
+        """
+        for seed in self._state.seeds.values():
+            self._add_marker(seed)
+        self._refresh_hud()
+
     def undo_last(self) -> Optional[str]:
         removed = self._state.undo()
         if removed is not None:
@@ -171,15 +190,21 @@ class SeedSelector:
         """Escape hatch for headless tests (pure-logic layer)."""
         return self._state
 
+    @property
+    def profile(self) -> SeedProfile:
+        return self._profile
+
     def next_name(self) -> Optional[str]:
         return self._state.next_name()
 
     def next_prompt(self) -> str:
         nxt = self._state.next_name()
-        return "All seeds collected." if nxt is None else SEED_PROMPT[nxt]
+        return ("All seeds collected." if nxt is None
+                else self._profile.prompts[nxt])
 
     def seeds_for_tagging(self) -> Dict[str, int]:
-        return {n: s.vertex_id for n, s in self._state.seeds.items() if n != "MV"}
+        return {n: s.vertex_id for n, s in self._state.seeds.items()
+                if n not in self._profile.no_tag_names}
 
     def apply_positions(self, positions) -> "list[str]":
         """Rebuild the selection from saved coordinates, in order.
@@ -198,7 +223,7 @@ class SeedSelector:
         self.stop()
         self._state.reset()
         self._clear_markers()
-        for name in SEED_ORDER:
+        for name in self._profile.order:
             if name not in positions:
                 problems.append(f"{name}: not in the file")
                 break
@@ -211,7 +236,7 @@ class SeedSelector:
             if self._geom.is_duplicate_position(snap.xyz, existing_xyz):
                 problems.append(f"{name}: lands on an already-placed seed")
                 break
-            if name in PV_NAMES:
+            if name in self._profile.pv_names:
                 ok, reason = self._geom.validate_pv(snap.vertex_id)
                 if not ok:
                     problems.append(f"{name}: {reason}")
@@ -257,7 +282,7 @@ class SeedSelector:
             )
             return
 
-        if name in PV_NAMES:
+        if name in self._profile.pv_names:
             ok, reason = self._geom.validate_pv(snap.vertex_id)
             if not ok:
                 self._warn(f"{name}: {reason}")
@@ -298,9 +323,9 @@ class SeedSelector:
         if nxt is None:
             text, color = "All seeds collected.", "white"
         else:
-            text = (f"[{len(self._state.seeds)}/{len(SEED_ORDER)}]  "
-                    f"NEXT: {nxt} — {SEED_PROMPT[nxt]}")
-            color = SEED_COLOR.get(nxt, "white")
+            text = (f"[{len(self._state.seeds)}/{len(self._profile.order)}]  "
+                    f"NEXT: {nxt} — {self._profile.prompts[nxt]}")
+            color = self._profile.colors.get(nxt, "white")
         try:
             self._hud_actor = self.plotter.add_text(
                 text, position="lower_left", color=color,
@@ -340,7 +365,7 @@ class SeedSelector:
         )
         actor = self.plotter.add_mesh(
             sphere,
-            color=SEED_COLOR[seed.name],
+            color=self._profile.colors[seed.name],
             name=f"seed_{seed.name}",
             reset_camera=False,
             pickable=False,
@@ -395,7 +420,7 @@ class SeedSelector:
             self.on_progress(
                 self._state.next_name() or "",
                 len(self._state.seeds),
-                len(SEED_ORDER),
+                len(self._profile.order),
             )
 
 

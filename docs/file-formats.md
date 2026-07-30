@@ -32,14 +32,17 @@ Triangular surfaces are read/written through `ccdaf.io.vtkfunctions`.
 
 - **`.json`** — human-readable `{"seeds": {name: [x, y, z], ...}}`. Stores
   **coordinates only**, no vertex ids, so seeds reload onto a clipped or refined
-  mesh (each snapped to the nearest surface point).
+  mesh (each snapped to the nearest surface point). The **landmarks_LA_UAC** set
+  uses the same layout under its own `landmarks_LA_UAC` key.
 - **`.pkl`** — the seeds alongside a Carto-dict surface.
 
 ## Session bundles — `.pkl`
 
-A **File → Save** bundle packs the surface, tagging, seeds, and electrodes
-together, so a session round-trips in one file (`read_bundle` / write path in
-`ccdaf.core.eam_loader`).
+A **File → Save** bundle packs the surface, tagging, seeds, LA-UAC landmarks
+(under the `landmarks_LA_UAC` key) and electrodes together, so a session
+round-trips in one file (`read_bundle` / write path in
+`ccdaf.core.eam_loader`). Each seed set appears only when it has been
+completed.
 
 ## EAM export
 

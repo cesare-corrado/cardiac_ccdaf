@@ -127,15 +127,18 @@ def export_binary(path: str, mesh: pv.PolyData,
                   electrodes: Optional[dict] = None,
                   electrode_points: Optional[np.ndarray] = None,
                   seeds: Optional[dict] = None,
+                  landmarks: Optional[dict] = None,
                   include_elem_tag: bool = False) -> None:
     """Pickle ``{'surface': <reader dict>, 'electrodes': <record>}``.
 
-    ``seeds`` and ``include_elem_tag`` extend the payload for the File →
-    Save bundle: a ``"seeds"`` key (name → xyz) and an ``"elemTag"`` key
-    (the cell tags, which the Carto surface dict cannot carry) appear only
-    when asked for, so the EAM export's own output is unchanged. The
-    reference downstream reads ``['surface']``/``['electrodes']`` and
-    ignores the rest, so the extra keys stay compatible.
+    ``seeds``, ``landmarks`` and ``include_elem_tag`` extend the payload
+    for the File → Save bundle: a ``"seeds"`` key (name → xyz), a
+    ``"landmarks_LA_UAC"`` key (the LA-UAC landmark set, same name → xyz
+    shape) and an ``"elemTag"`` key (the cell tags, which the Carto
+    surface dict cannot carry) appear only when supplied, so the EAM
+    export's own output is unchanged. The reference downstream reads
+    ``['surface']``/``['electrodes']`` and ignores the rest, so the extra
+    keys stay compatible.
     """
     payload = {
         "surface": polydata_to_carto_dict(mesh),
@@ -143,6 +146,8 @@ def export_binary(path: str, mesh: pv.PolyData,
     }
     if seeds:
         payload["seeds"] = _plain_seeds(seeds)
+    if landmarks:
+        payload["landmarks_LA_UAC"] = _plain_seeds(landmarks)
     if include_elem_tag and "elemTag" in mesh.cell_data:
         payload["elemTag"] = np.asarray(mesh.cell_data["elemTag"]).astype(int)
     with open(path, "wb") as fh:

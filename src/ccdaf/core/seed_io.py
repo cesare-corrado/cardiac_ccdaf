@@ -52,11 +52,15 @@ def _as_plain(seeds: Mapping[str, Sequence[float]]) -> Dict[str, list]:
 
 def save_seeds(path: Union[str, Path],
                seeds: Mapping[str, Sequence[float]],
-               mesh=None) -> None:
+               mesh=None,
+               key: str = SEEDS_KEY) -> None:
     """Write *seeds* (name → xyz) to *path*; format follows the suffix.
 
     ``.pkl`` embeds *mesh* as its ``"surface"`` — required there, unused
-    for ``.json``.
+    for ``.json``. *key* is the dict/JSON key the set is stored under
+    (``"seeds"`` by default; the LA-UAC landmark set uses
+    ``"landmarks_LA_UAC"``), so different point sets round-trip through the
+    same two formats without colliding.
     """
     path = Path(path)
     plain = _as_plain(seeds)
@@ -64,12 +68,12 @@ def save_seeds(path: Union[str, Path],
         raise ValueError("no seeds to save")
     suffix = path.suffix.lower()
     if suffix in _JSON_SUFFIXES:
-        path.write_text(json.dumps({SEEDS_KEY: plain}, indent=2) + "\n")
+        path.write_text(json.dumps({key: plain}, indent=2) + "\n")
     elif suffix in _PICKLE_SUFFIXES:
         if mesh is None:
             raise ValueError("the pickle format embeds the surface — "
                              "a mesh is required")
-        payload = {"surface": polydata_to_carto_dict(mesh), SEEDS_KEY: plain}
+        payload = {"surface": polydata_to_carto_dict(mesh), key: plain}
         with open(path, "wb") as fh:
             pickle.dump(payload, fh)
     else:
@@ -77,10 +81,12 @@ def save_seeds(path: Union[str, Path],
                          "(use .json or .pkl)")
 
 
-def load_seeds(path: Union[str, Path]) -> Dict[str, np.ndarray]:
+def load_seeds(path: Union[str, Path],
+               key: str = SEEDS_KEY) -> Dict[str, np.ndarray]:
     """Read a seed file back as ``{name: xyz array}``.
 
-    Reads only the ``"seeds"`` key, whichever format carries it.
+    Reads only the *key* mapping (``"seeds"`` by default), whichever
+    format carries it.
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -92,11 +98,11 @@ def load_seeds(path: Union[str, Path]) -> Dict[str, np.ndarray]:
     else:
         raise ValueError(f"unknown seed-file suffix '{path.suffix}' "
                          "(use .json or .pkl)")
-    if not isinstance(data, dict) or SEEDS_KEY not in data:
-        raise ValueError(f"{path.name} carries no '{SEEDS_KEY}' key")
-    seeds = data[SEEDS_KEY]
+    if not isinstance(data, dict) or key not in data:
+        raise ValueError(f"{path.name} carries no '{key}' key")
+    seeds = data[key]
     if not isinstance(seeds, MappingABC):
-        raise ValueError(f"'{SEEDS_KEY}' is not a name → xyz mapping")
+        raise ValueError(f"'{key}' is not a name → xyz mapping")
     out: Dict[str, np.ndarray] = {}
     for name, xyz in seeds.items():
         arr = np.asarray(xyz, dtype=float).reshape(-1)
