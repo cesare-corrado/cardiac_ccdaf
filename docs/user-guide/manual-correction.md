@@ -37,6 +37,9 @@ Tag a strip of triangles along a geodesic curve:
 
 ## Cleanup & smoothing
 
+Both act on the whole mesh rather than on a picked batch, so they are available
+whenever manual correction is — with selection mode on **or** off.
+
 - **Fill Holes (Protect Boundaries)** — fills unassigned triangles by region
   growing while keeping existing region boundaries separate, so neighbouring
   labels do not merge.

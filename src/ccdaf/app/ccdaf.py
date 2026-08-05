@@ -1995,15 +1995,34 @@ class CCDAF(QtWidgets.QMainWindow):
         # mesh actually has — keeping the user on their field if it survived.
         self._populate_fields(keep_selection=True)
         self.tagger = RegionTagger(new_mesh)
-        if self.editor is not None:
-            self.editor = ManualEditor(
-                mesh=new_mesh,
+        # The editor holds the mesh it edits, so it is remade for the new one —
+        # unconditionally. When the working mesh is *born* here (a segmentation
+        # converted to a surface with no mesh loaded before it) there was no
+        # editor to refresh, and refreshing only an existing one left manual
+        # correction bound to nothing: tagging enables its buttons regardless,
+        # so the panel looked live and swallowed every click.
+        had_editor = self.editor is not None
+        self.editor = ManualEditor(
+            mesh=new_mesh,
+            plotter=self.plotter,
+            on_render=self._render_mesh,
+            on_state=lambda s: None,
+            on_commit=self._on_edit_committed,
+        )
+        # A fresh editor starts on its own default label; follow the panel.
+        self.editor.set_active_label(self.manual_widget.current_label())
+        if not had_editor:
+            self.manual_widget.set_active(True)
+        self.manual_widget.set_undo_enabled(False)
+        # The clipper has the same gap — but never replace a live one: it owns
+        # the clip undo stack, and this runs from its own mesh_setter.
+        if self.clipper is None:
+            self.clipper = ClippingTool(
+                mesh_getter=lambda: self.loader.mesh,
+                mesh_setter=self._replace_mesh,
                 plotter=self.plotter,
-                on_render=self._render_mesh,
-                on_state=lambda s: None,
-                on_commit=self._on_edit_committed,
+                on_status=self.statusBar().showMessage,
             )
-            self.manual_widget.set_undo_enabled(False)
         self.mesh_info.update_info(new_mesh)
 
     def _action_export_eam(self) -> None:
