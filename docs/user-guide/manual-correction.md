@@ -4,7 +4,11 @@ Fix the `elemTag` labels after automatic tagging. Pick the **active Label**
 (the PV/LAA regions or *body*) at the top; every tool below applies that label.
 
 The two picking tools are **mutually exclusive** — turning one on turns the
-other off, because both drive the surface picker.
+other off, because both drive the surface picker. So do
+[seed selection](seeds-tagging.md) and the [PV contour clip](clipping.md): only one
+tool holds the picker at a time, and starting either mode here stops whichever
+had it (the status bar says which). Seeds and pending selections survive; a PV
+contour in progress does not.
 
 ## Selection mode
 
