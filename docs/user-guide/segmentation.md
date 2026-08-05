@@ -67,3 +67,11 @@ Then:
     **Export to VTK** recomputes electrode positions onto the reconstructed
     surface; **Update 3D** is a preview and does not. See
     [Concepts → Electrode displacement](../concepts.md#electrode-displacement).
+
+Both paths pad the volume with background before meshing, so a label running
+into the edge of the image is still closed there — a scan cropped tight around
+the anatomy no longer comes back with holes on the faces it touched. The
+surface is capped half a voxel outside the last labelled plane, and cropping a
+volume does not change the mesh built from it. The padding widens with the
+smoothing parameters above, which is what keeps the Gaussian kernel from
+reaching past the edge of the image and shaping the cap.
