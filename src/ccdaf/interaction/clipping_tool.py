@@ -215,6 +215,8 @@ class ClippingTool:
         self._boundary: Optional[np.ndarray] = None
         self._allowed: Optional[np.ndarray] = None
         self._subgraph: Optional[csr_matrix] = None
+        self._faces: Optional[np.ndarray] = None
+        self._cell_tags: Optional[np.ndarray] = None
 
         # Widgets
         self._sphere_widget: Optional[vtk.vtkSphereWidget] = None
@@ -342,6 +344,11 @@ class ClippingTool:
         self._boundary = boundary
         self._allowed = allowed
         self._subgraph = _build_subgraph(mesh, allowed)
+        # Triangles and their tags, cached from the same mesh as the masks
+        # above: a pick is judged by the triangle it lands on, not by the
+        # vertex nearest to it (see _pick_vertex_on_target).
+        self._faces = np.asarray(mesh.faces).reshape(-1, 4)[:, 1:]
+        self._cell_tags = np.asarray(mesh.cell_data[ELEM_TAG_ARRAY], dtype=np.int64)
         return True
 
     def _clear_subgraph(self) -> None:
@@ -349,6 +356,8 @@ class ClippingTool:
         self._boundary = None
         self._allowed = None
         self._subgraph = None
+        self._faces = None
+        self._cell_tags = None
         self._target_tag = -1
 
     # ==================================================================
@@ -403,6 +412,15 @@ class ClippingTool:
         click_pos = interactor.GetEventPosition()
         picker = self.plotter.picker
         picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
+        # A miss must not place a point. The hardware picker still reports a
+        # world position when the ray hits no geometry — a point on the focal
+        # plane, whose nearest mesh vertex is an arbitrary point of the
+        # surface, accepted or rejected by pure chance. It holds no dataset in
+        # that case, which is exactly what pyvista's own pick observer tests
+        # before it forwards an event; the (0,0,0) test below never caught it.
+        if hasattr(picker, "GetDataSet") and picker.GetDataSet() is None:
+            self._status("PV pick ignored: nothing under the cursor.")
+            return
         picked_point = picker.GetPickPosition()
         if picked_point != (0.0, 0.0, 0.0):
             self._on_contour_pick(picked_point)
@@ -417,19 +435,8 @@ class ClippingTool:
         if self._allowed is None or self._subgraph is None:
             return
 
-        p = int(mesh.find_closest_point(np.asarray(picked_point, dtype=float)))
-
-        # Reject picks that leave the allowed region:
-        #   * on a tag-boundary vertex, or
-        #   * not on the target tag.
-        if self._boundary[p]:
-            self._status("PV pick ignored: on tag boundary.")
-            return
-        if int(self._point_tag[p]) != self._target_tag:
-            self._status(
-                f"PV pick ignored: vertex tag {int(self._point_tag[p])} "
-                f"≠ target tag {self._target_tag}."
-            )
+        p = self._pick_vertex_on_target(mesh, picked_point)
+        if p < 0:
             return
 
         # A pick that lands on an existing endpoint is a no-op. This also
@@ -501,6 +508,48 @@ class ClippingTool:
         self._status(
             f"PV clip: {self._pick_count} points, {len(self._path)} vertices."
         )
+
+    # ------------------------------------------------------------------
+    def _pick_vertex_on_target(self, mesh: pv.PolyData, picked_point) -> int:
+        """Resolve a surface hit to a snake vertex on the target region.
+
+        The **triangle** under the hit decides whether the pick is on the
+        selected vein. Judging by the nearest *vertex* instead lets a pick on
+        the wrong vein through wherever two tagged regions come close — the
+        right-vein carina above all, where an RIPV triangle can have an RSPV
+        vertex as its nearest: the vertex carries the target tag, so the pick
+        was accepted even though the surface clicked belongs to the other vein.
+
+        Returns the vertex id to grow the snake from — the nearest vertex *of
+        that triangle* that the subgraph allows — or ``-1`` when the pick is
+        rejected, having posted the reason.
+        """
+        if self._faces is None or self._cell_tags is None:
+            return -1
+        pt = np.asarray(picked_point, dtype=float)
+        cell_id = int(mesh.find_closest_cell(pt))
+        if cell_id < 0 or cell_id >= self._cell_tags.size:
+            self._status("PV pick ignored: not on the surface.")
+            return -1
+        cell_tag = int(self._cell_tags[cell_id])
+        if cell_tag != self._target_tag:
+            self._status(
+                f"PV pick ignored: that triangle is tagged {cell_tag}, "
+                f"not the target tag {self._target_tag}."
+            )
+            return -1
+        tri = self._faces[cell_id]
+        allowed = tri[self._allowed[tri]]
+        if allowed.size == 0:
+            # Every vertex of the triangle is a tag boundary: the pick sits on
+            # the rim of the region, where the snake has nothing to travel on.
+            self._status(
+                "PV pick ignored: on the region border — pick further inside "
+                f"tag {self._target_tag}."
+            )
+            return -1
+        d = np.linalg.norm(np.asarray(mesh.points)[allowed] - pt, axis=1)
+        return int(allowed[int(np.argmin(d))])
 
     # ------------------------------------------------------------------
     def _capture_pick_state(self) -> tuple:

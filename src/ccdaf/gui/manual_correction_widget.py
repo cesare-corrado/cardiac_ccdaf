@@ -163,11 +163,13 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         ))
 
     def _on_edit_toggled(self, on: bool) -> None:
+        # Fill Holes and Smooth are whole-mesh operations on the active label —
+        # they neither read nor write the pending selection, so they stay
+        # available whether or not selection mode is on. Tying them to it only
+        # forced a pointless round trip through the toggle.
         self.btn_edit_toggle.setText(
             "Deactivate selection mode" if on else "Activate selection mode"
         )
-        self.btn_fill_holes.setEnabled(on)
-        self.btn_smooth.setEnabled(on)
         self.edit_toggled.emit(on)
 
     def _on_snake_toggled(self, on: bool) -> None:

@@ -20,6 +20,12 @@ Clip a pulmonary vein by drawing a closed loop around its ostium:
 5. **Close & Clip PV** closes the contour into a loop and clips off the cuff
    inside it.
 
+A point is only taken when the **triangle under the cursor** carries the
+selected vein's tag — a press on a neighbouring vein, on the body, or off the
+surface altogether is refused, and the status bar says which tag it found.
+Points on the rim of the region are refused too: the contour needs vertices
+inside the tag to travel on.
+
 <figure markdown="span">
   ![PV contour snake around a vein ostium](../assets/screenshots/clipping_vein.png)
   <figcaption>A PV contour: the geodesic snake tracing the vein ostium.</figcaption>
