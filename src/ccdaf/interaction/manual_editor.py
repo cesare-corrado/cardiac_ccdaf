@@ -240,13 +240,24 @@ class ManualEditor:
         """Enter snake mode: X drops geodesic anchors on the surface.
 
         Left-drag keeps rotating (point picking with ``left_clicking=False``);
-        the host routes the X key to :meth:`snake_pick_at_cursor`. Mutually
-        exclusive with cell-selection mode — the host turns that off first.
+        the host routes the X key to :meth:`snake_pick_at_cursor`.
+
+        Mutually exclusive with *every* other picking tool, not just
+        cell-selection mode: PyVista keeps one picker per render window and
+        raises ``PyVistaPickingError`` if a second tool grabs it, which the
+        seed selector and the clipper both do. ``CCDAF._release_picker`` is
+        what enforces that and keeps the other panels' controls in step; the
+        release here is a backstop so a missed route costs a mode rather than
+        aborting the app.
         """
         self._snake_tagger = tagger
         self._snake_reset()
         self._snake_active = True
         self.plotter.enable_trackball_style()
+        try:
+            self.plotter.disable_picking()
+        except Exception:
+            pass
         self.plotter.enable_point_picking(
             callback=lambda *a, **k: None,   # X drives picks, not the click
             picker="hardware",               # z-buffer pick of the VISIBLE surface
@@ -487,6 +498,12 @@ class ManualEditor:
         # picking. This resolves occlusion and uses the correct device-pixel
         # coordinates — no manual ``vtkCellPicker.Pick(GetEventPosition())``,
         # which was prone to a DPI/scale offset (picking a nearby wrong cell).
+        # Release first — one picker per render window, and the host may have
+        # missed a route; see the note in ``start_snake``.
+        try:
+            self.plotter.disable_picking()
+        except Exception:
+            pass
         self.plotter.enable_point_picking(
             callback=self._on_cell_picked,
             picker="hardware",

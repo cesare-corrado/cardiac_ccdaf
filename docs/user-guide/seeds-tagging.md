@@ -39,7 +39,11 @@ prompt shows which seed is next. Each pick:
 Controls:
 
 - **Undo** removes the last seed so you can re-pick it.
-- **Reset** clears all seeds.
+- **Reset** clears all seeds — the way to start the set over.
+- **Start seed selection** normally begins a fresh set. The exception is when
+  another tool interrupted this one (see
+  [Troubleshooting](../troubleshooting.md#a-tool-switched-itself-off-when-i-started-another-one)):
+  then it resumes where it stopped, keeping the seeds already placed.
 - **Save seeds… / Load seeds…** — seeds are stored as names + coordinates (no
   vertex ids), so they reload onto a clipped or refined mesh, each snapped to
   the current surface by nearest point.

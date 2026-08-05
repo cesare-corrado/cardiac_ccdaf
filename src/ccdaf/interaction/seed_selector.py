@@ -89,7 +89,16 @@ class SeedSelector:
         *ray*, including hidden ones). ``pickable_window=False`` means the
         callback fires only on a real surface hit — clicks on empty space are
         dropped by PyVista before reaching :meth:`_on_pick`.
+
+        Releasing first is deliberate: PyVista keeps one picker per render
+        window and raises if a second tool grabs it. The host is meant to have
+        released it already (``CCDAF._release_picker``); this makes a missed
+        route cost another tool its mode rather than abort the app.
         """
+        try:
+            self.plotter.disable_picking()
+        except Exception:
+            pass
         self.plotter.enable_point_picking(
             callback=self._on_pick,
             picker="hardware",
