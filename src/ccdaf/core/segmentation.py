@@ -11,6 +11,12 @@ re-meshed from a plain script, which is also what makes it testable.
 The functions take the image they operate on instead of reading GUI
 state; nothing here may import PyQt5 (tests enforce it).
 
+Border note: both directions add a plane of background around the volume
+they mesh. ``define_image_from_mesh`` allocates one voxel of margin so a
+face on the bounding box still has background outside it; likewise
+``segmentation_to_polydata`` pads the label mask, because a label running
+into the volume border would otherwise produce an open surface there.
+
 Orientation note: ``segmentation_to_polydata`` calls ``FlipNormalsOn``,
 which reverses triangle winding — the sign of any downstream signed
 distance follows the winding, not the stored ``Normals`` array. Callers
@@ -300,21 +306,54 @@ def relabel_halfspace(array: np.ndarray,
     return out
 
 
+def border_padding(filt_stdev: "list[float]",
+                   filt_rfact: "list[float]") -> "list[int]":
+    """Background voxels to add on each side before meshing, per axis.
+
+    A label that runs into the volume border has no background outside it,
+    so the signed distance never changes sign there and marching cubes
+    leaves the surface open — the segmentation comes back with holes
+    wherever the anatomy met the edge of a tightly cropped scan. One plane
+    of background is all it takes to close it.
+
+    The Gaussian smoothing that follows reads ``stdev * radius_factor``
+    voxels either side of the point it writes, and at the image edge that
+    kernel is truncated. Sitting the closure that far inside the padding
+    keeps the truncation away from the new surface, hence the radius on
+    top of the one plane. Smoothing off (either factor zero) leaves the
+    single plane, which is the whole requirement.
+    """
+    radii = np.ceil(np.maximum(np.asarray(filt_stdev, dtype=float)
+                               * np.asarray(filt_rfact, dtype=float), 0.0))
+    return [1 + int(r) for r in radii]
+
+
 def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
                              filt_stdev: "list[float]",
                              filt_rfact: "list[float]",
                              label: Optional[int] = None,
+                             pad: Optional[int] = None,
                              ) -> vtk.vtkPolyData:
     """Signed-distance marching cubes + smoothing; no preprocessing.
 
     When *label* is given, only that label value is meshed. Otherwise
     all voxels > 0 form the surface (legacy binary behaviour).
+
+    The mask is padded with background first, so a label touching the
+    volume border is still closed — see ``border_padding`` for how much
+    and why. *pad* overrides that count on every axis; 0 disables it and
+    meshes the mask as stored. Padding shifts the origin with the voxels,
+    so the surface lands where it did before.
     """
     if img is None:
         raise RuntimeError("No segmentation loaded.")
 
     binary = label_mask_image(img, label) if label is not None \
         else binary_mask_image(img)
+    widths = ([int(pad)] * 3 if pad is not None
+              else border_padding(filt_stdev, filt_rfact))
+    if any(w > 0 for w in widths):
+        binary = sitk.ConstantPad(binary, widths, widths, 0)
     vimg = sitk_to_vtk_image(binary)
 
     outside_dist = vtk.vtkImageEuclideanDistance()
@@ -398,6 +437,6 @@ __all__ = [
     "restore_orientation",
     "negate_xy_inplace", "define_image_from_mesh", "vtk_image_to_sitk",
     "sitk_to_vtk_image", "voxelise_polydata", "binary_mask_image",
-    "label_mask_image", "sync_sitk_from_array", "segmentation_to_polydata",
-    "relabel_halfspace",
+    "label_mask_image", "sync_sitk_from_array", "border_padding",
+    "segmentation_to_polydata", "relabel_halfspace",
 ]
