@@ -14,21 +14,43 @@ from typing import Optional
 
 import numpy as np
 import pyvista as pv
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
+
+_BOX_PADDING_PX = 6        # left/right padding in _BOX_STYLE
+_BOX_BORDER_PX = 1         # border width in _BOX_STYLE
+
+#: Widest string a box ever has to show. Values are formatted ``%.4g``,
+#: whose longest form is a negative number in exponent notation
+#: ("-1.234e-05", 10 characters); an eight-digit node or element count is
+#: the same length. Sizing the boxes to fit it is what stops the numbers
+#: being elided when the side panel is at its minimum width.
+_WIDEST_VALUE = "-1.234e-05"
 
 _BOX_STYLE = (
     "QLabel { background-color: white; color: black; "
-    "border: 1px solid #888; padding: 2px 6px; "
-    "font-family: monospace; }"
+    f"border: {_BOX_BORDER_PX}px solid #888; padding: 2px {_BOX_PADDING_PX}px; "
+    "}"
 )
 
 
-def _box(min_width: int = 50) -> QtWidgets.QLabel:
+def _box() -> QtWidgets.QLabel:
     lbl = QtWidgets.QLabel("—")
     lbl.setAlignment(QtCore.Qt.AlignCenter)
     lbl.setStyleSheet(_BOX_STYLE)
-    lbl.setMinimumWidth(min_width)
+    # Monospace set on the widget rather than in the stylesheet: the
+    # minimum width below is measured with QFontMetrics, which reads the
+    # widget font, so a family set only in CSS would be measured against
+    # the wrong glyphs. The style hints ride along so that a desktop
+    # without the named fixed font still substitutes a fixed-pitch one.
+    font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+    font.setStyleHint(QtGui.QFont.Monospace, QtGui.QFont.PreferMatch)
+    font.setFixedPitch(True)
+    lbl.setFont(font)
+    lbl.setMinimumWidth(
+        QtGui.QFontMetrics(font).horizontalAdvance(_WIDEST_VALUE)
+        + 2 * (_BOX_PADDING_PX + _BOX_BORDER_PX)
+    )
     lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
     return lbl
 
@@ -53,28 +75,28 @@ class MeshInfoWidget(QtWidgets.QWidget):
 
         # Row 0: Npt: <box>  nElem <box>  (nElem label in col 2, box col 3)
         grid.addWidget(QtWidgets.QLabel("Npt:"), 0, 0)
-        self.box_nodes = _box(50)
+        self.box_nodes = _box()
         grid.addWidget(self.box_nodes, 0, 1)
         lbl_nelem = QtWidgets.QLabel("nElem")
         lbl_nelem.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         grid.addWidget(lbl_nelem, 0, 2)
-        self.box_cells = _box(50)
+        self.box_cells = _box()
         grid.addWidget(self.box_cells, 0, 3)
 
         # Row 1: Bounding box: <dx> <dy> <dz>
         grid.addWidget(QtWidgets.QLabel("Bounding box:"), 1, 0)
-        self.box_bbox_x = _box(50)
-        self.box_bbox_y = _box(50)
-        self.box_bbox_z = _box(50)
+        self.box_bbox_x = _box()
+        self.box_bbox_y = _box()
+        self.box_bbox_z = _box()
         grid.addWidget(self.box_bbox_x, 1, 1)
         grid.addWidget(self.box_bbox_y, 1, 2)
         grid.addWidget(self.box_bbox_z, 1, 3)
 
         # Row 2: edge len(min,mean,max) <emin> <emean> <emax>
         grid.addWidget(QtWidgets.QLabel("edge len(min,mean,max)"), 2, 0)
-        self.box_emin = _box(50)
-        self.box_emean = _box(50)
-        self.box_emax = _box(50)
+        self.box_emin = _box()
+        self.box_emean = _box()
+        self.box_emax = _box()
         grid.addWidget(self.box_emin, 2, 1)
         grid.addWidget(self.box_emean, 2, 2)
         grid.addWidget(self.box_emax, 2, 3)
