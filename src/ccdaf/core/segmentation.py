@@ -16,6 +16,15 @@ which reverses triangle winding — the sign of any downstream signed
 distance follows the winding, not the stored ``Normals`` array. Callers
 comparing surfaces (electrode displacement, field transfer) must
 normalise winding first; see ``docs/eam-real-data-verification.md``.
+
+Direction note: the segmentation view places every slice, crosshair and
+brush stroke at ``origin + index * spacing``, i.e. it assumes the image's
+direction matrix is the identity. Marching cubes, in contrast, honours
+the direction matrix, so a volume stored in any other orientation would
+render its surface and its slice planes in two different places.
+``reorient_to_lps`` removes the discrepancy at load time by re-indexing
+the volume into LPS, which is a lossless axis permutation and flip;
+``restore_orientation`` puts it back for saving.
 """
 
 from __future__ import annotations
@@ -44,6 +53,65 @@ def negate_xy_inplace(poly: vtk.vtkPolyData) -> None:
     new_pts = vtk.vtkPoints()
     new_pts.SetData(new_data)
     poly.SetPoints(new_pts)
+
+
+#: Orientation the segmentation view works in. ITK reports direction
+#: cosines in LPS, so an LPS-coded volume is exactly the identity.
+LPS = "LPS"
+
+
+def orientation_code(img: sitk.Image) -> str:
+    """The three-letter DICOM orientation code of *img* (e.g. ``"RAS"``).
+
+    The code names the anatomical direction each voxel axis grows
+    towards, so ``"LPS"`` is the identity direction matrix.
+    """
+    return sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(
+        img.GetDirection()
+    )
+
+
+def is_axis_aligned(img: sitk.Image, tol: float = 1e-6) -> bool:
+    """True when every voxel axis runs along a world axis.
+
+    Only such a volume can be re-indexed into LPS losslessly: an oblique
+    acquisition keeps its residual rotation through ``reorient_to_lps``,
+    because that is an axis permutation, not a resampling.
+    """
+    d = np.abs(np.asarray(img.GetDirection(), dtype=float).reshape(3, 3))
+    # A signed permutation matrix has exactly one 1 per row and column.
+    return bool(np.all(np.abs(np.sort(d, axis=1) - [0.0, 0.0, 1.0]) <= tol)
+                and np.all(np.abs(d.sum(axis=0) - 1.0) <= tol))
+
+
+def reorient_to_lps(img: sitk.Image) -> Tuple[sitk.Image, str]:
+    """Re-index *img* into LPS; return it with its original code.
+
+    A pure permutation and flip of the voxel array with a matching
+    origin, so every label keeps its world position — the surface built
+    by marching cubes is unchanged. What does change is that
+    ``origin + index * spacing`` becomes true, which is the placement
+    rule the whole segmentation view is built on.
+
+    The returned code is what ``restore_orientation`` needs to write the
+    volume back the way it arrived. An already-LPS image is returned
+    untouched.
+    """
+    code = orientation_code(img)
+    if code == LPS:
+        return img, code
+    return sitk.DICOMOrient(img, LPS), code
+
+
+def restore_orientation(img: sitk.Image, code: Optional[str]) -> sitk.Image:
+    """Re-index *img* back into *code*, undoing ``reorient_to_lps``.
+
+    A falsy or already-matching *code* is a no-op, so callers can pass
+    whatever they recorded at load time without checking.
+    """
+    if not code or code == orientation_code(img):
+        return img
+    return sitk.DICOMOrient(img, code)
 
 
 def define_image_from_mesh(poly: vtk.vtkPolyData,
@@ -326,6 +394,8 @@ def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
 
 
 __all__ = [
+    "LPS", "orientation_code", "is_axis_aligned", "reorient_to_lps",
+    "restore_orientation",
     "negate_xy_inplace", "define_image_from_mesh", "vtk_image_to_sitk",
     "sitk_to_vtk_image", "voxelise_polydata", "binary_mask_image",
     "label_mask_image", "sync_sitk_from_array", "segmentation_to_polydata",

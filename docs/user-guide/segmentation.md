@@ -7,6 +7,11 @@ The segmentation workflow builds a surface from a **label image** (`.nii` /
 Open it from **Segmentation → Load**; export the result with
 **Segmentation → Export to VTK…**.
 
+A label image stored in an orientation other than `LPS` is re-indexed on load
+so the slices, the brush and the 3D preview agree on where each voxel is; the
+status bar says so, and saving writes the original orientation back. See
+[Segmentation images](../file-formats.md#segmentation-images-nii-niigz).
+
 <figure markdown="span">
   ![The 2×2 segmentation view](../assets/screenshots/segmentation-view.png)
   <figcaption>The segmentation view: three orthogonal slices plus a 3D preview.</figcaption>
