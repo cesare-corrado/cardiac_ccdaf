@@ -45,6 +45,23 @@ load and says so in the status bar. If they still disagree, check for the
 need resampling to an axis-aligned grid. See
 [File formats](file-formats.md#segmentation-images-nii-niigz).
 
+## A tool switched itself off when I started another one
+
+Seed selection, **selection mode**, **snake tag** and the **PV contour clip**
+all drive the same surface picker, and only one may hold it. Starting any of
+them stops whichever had it and says so in the status bar — the panel's
+controls go back to "off" so nothing looks live while another tool has the
+mouse.
+
+Nothing is lost when this happens. Seed selection is *paused*, not reset:
+clicking **Start seed selection** again carries on from the seeds you had,
+at the next one in the order — the status bar names it. (Starting over is what
+**Reset seeds** is for; after a reset, **Start** begins from the first seed as
+usual.) A pending triangle selection survives too, and tags are untouched.
+
+Only a **PV contour in progress is abandoned**, since the clip needs its picks
+to mean anything; restart it with **Start PV contour**.
+
 ## `X` does nothing
 
 `X` is owned by one tool at a time. For clipping, tick **Clipping active**; for

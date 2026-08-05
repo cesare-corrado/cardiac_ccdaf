@@ -180,6 +180,9 @@ class CCDAF(QtWidgets.QMainWindow):
         # (the type shown in the dropdown), or None if that type is unstarted.
         self._selectors: Dict[str, SeedSelector] = {}
         self._seed_type: str = DEFAULT_PROFILE.type_id
+        # Seed sets another tool took the picker from — "Start seed selection"
+        # resumes these rather than wiping them; see _action_start_seeds.
+        self._seed_paused: set = set()
         self.selector: Optional[SeedSelector] = None
         self.tagger: Optional[RegionTagger] = None
         self.editor: Optional[ManualEditor] = None
@@ -707,6 +710,7 @@ class CCDAF(QtWidgets.QMainWindow):
             except Exception:
                 pass
         self._selectors.clear()
+        self._seed_paused.clear()   # the selectors those ids named are gone
         self.selector = None
         if self.editor is not None:
             try:
@@ -721,6 +725,92 @@ class CCDAF(QtWidgets.QMainWindow):
         self.tagging_widget.set_seeds_complete(False)
         self.manual_widget.reset_state()
         self.clipping_widget.reset_state()
+
+    # ------------------------------------------------------------------
+    # The shared surface picker
+    # ------------------------------------------------------------------
+    #: Tools that drive the surface picker, by the name ``_release_picker``
+    #: knows them under. PyVista keeps **one** picker per render window, so
+    #: only one of these may hold it at a time.
+    PICKER_TOOLS = ("seeds", "selection", "snake", "clip")
+
+    def _release_picker(self, *, keep: Optional[str] = None) -> list:
+        """Take the shared picker off whichever tool holds it.
+
+        Seed selection, the two manual-correction modes and the PV contour
+        clip all call ``enable_point_picking`` on the same plotter, and
+        PyVista raises ``PyVistaPickingError`` when a second one grabs it —
+        which aborted the app, because an exception out of a Qt slot does not
+        unwind. Every route that takes the picker goes through here first.
+
+        Stopping the losing tool is not enough: its panel would still show a
+        live mode while another tool drove the mouse, so the controls are put
+        back in step too. Nothing destructive happens — seeds and tags are
+        kept, and the abandoned tool can simply be started again.
+
+        *keep* names the tool about to take the picker, so a caller is never
+        made to fight itself. Returns the names of the tools stopped, for the
+        status line.
+        """
+        stopped = []
+
+        if keep != "seeds":
+            for type_id, sel in self._selectors.items():
+                if not sel.is_active:
+                    continue
+                try:
+                    sel.stop()          # keeps every seed already picked
+                except Exception:
+                    pass
+                # Remember it was interrupted rather than finished, so
+                # "Start seed selection" resumes it instead of starting over.
+                self._seed_paused.add(type_id)
+                stopped.append("seed selection")
+            if stopped:
+                self.seed_widget.set_prompt(
+                    "Seed selection paused — click 'Start seed selection' to "
+                    "carry on from the seeds already picked.")
+
+        if self.editor is not None:
+            if keep != "snake" and self.editor.snake_active:
+                self.manual_widget.uncheck_snake()   # blocks the toggle signal
+                try:
+                    self.editor.stop_snake()
+                except Exception:
+                    pass
+                stopped.append("snake tagging")
+            if keep != "selection" and self.editor.state is EditState.SELECTING:
+                self.manual_widget.uncheck_edit_toggle()
+                try:
+                    self.editor.deactivate()         # pending selection survives
+                except Exception:
+                    pass
+                stopped.append("selection mode")
+
+        if (keep != "clip" and self.clipper is not None
+                and self.clipper.mode is not ClipMode.NONE):
+            try:
+                self.clipper.cancel()
+            except Exception:
+                pass
+            self.clipping_widget.clear_in_flight()
+            stopped.append("the clip in progress")
+
+        # Whatever the tools believe, leave the render window with no picker:
+        # a tool torn down by a plotter rebuild can still hold it.
+        try:
+            self.plotter.disable_picking()
+        except Exception:
+            pass
+        return stopped
+
+    def _take_picker(self, tool: str) -> None:
+        """Release the picker for *tool* and say what that interrupted."""
+        stopped = self._release_picker(keep=tool)
+        if stopped:
+            self.statusBar().showMessage(
+                f"Stopped {', '.join(stopped)} — one tool drives the surface "
+                "picker at a time.")
 
     @staticmethod
     def _section(text: str) -> QtWidgets.QLabel:
@@ -1485,6 +1575,7 @@ class CCDAF(QtWidgets.QMainWindow):
             # Resume picking on a set that was left unfinished, so switching
             # back to it continues rather than stranding the placed points.
             if not self.selector.is_complete and self.loader.mesh is not None:
+                self._take_picker("seeds")
                 self.selector.resume()
         self._sync_seed_panel()
 
@@ -1528,6 +1619,27 @@ class CCDAF(QtWidgets.QMainWindow):
 
         profile = self._current_profile()
         self._focus_3d()
+        self._take_picker("seeds")
+
+        # A set another tool interrupted carries on where it stopped —
+        # ``stop()`` kept its seeds, and losing them to a tool switch the user
+        # never asked for would be its own bug. Starting over is what **Reset
+        # seeds** is for. Anything else (no set, a finished one, one the user
+        # reset) begins from a clean selector, as it always has.
+        resumed = self._selectors.get(profile.type_id)
+        if (profile.type_id in self._seed_paused
+                and resumed is not None and not resumed.is_complete):
+            self._seed_paused.discard(profile.type_id)
+            self.selector = resumed
+            self.selector.resume()
+            self._sync_seed_panel()
+            done = len(self.selector.seeds)
+            self.statusBar().showMessage(
+                f"{profile.label} selection resumed — {done} seed(s) kept, "
+                f"next is {self.selector.next_name()}.")
+            return
+
+        self._seed_paused.discard(profile.type_id)
         self.selector = self._new_selector(profile)
         self._selectors[profile.type_id] = self.selector
         self.selector.start()
@@ -1542,6 +1654,7 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         removed = self.selector.undo_last()
         if removed is not None and not self.selector.is_active:
+            self._take_picker("seeds")
             self.selector.resume()
         if self._current_profile().tags:
             self.tagging_widget.set_seeds_complete(False)
@@ -1549,6 +1662,10 @@ class CCDAF(QtWidgets.QMainWindow):
     def _action_reset_seeds(self) -> None:
         if self.selector is None:
             return
+        self._take_picker("seeds")
+        # An explicit reset is the user asking to start over — a pause noted
+        # earlier must not resurrect the seeds they just discarded.
+        self._seed_paused.discard(self._current_profile().type_id)
         self.selector.reset()
         self.selector.start()
         if self._current_profile().tags:
@@ -1656,6 +1773,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.selector = sel
         self.seed_widget.set_undo_enabled(True)
         if problems:
+            self._take_picker("seeds")
             self.selector.resume()
             QtWidgets.QMessageBox.warning(
                 self, "Seeds partially loaded",
@@ -1732,11 +1850,9 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._focus_3d()
         if on:
-            # Selection and snake both drive the surface picker — only one at
-            # a time. Turning selection on abandons any snake in progress.
-            if self.editor.snake_active:
-                self.manual_widget.uncheck_snake()
-                self.editor.stop_snake()
+            # Selection shares the surface picker with the snake, seed
+            # selection and the clip — only one may hold it.
+            self._take_picker("selection")
             self.editor.activate()
         else:
             self.editor.deactivate()
@@ -1746,10 +1862,9 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._focus_3d()
         if on:
-            # Mutually exclusive with cell-selection mode.
-            if self.editor.state is EditState.SELECTING:
-                self.manual_widget.uncheck_edit_toggle()
-                self.editor.deactivate()
+            # Mutually exclusive with selection mode, seed selection and the
+            # clip — all four drive the one shared picker.
+            self._take_picker("snake")
             self.editor.start_snake(self.tagger)
             self.statusBar().showMessage(
                 "Snake: press X to drop geodesic points, then Commit snake.")
@@ -1869,6 +1984,7 @@ class CCDAF(QtWidgets.QMainWindow):
             )
             return
         self._focus_3d()
+        self._take_picker("clip")
         self.clipper.start_pv_contour(pv_label=pv_label)
         self.clipping_widget.set_pv_undo_point_enabled(True)
         self.clipping_widget.set_pv_finish_enabled(True)
@@ -2820,11 +2936,10 @@ class CCDAF(QtWidgets.QMainWindow):
             self.plotter.subplot(*self._view.roles[axis])
             self._slice_renderers[axis] = self.plotter.renderer
 
-        # Reset any previously enabled picker (safe even if none).
-        try:
-            self.plotter.disable_picking()
-        except Exception:
-            pass
+        # Take the picker off any mesh-side tool still holding it. Entering
+        # segmentation mode tears those down already, so this is normally a
+        # no-op — it keeps every grab of the picker going through one place.
+        self._release_picker()
 
         self.plotter.enable_point_picking(
             callback=self._on_slice_pick_dispatch,

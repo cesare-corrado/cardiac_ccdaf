@@ -388,6 +388,12 @@ class ClippingTool:
             self._mode = ClipMode.NONE
             return
 
+        # Release first — one picker per render window, and the seed selector
+        # and manual editor grab the same one; see ``CCDAF._release_picker``.
+        try:
+            self.plotter.disable_picking()
+        except Exception:
+            pass
         self.plotter.enable_point_picking(
             callback=self._on_contour_pick,
             picker="hardware",               # z-buffer pick of the VISIBLE surface

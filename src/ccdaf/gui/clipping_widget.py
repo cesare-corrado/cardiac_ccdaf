@@ -144,6 +144,17 @@ class ClippingWidget(QtWidgets.QGroupBox):
         self._accepted = True
         self._sync_start_buttons()
 
+    def clear_in_flight(self) -> None:
+        """Put the controls back to "no clip in progress".
+
+        Used when another tool takes the shared picker away mid-clip: the
+        clip is abandoned, so the buttons that only mean something during one
+        must go with it. Activation and the accepted-tagging state are the
+        user's, and survive — only the in-flight controls are cleared."""
+        self.btn_pv_undo_point.setEnabled(False)
+        self.btn_pv_finish.setEnabled(False)
+        self.btn_apply.setEnabled(False)
+
     def reset_state(self) -> None:
         """Disable all controls — used by teardown after plotter rebuild.
 
