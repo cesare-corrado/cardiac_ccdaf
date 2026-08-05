@@ -363,6 +363,13 @@ class ManualEditor:
         click_pos = interactor.GetEventPosition()
         picker = self.plotter.picker
         picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
+        # The hardware picker reports a world position even when the ray hits
+        # nothing — a point on the focal plane — and the nearest vertex to that
+        # is an arbitrary point of the surface, so a miss would drop an anchor
+        # somewhere the user never clicked. It holds no dataset on a miss,
+        # which is what pyvista's own observer tests; (0,0,0) never catches it.
+        if hasattr(picker, "GetDataSet") and picker.GetDataSet() is None:
+            return 0
         picked = picker.GetPickPosition()
         if picked == (0.0, 0.0, 0.0):
             return 0
