@@ -57,3 +57,21 @@ completed.
 
 Label images are read/written with SimpleITK. Surfaces are reconstructed with
 marching cubes; see [Segmentation](user-guide/segmentation.md).
+
+**Orientation.** A NIfTI header records which anatomical direction each voxel
+axis grows towards — `LPS`, `RAS`, `LAS` and so on. CCDAF works internally in
+`LPS`, so a volume in any other orientation is **re-indexed on load**: the voxel
+array is permuted and flipped, and the origin moved to match. Nothing moves in
+world coordinates — every label keeps its physical position, and so does the
+surface built from it — but it lets the slice views, the brush and the plane
+gizmo place voxels correctly. The status bar names the change, e.g.
+*"Loaded PVeinsLabelled.nii (reoriented RAS → LPS)"*.
+
+**Saving** writes the orientation the file arrived in, so a `RAS` volume loaded
+and edited is saved back as `RAS` and the rest of your pipeline sees the layout
+it expects.
+
+Volumes whose voxel axes are **oblique** to the world axes cannot be squared up
+by re-indexing — that would need resampling. CCDAF warns on load and the slice
+views stay approximate; resample such a volume to an axis-aligned grid before
+editing it.

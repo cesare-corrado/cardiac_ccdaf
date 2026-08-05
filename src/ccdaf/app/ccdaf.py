@@ -90,7 +90,8 @@ from ccdaf.core.eam_loader import (
 )
 from ccdaf.core.field_transfer import guard_distance, transfer_fields
 from ccdaf.core.segmentation import (
-    binary_mask_image, negate_xy_inplace, relabel_halfspace,
+    LPS, binary_mask_image, is_axis_aligned, negate_xy_inplace,
+    relabel_halfspace, reorient_to_lps, restore_orientation,
     segmentation_to_polydata, sync_sitk_from_array, voxelise_polydata,
 )
 from ccdaf.core.seed_io import load_seeds, save_seeds
@@ -202,6 +203,9 @@ class CCDAF(QtWidgets.QMainWindow):
         self._seg_array: Optional[np.ndarray] = None  # shape (Z, Y, X), sitk convention
         self._seg_origin: Tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._seg_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+        # Orientation the volume arrived in, so saving can write it back
+        # that way; the view itself always works on the LPS re-indexing.
+        self._seg_orientation: str = LPS
         self._seg_undo_stack: list = []  # up to 2 snapshots of _seg_array
         self._seg_plane_widget = None                       # plane-relabel gizmo
         self._seg_plane_normal: Optional[tuple] = None
@@ -244,6 +248,7 @@ class CCDAF(QtWidgets.QMainWindow):
                     self._set_segmentation(img)
                     self.statusBar().showMessage(
                         f"Loaded segmentation {Path(initial_data).name}"
+                        f"{self._seg_orientation_note()}"
                     )
                 except Exception as exc:
                     QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
@@ -2219,7 +2224,8 @@ class CCDAF(QtWidgets.QMainWindow):
         # carried onto the mesh it converts to — whatever is loaded is
         # unrelated geometry, and matching against it would be nonsense.
         self._seg_source = None
-        self.statusBar().showMessage(f"Loaded segmentation {Path(fn).name}")
+        self.statusBar().showMessage(
+            f"Loaded segmentation {Path(fn).name}{self._seg_orientation_note()}")
 
     def _action_seg_save(self) -> None:
         if self._seg_array is None:
@@ -2231,12 +2237,31 @@ class CCDAF(QtWidgets.QMainWindow):
         if not fn:
             return
         self.recent_folder = Path(fn).resolve().parent
+        self._write_segmentation(fn)
+
+    def _seg_orientation_note(self) -> str:
+        """Status-bar suffix naming the re-indexing applied on load."""
+        if self._seg_orientation == LPS:
+            return ""
+        return f" (reoriented {self._seg_orientation} → {LPS})"
+
+    def _write_segmentation(self, fn: str) -> bool:
+        """Write the active segmentation to *fn*; True when it succeeded.
+
+        The volume is put back into the orientation it was loaded in, so
+        the file that comes out has the same voxel layout as the one that
+        went in — the LPS re-indexing is an internal detail of the view.
+        """
         try:
             self._sync_sitk_from_array()
-            sitk.WriteImage(self._seg_sitk, fn)
-            self.statusBar().showMessage(f"Saved segmentation to {fn}")
+            sitk.WriteImage(
+                restore_orientation(self._seg_sitk, self._seg_orientation), fn)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
+            return False
+        self.statusBar().showMessage(
+            f"Saved segmentation to {fn}{self._seg_orientation_note()}")
+        return True
 
     def _action_seg_from_mesh(self) -> None:
         if self.loader.mesh is None:
@@ -2289,12 +2314,7 @@ class CCDAF(QtWidgets.QMainWindow):
             )
             if fn:
                 self.recent_folder = Path(fn).resolve().parent
-                try:
-                    self._sync_sitk_from_array()
-                    sitk.WriteImage(self._seg_sitk, fn)
-                    self.statusBar().showMessage(f"Saved segmentation to {fn}")
-                except Exception as exc:
-                    QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
+                if not self._write_segmentation(fn):
                     return
 
         # Convert segmentation to VTK polydata via marching cubes.
@@ -2449,7 +2469,28 @@ class CCDAF(QtWidgets.QMainWindow):
     # Segmentation — state synchronisation
     # ==================================================================
     def _set_segmentation(self, img: sitk.Image) -> None:
-        """Adopt a new SITK image as the active segmentation."""
+        """Adopt a new SITK image as the active segmentation.
+
+        The volume is re-indexed into LPS first. Slices, crosshairs, the
+        brush and the plane gizmo are all placed at
+        ``origin + index * spacing``, which is only where the voxel
+        really is when the direction matrix is the identity; marching
+        cubes, meanwhile, always honours the direction. Without this a
+        volume stored in any other orientation draws its 3D surface and
+        its slice planes in two different places. Saving writes the
+        original orientation back, so the round trip is invisible.
+        """
+        img, self._seg_orientation = reorient_to_lps(img)
+        if not is_axis_aligned(img):
+            # Re-indexing permutes axes; it cannot rotate them. An oblique
+            # volume keeps its residual rotation, so the slice planes stay
+            # approximate — squaring them up would mean resampling.
+            QtWidgets.QMessageBox.warning(
+                self, "Oblique segmentation",
+                "This volume's voxel axes are not aligned with the world "
+                "axes. The slice views and the 3D surface may not line up "
+                "exactly. Resample it to an axis-aligned grid to edit it "
+                "accurately.")
         self._seg_sitk = img
         self._seg_array = sitk.GetArrayFromImage(img).astype(np.int32)  # (Z, Y, X)
         self._seg_origin = tuple(img.GetOrigin())
@@ -2488,6 +2529,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self.seg_widget.btn_plane.setChecked(False)
         self._seg_sitk = None
         self._seg_array = None
+        self._seg_orientation = LPS
         self._seg_undo_stack.clear()
         self.seg_widget.set_undo_enabled(False)
         self._slice_actors = {}
