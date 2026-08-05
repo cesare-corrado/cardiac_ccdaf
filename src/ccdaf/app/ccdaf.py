@@ -226,6 +226,10 @@ class CCDAF(QtWidgets.QMainWindow):
         # its name. Written only by _build_plotter.
         self._view: ViewSpec = VIEWS["general"]
         self._splitter: Optional[QtWidgets.QSplitter] = None
+        # Width the side panel needs for its widest section; measured in
+        # _build_ui once every section exists.
+        self._side_scroll: Optional[QtWidgets.QScrollArea] = None
+        self._side_width: int = 0
         self.plotter: Optional[QtInteractor] = None
         self._seg_3d_actors: list = []
         self._seg_vtk_actor = None
@@ -377,9 +381,13 @@ class CCDAF(QtWidgets.QMainWindow):
 
         side_scroll = QtWidgets.QScrollArea()
         side_scroll.setWidgetResizable(True)
-        side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        # As-needed rather than always-off: the panel is sized to its content
+        # below, so the bar normally never appears — but on a display too
+        # narrow for that width it is what keeps the right-hand column of
+        # every section reachable instead of silently cut off.
+        side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         side_scroll.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        side_scroll.setMinimumWidth(280)
+        self._side_scroll = side_scroll
 
         side = QtWidgets.QWidget()
         side_scroll.setWidget(side)
@@ -477,10 +485,72 @@ class CCDAF(QtWidgets.QMainWindow):
 
         v.addStretch(1)
 
+        # Every section exists now, so what the panel needs is measurable.
+        self._side_width = self._measure_side_width(side_scroll, v)
+        side_scroll.setMinimumWidth(self._side_width)
+
         # --- Plotter — start in the general (single 3D) view -----------
         self._build_plotter("general")
 
+        # The window must be able to hold both panes: a minimum narrower
+        # than panel + view is one Qt cannot honour, and the panel is what
+        # loses the argument. Widen the default too if it no longer fits.
+        self._apply_size_constraints()
+
         self.statusBar().showMessage("Ready.")
+
+    # ------------------------------------------------------------------
+    def _measure_side_width(self,
+                            side_scroll: QtWidgets.QScrollArea,
+                            side_layout: QtWidgets.QVBoxLayout) -> int:
+        """Width the side panel needs to show every section in full.
+
+        Measured, not hard-coded: a fixed number goes stale the moment a
+        widget gains a column, and is wrong anyway on a different font or
+        DPI. The widest section decides, because the panel is a single
+        column; sections hidden at startup (segmentation, visualisation)
+        are measured too, so appearing later never squeezes the panel.
+
+        The result is capped at half the available screen so a small
+        display keeps room for the 3D view — past that point the
+        as-needed horizontal scroll bar takes over.
+        """
+        margins = side_layout.contentsMargins()
+        content = max(
+            (frame.minimumSizeHint().width() for frame in self._sections.values()),
+            default=0,
+        )
+        chrome = (margins.left() + margins.right()
+                  + 2 * side_scroll.frameWidth()
+                  + side_scroll.verticalScrollBar().sizeHint().width())
+        needed = content + chrome
+
+        screen = QtWidgets.QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        if avail is not None:
+            needed = min(needed, avail.width() // 2)
+        return int(needed)
+
+    # ------------------------------------------------------------------
+    def _apply_size_constraints(self) -> None:
+        """Reconcile the window's minimum and default size with the panes.
+
+        Called once the side panel and the plotter both know their widths.
+        Both are clamped to the available screen, so a display smaller than
+        the sum still gets a usable window (the panel scrolls).
+        """
+        view_min = 480 if self.plotter is None else self.plotter.interactor.minimumWidth()
+        # Splitter handle plus the central layout's 4 px margins.
+        chrome = 8 + self._splitter.handleWidth()
+        min_w = self._side_width + view_min + chrome
+
+        screen = QtWidgets.QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        if avail is not None:
+            min_w = min(min_w, avail.width())
+        self.setMinimumSize(max(640, int(min_w)), self.minimumHeight())
+        if self.width() < self.minimumWidth():
+            self.resize(self.minimumWidth(), self.height())
 
     # ------------------------------------------------------------------
     # Plotter (re)construction
@@ -493,6 +563,11 @@ class CCDAF(QtWidgets.QMainWindow):
         actor refs are cleared so callers must re-render after switching.
         """
         spec = VIEWS[view]
+        # Whatever the panel is currently at — the measured width on the
+        # first build, or wherever the user dragged the handle since. A
+        # view switch replaces the plotter, not the user's layout.
+        sizes = self._splitter.sizes()
+        side_w = sizes[0] if sizes else self._side_width
         # Tear down any previous plotter.
         if self.plotter is not None:
             try:
@@ -515,7 +590,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self._splitter.addWidget(self.plotter.interactor)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
-        self._splitter.setSizes([320, 1000])
+        rest = max(self._splitter.width() - side_w, self.plotter.interactor.minimumWidth())
+        self._splitter.setSizes([side_w, rest])
 
         # The X key has one owner: the app. PV clipping and manual correction
         # both want it, and when each bound it itself, whoever came last won —
