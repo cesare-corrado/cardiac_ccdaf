@@ -43,8 +43,12 @@ mkdocs serve            # live preview
 
 ## Git workflow
 
-- Branch off `develop` (`feature/<short-name>`); never commit directly to
-  `develop` or `main`.
+- Branch off `develop`; never commit directly to `develop` or `main`. Name the
+  branch for what the work is: `feature/<short-name>` for new capability,
+  `hotfix/<short-name>` for a fix, `release/<version>` for a version bump.
 - Merge into `develop` with `--no-ff`; promote `develop → main` with `--no-ff`
   on release, keeping them in sync.
-- Releases are tagged `vMAJOR.MINOR.PATCH` (e.g. `v1.0.0`).
+- Releases are tagged `vMAJOR.MINOR.PATCH` (e.g. `v1.1.0`), annotated, on the
+  merge commit on `main`. The version literal lives in `pyproject.toml`,
+  `src/ccdaf/__init__.py` and the `README.md` heading; the Help → About dialog
+  reads `__version__`, so it follows on its own.
