@@ -725,6 +725,23 @@ class CCDAF(QtWidgets.QMainWindow):
             self._reposition_update3d_overlay()
         return super().eventFilter(obj, event)
 
+    def _new_manual_editor(self, mesh: pv.PolyData) -> ManualEditor:
+        """Build a ManualEditor already on the label the panel is showing.
+
+        The panel pushes a label down only when the combo box *changes*, so an
+        editor that picked its own default started out disagreeing with the
+        control the user reads: every pick committed as LSPV until they cycled
+        the combo box. Every rebuild goes through here so the two can't drift.
+        """
+        return ManualEditor(
+            mesh=mesh,
+            plotter=self.plotter,
+            on_render=self._render_mesh,
+            on_state=lambda s: None,
+            on_commit=self._on_edit_committed,
+            active_label=self.manual_widget.current_label(),
+        )
+
     def _build_mesh_tools(self) -> None:
         """(Re)bind the mesh-side tools to whichever plotter is current.
 
@@ -742,13 +759,7 @@ class CCDAF(QtWidgets.QMainWindow):
             plotter=self.plotter,
             on_status=self.statusBar().showMessage,
         )
-        self.editor = ManualEditor(
-            mesh=self.loader.mesh,
-            plotter=self.plotter,
-            on_render=self._render_mesh,
-            on_state=lambda s: None,
-            on_commit=self._on_edit_committed,
-        )
+        self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
 
@@ -994,13 +1005,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Loaded {source_name}")
 
         # Manual editor live from the start (see the X-key routing).
-        self.editor = ManualEditor(
-            mesh=self.loader.mesh,
-            plotter=self.plotter,
-            on_render=self._render_mesh,
-            on_state=lambda s: None,
-            on_commit=self._on_edit_committed,
-        )
+        self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
 
@@ -1303,13 +1308,7 @@ class CCDAF(QtWidgets.QMainWindow):
             plotter=self.plotter,
             on_status=self.statusBar().showMessage,
         )
-        self.editor = ManualEditor(
-            mesh=self.loader.mesh,
-            plotter=self.plotter,
-            on_render=self._render_mesh,
-            on_state=lambda s: None,
-            on_commit=self._on_edit_committed,
-        )
+        self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
         self.seed_widget.set_start_enabled(True)
@@ -1926,6 +1925,11 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._focus_3d()
         if on:
+            # Adopt whatever the combo box shows before the first pick lands:
+            # a backstop against the editor and the panel disagreeing on the
+            # label, which the user can only see once triangles come back the
+            # wrong colour.
+            self.editor.set_active_label(self.manual_widget.current_label())
             # Selection shares the surface picker with the snake, seed
             # selection and the clip — only one may hold it.
             self._take_picker("selection")
@@ -1938,6 +1942,9 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._focus_3d()
         if on:
+            # Same backstop as selection mode — the snake tags with the
+            # active label too.
+            self.editor.set_active_label(self.manual_widget.current_label())
             # Mutually exclusive with selection mode, seed selection and the
             # clip — all four drive the one shared picker.
             self._take_picker("snake")
@@ -1969,7 +1976,9 @@ class CCDAF(QtWidgets.QMainWindow):
     def _action_snake_commit(self) -> None:
         if self.editor is None or self.tagger is None:
             return
-        label = self.manual_widget.current_label()
+        # Report the label the commit actually applies, not the one the combo
+        # box shows — they agree, and the message is what proves it.
+        label = self.editor.active_label
         if self.editor.snake_point_count < 2:
             self.statusBar().showMessage(
                 "Snake: drop at least two points (press X) first.")
@@ -2199,15 +2208,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # correction bound to nothing: tagging enables its buttons regardless,
         # so the panel looked live and swallowed every click.
         had_editor = self.editor is not None
-        self.editor = ManualEditor(
-            mesh=new_mesh,
-            plotter=self.plotter,
-            on_render=self._render_mesh,
-            on_state=lambda s: None,
-            on_commit=self._on_edit_committed,
-        )
-        # A fresh editor starts on its own default label; follow the panel.
-        self.editor.set_active_label(self.manual_widget.current_label())
+        self.editor = self._new_manual_editor(new_mesh)
         if not had_editor:
             self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)

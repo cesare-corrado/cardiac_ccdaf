@@ -52,7 +52,10 @@ class ManualEditor:
         on_render: Optional[Callable[[], None]] = None,
         on_state: Optional[Callable[[EditState], None]] = None,
         on_commit: Optional[Callable[[], None]] = None,
+        active_label: int = 11,
     ) -> None:
+        if active_label not in ALLOWED_LABELS:
+            raise ValueError(f"label {active_label} is not in {ALLOWED_LABELS}")
         self.mesh = mesh
         self.plotter = plotter
         self.on_render = on_render
@@ -60,7 +63,11 @@ class ManualEditor:
         self.on_commit = on_commit
 
         self._state: EditState = EditState.IDLE
-        self._active_label: int = 11
+        # Seeded by the caller, not assumed: a rebuilt editor that silently
+        # started on 11 while the panel still showed another label tagged
+        # every pick as LSPV until the user changed the combo box, which is
+        # the only thing that pushes a label down here.
+        self._active_label: int = int(active_label)
         self._pending: Set[int] = set()
         self._highlight_actor = None
         self._sphere_actor = None
@@ -116,11 +123,17 @@ class ManualEditor:
         """Clear the undo history (call after auto-tagging overwrites the mesh)."""
         self._undo_stack.clear()
 
+    @property
+    def active_label(self) -> int:
+        """The label a commit will apply — what the panel's combo box shows."""
+        return self._active_label
+
     def set_active_label(self, label: int) -> None:
         if label not in ALLOWED_LABELS:
             raise ValueError(f"label {label} is not in {ALLOWED_LABELS}")
-        if label != self._active_label:
-            self._active_label = label
+        changed = label != self._active_label
+        self._active_label = int(label)
+        if changed:
             self._clear_pending()  # don't let a change of label mix batches
 
     def activate(self) -> None:
