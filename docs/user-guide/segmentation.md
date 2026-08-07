@@ -68,6 +68,38 @@ Then:
     surface; **Update 3D** is a preview and does not. See
     [Concepts → Electrode displacement](../concepts.md#electrode-displacement).
 
+### What the converter cleans up
+
+Marching cubes needs tidying after it, and both paths get it:
+
+- **Near-duplicate points are welded.** Where the isosurface grazes a voxel
+  corner, marching cubes emits a triangle whose two points sit a rounding
+  error apart — a sliver with almost no area. Those slivers are worth removing:
+  a triangle whose area rounds to zero is skipped by VTK when it builds the
+  map it picks against, which shifts every later triangle and makes clicks land
+  somewhere other than the cursor. The weld distance is 1% of the voxel pitch
+  (10 µm on 1 mm voxels), far below any anatomical scale, and the surface stays
+  closed and manifold.
+
+**Export to VTK** additionally drops **stray shells**. Marching cubes returns
+every surface it finds in one mesh, so a speck of stray voxels — a slip of the
+brush, or anything the Gaussian was too weak to dissolve — arrives as a second
+closed surface floating beside the anatomy, and nothing downstream tells the
+two apart: it takes a label, it is pickable, and it is exported. The largest
+surface is kept as the anatomy and the specks are dropped, with the status bar
+reporting what went:
+
+> Dropped 1 stray shell (188 cells, 0.4%).
+
+A component holding **1% or more** of the mesh is not a speck, so it is kept
+rather than deleted, and reported instead:
+
+> The surface is still in 2 separate pieces (48312 cells plus 3020) — too large
+> to be specks; check the segmentation.
+
+**Update 3D** leaves components alone: it is a preview of the volume, so it
+shows you the stray shell rather than hiding it.
+
 Both paths pad the volume with background before meshing, so a label running
 into the edge of the image is still closed there — a scan cropped tight around
 the anatomy no longer comes back with holes on the faces it touched. The

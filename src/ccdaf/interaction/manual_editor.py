@@ -6,12 +6,15 @@ Interactive correction of the ``elemTag`` cell-data array.
 
 Interaction model
 -----------------
-- User picks triangles on the surface (single-cell picking).
+- Pressing **X** over the surface picks the triangle under the mouse
+  (single-cell picking); left-drag only rotates the view.
 - Picked triangles are highlighted in yellow as a *pending* batch.
-- Pressing **X** commits the batch: every pending triangle receives the
+- Pressing **C** commits the batch: every pending triangle receives the
   currently active label, the highlight is cleared, and the mesh is
   recolored live. The key itself is bound by the host, which routes it
-  to :meth:`commit_pending` — clipping shares the key.
+  to :meth:`commit_pending`. Commit has its own key because X is the
+  *pick* key of the snake and the PV contour — one key cannot mean both
+  "add this" and "done adding".
 - Changing the active label clears any pending selection (prevents mixed
   batches being committed by accident).
 
@@ -52,7 +55,10 @@ class ManualEditor:
         on_render: Optional[Callable[[], None]] = None,
         on_state: Optional[Callable[[EditState], None]] = None,
         on_commit: Optional[Callable[[], None]] = None,
+        active_label: int = 11,
     ) -> None:
+        if active_label not in ALLOWED_LABELS:
+            raise ValueError(f"label {active_label} is not in {ALLOWED_LABELS}")
         self.mesh = mesh
         self.plotter = plotter
         self.on_render = on_render
@@ -60,7 +66,11 @@ class ManualEditor:
         self.on_commit = on_commit
 
         self._state: EditState = EditState.IDLE
-        self._active_label: int = 11
+        # Seeded by the caller, not assumed: a rebuilt editor that silently
+        # started on 11 while the panel still showed another label tagged
+        # every pick as LSPV until the user changed the combo box, which is
+        # the only thing that pushes a label down here.
+        self._active_label: int = int(active_label)
         self._pending: Set[int] = set()
         self._highlight_actor = None
         self._sphere_actor = None
@@ -116,11 +126,22 @@ class ManualEditor:
         """Clear the undo history (call after auto-tagging overwrites the mesh)."""
         self._undo_stack.clear()
 
+    @property
+    def pending_count(self) -> int:
+        """Triangles picked but not yet committed."""
+        return len(self._pending)
+
+    @property
+    def active_label(self) -> int:
+        """The label a commit will apply — what the panel's combo box shows."""
+        return self._active_label
+
     def set_active_label(self, label: int) -> None:
         if label not in ALLOWED_LABELS:
             raise ValueError(f"label {label} is not in {ALLOWED_LABELS}")
-        if label != self._active_label:
-            self._active_label = label
+        changed = label != self._active_label
+        self._active_label = int(label)
+        if changed:
             self._clear_pending()  # don't let a change of label mix batches
 
     def activate(self) -> None:
@@ -192,12 +213,16 @@ class ManualEditor:
         """Morphologically smooth one label's boundary, undoably.
 
         ``dilate`` grows the label into its jagged body fringe, ``erode``
-        shaves its spikes; both together run dilate-then-erode (a closing)
-        that de-jags without net growth. Body is not a smoothing target — it
-        is the background, not a region. Snapshots for undo only when it
-        actually changes something. Returns the number of cells changed.
+        shaves its spikes; both together run dilate-then-erode (a closing),
+        which de-jags with little net growth — small and signed either way,
+        not zero, and not idempotent: a second pass still moves a few cells.
+
+        Body smooths like any other label: it has no boundary of its own, so
+        growing it erodes every PV label at once and shrinking it dilates them
+        (see :meth:`RegionTagger.dilate_label`). Snapshots for undo only when
+        it actually changes something. Returns the number of cells changed.
         """
-        if label not in ALLOWED_LABELS or label == BODY_LABEL:
+        if label not in ALLOWED_LABELS:
             return 0
         if not (dilate or erode):
             return 0
@@ -370,19 +395,8 @@ class ManualEditor:
             return 0
         if self._active_label not in ALLOWED_LABELS:
             return 0
-        interactor = self.plotter.iren.interactor
-        click_pos = interactor.GetEventPosition()
-        picker = self.plotter.picker
-        picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
-        # The hardware picker reports a world position even when the ray hits
-        # nothing — a point on the focal plane — and the nearest vertex to that
-        # is an arbitrary point of the surface, so a miss would drop an anchor
-        # somewhere the user never clicked. It holds no dataset on a miss,
-        # which is what pyvista's own observer tests; (0,0,0) never catches it.
-        if hasattr(picker, "GetDataSet") and picker.GetDataSet() is None:
-            return 0
-        picked = picker.GetPickPosition()
-        if picked == (0.0, 0.0, 0.0):
+        picked = self._hardware_pick()
+        if picked is None:
             return 0
         vid = int(self.mesh.find_closest_point(np.asarray(picked, dtype=float)))
         code = self._snake_extend(self._snake_tagger, vid)
@@ -492,6 +506,29 @@ class ManualEditor:
 
 
 
+    def _hardware_pick(self) -> Optional[tuple]:
+        """The visible surface point under the mouse, or ``None`` on a miss.
+
+        Shared by both picking modes — the snake snaps the point to a vertex,
+        cell selection maps it to the containing triangle.
+        """
+        interactor = self.plotter.iren.interactor
+        click_pos = interactor.GetEventPosition()
+        picker = self.plotter.picker
+        picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
+        # The hardware picker reports a world position even when the ray hits
+        # nothing — a point on the focal plane — and the nearest vertex or cell
+        # to that is an arbitrary part of the surface, so a miss would tag
+        # somewhere the user never pointed. The picker holds no dataset on a
+        # miss, which is what pyvista's own observer tests; (0,0,0) never
+        # catches it.
+        if hasattr(picker, "GetDataSet") and picker.GetDataSet() is None:
+            return None
+        picked = picker.GetPickPosition()
+        if picked == (0.0, 0.0, 0.0):
+            return None
+        return picked
+
     def _enable_cell_picking(self) -> None:
         # ``picker="hardware"`` returns the front-most *visible* surface hit
         # point (z-buffer), via the same PyVista pick path used for vertex
@@ -500,31 +537,55 @@ class ManualEditor:
         # which was prone to a DPI/scale offset (picking a nearby wrong cell).
         # Release first — one picker per render window, and the host may have
         # missed a route; see the note in ``start_snake``.
+        #
+        # ``left_clicking=False``: the X key drives the pick, as it does for
+        # both snakes. Selecting on left-click made the mouse ambiguous — every
+        # attempt to rotate the view that ended without much drag tagged a
+        # triangle — and it split the picking gesture across the app, mouse
+        # here and keyboard everywhere else. Left-drag now only rotates.
         try:
             self.plotter.disable_picking()
         except Exception:
             pass
         self.plotter.enable_point_picking(
-            callback=self._on_cell_picked,
+            callback=lambda *a, **k: None,   # X drives picks, not the click
             picker="hardware",
             use_picker=True,
             show_message=False,
             show_point=False,
-            left_clicking=True,
+            left_clicking=False,
             pickable_window=False,
         )
 
-    def _on_cell_picked(self, picked, *args, **kwargs) -> None:
+    def pick_at_cursor(self) -> int:
+        """Add the triangle under the mouse to the pending batch.
+
+        Returns the pending count (>0) when a triangle was added, or ``0`` for
+        a no-op — not in selection mode, or the ray missed the surface.
+        """
+        if self._state is not EditState.SELECTING:
+            return 0
+        picked = self._hardware_pick()
+        if picked is None:
+            return 0
+        return self.add_cell_at_point(picked)
+
+    def add_cell_at_point(self, picked) -> int:
+        """Add the triangle containing world point ``picked`` to the batch.
+
+        ``picked`` is a visible surface hit — a point on a triangle's *face*,
+        not a vertex — so it maps to exactly one triangle through a cell
+        locator (real triangle geometry, no vertex-sharing ambiguity).
+        Returns the pending count, or ``0`` when the point resolves to nothing.
+        """
         if self._state is not EditState.SELECTING or picked is None:
-            return
-        # ``picked`` is the visible surface hit — a point on a triangle's face,
-        # not a vertex. Map it straight to the one containing triangle with a
-        # cell locator (real triangle geometry, so no vertex-sharing ambiguity).
+            return 0
         cell_id = int(self.mesh.find_closest_cell(np.asarray(picked, dtype=float)))
         if cell_id < 0:
-            return
+            return 0
         self._pending.add(cell_id)
         self._refresh_highlight()
+        return len(self._pending)
 
     # ------------------------------------------------------------------
     # Commit / highlight

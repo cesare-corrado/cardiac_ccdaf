@@ -35,7 +35,7 @@ the volume into LPS, which is a lossless axis permutation and flip;
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import numpy as np
 import SimpleITK as sitk
@@ -60,6 +60,13 @@ def negate_xy_inplace(poly: vtk.vtkPolyData) -> None:
     new_pts.SetData(new_data)
     poly.SetPoints(new_pts)
 
+
+#: Welding distance of the final point merge, as a fraction of the voxel
+#: pitch. Small on purpose: it exists to collapse the two points of a
+#: marching-cubes sliver that sit a rounding error apart, not to reshape the
+#: surface. Measured on two volumes, 0.01 removes ~80% of the near-degenerate
+#: triangles for ~0.7% of the cells; 0.05 starts creating new ones.
+WELD_FRACTION: float = 0.01
 
 #: Orientation the segmentation view works in. ITK reports direction
 #: cosines in LPS, so an LPS-coded volume is exactly the identity.
@@ -333,6 +340,7 @@ def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
                              filt_rfact: "list[float]",
                              label: Optional[int] = None,
                              pad: Optional[int] = None,
+                             weld_fraction: float = WELD_FRACTION,
                              ) -> vtk.vtkPolyData:
     """Signed-distance marching cubes + smoothing; no preprocessing.
 
@@ -344,6 +352,11 @@ def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
     and why. *pad* overrides that count on every axis; 0 disables it and
     meshes the mask as stored. Padding shifts the origin with the voxels,
     so the surface lands where it did before.
+
+    Coincident and near-coincident points are merged at the end;
+    ``weld_fraction`` is the welding distance as a fraction of the voxel
+    pitch (0 disables it, restoring exact-coincidence merging). See
+    :data:`WELD_FRACTION` for why it is small.
     """
     if img is None:
         raise RuntimeError("No segmentation loaded.")
@@ -419,9 +432,29 @@ def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
     tri.Update()
     out: vtk.vtkPolyData = tri.GetOutput()
 
+    # Merge coincident points *and* weld the near-coincident ones. Marching
+    # cubes emits a sliver wherever the isosurface grazes a grid vertex: two
+    # of its points sit a rounding error apart, so exact merging (the default
+    # tolerance of 0) leaves them, and the triangle survives with an area
+    # orders of magnitude below the median — 5.8e-11 against 0.37 on a 0.5 mm
+    # round trip, close enough to zero in the float32 the points are stored
+    # in that VTK's OpenGL mapper may skip the cell when it builds its picking
+    # id map, which shifts every later id and lands picks on the wrong
+    # triangle. Welding at a fraction of the voxel pitch collapses those two
+    # points into one and the sliver disappears with them.
+    #
+    # The fraction is deliberately small and deliberately not larger: welding
+    # is not monotonic. At 0.05 of the pitch it *creates* slivers (and, on one
+    # test volume, non-manifold edges) by pulling apart triangles that were
+    # fine. WELD_FRACTION is the measured floor of the useful range — a 10 um
+    # weld on 1 mm voxels, below any anatomical scale.
+    spacing = binary.GetSpacing()
     clean = vtk.vtkCleanPolyData()
     clean.SetInputData(out)
     clean.PointMergingOn()
+    if weld_fraction > 0.0:
+        clean.ToleranceIsAbsoluteOn()
+        clean.SetAbsoluteTolerance(weld_fraction * float(min(spacing)))
     clean.ConvertLinesToPointsOff()
     clean.ConvertPolysToLinesOff()
     clean.ConvertStripsToPolysOff()
@@ -432,6 +465,85 @@ def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
     return out
 
 
+class StrayShells(NamedTuple):
+    """What :func:`drop_stray_shells` found and what it did about it.
+
+    ``dropped`` and ``kept`` are cell counts, largest first; ``kept`` always
+    starts with the surface that was kept as the anatomy.
+    """
+    kept: Tuple[int, ...]
+    dropped: Tuple[int, ...]
+
+    @property
+    def n_components(self) -> int:
+        return len(self.kept) + len(self.dropped)
+
+    @property
+    def dropped_cells(self) -> int:
+        return int(sum(self.dropped))
+
+
+def drop_stray_shells(poly: vtk.vtkPolyData,
+                      *, min_fraction: float = 0.01,
+                      ) -> Tuple[vtk.vtkPolyData, StrayShells]:
+    """Remove artefact shells from a marching-cubes surface.
+
+    Marching cubes emits every isosurface it finds into one polydata, so a
+    speck of stray voxels — a slip of the segmentation brush, or anything the
+    Gaussian was too weak to dissolve — arrives as a second closed surface
+    floating beside the anatomy. Nothing downstream tells the two apart: the
+    speck takes an ``elemTag``, renders, picks, and is exported like the rest.
+
+    The largest component is kept as the anatomy. Every other component is
+    dropped when it holds less than ``min_fraction`` of the cells, and kept
+    otherwise — a component that big is not a speck, and deleting it would be
+    deleting data. The caller gets the counts either way and is expected to
+    say what happened; silence is what let the speck through in the first
+    place.
+
+    Returns the surface and a :class:`StrayShells` report. A single-component
+    surface is returned unchanged.
+    """
+    conn = vtk.vtkPolyDataConnectivityFilter()
+    conn.SetInputData(poly)
+    conn.SetExtractionModeToAllRegions()
+    conn.Update()
+    n_regions = int(conn.GetNumberOfExtractedRegions())
+    if n_regions <= 1:
+        return poly, StrayShells(kept=(int(poly.GetNumberOfCells()),), dropped=())
+
+    raw = conn.GetRegionSizes()
+    sizes = [int(raw.GetValue(r)) for r in range(n_regions)]
+    total = float(sum(sizes))
+    order = sorted(range(n_regions), key=lambda r: sizes[r], reverse=True)
+    keep = [order[0]] + [r for r in order[1:] if sizes[r] >= min_fraction * total]
+    drop = [r for r in order[1:] if r not in keep]
+    if not drop:
+        return poly, StrayShells(kept=tuple(sizes[r] for r in order), dropped=())
+
+    conn.SetExtractionModeToSpecifiedRegions()
+    conn.InitializeSpecifiedRegionList()
+    for region in keep:
+        conn.AddSpecifiedRegion(region)
+    conn.Update()
+
+    # Specified-region extraction keeps the whole point set, so the dropped
+    # shells' vertices linger as orphans. Clean them away with merging off:
+    # the welding above already ran, and no point should move here.
+    prune = vtk.vtkCleanPolyData()
+    prune.SetInputData(conn.GetOutput())
+    prune.PointMergingOff()
+    prune.ConvertLinesToPointsOff()
+    prune.ConvertPolysToLinesOff()
+    prune.ConvertStripsToPolysOff()
+    prune.Update()
+    out = prune.GetOutput()
+    out.GetPointData().RemoveArray("RegionId")
+    out.GetCellData().RemoveArray("RegionId")
+    return out, StrayShells(kept=tuple(sizes[r] for r in keep),
+                            dropped=tuple(sizes[r] for r in drop))
+
+
 __all__ = [
     "LPS", "orientation_code", "is_axis_aligned", "reorient_to_lps",
     "restore_orientation",
@@ -439,4 +551,5 @@ __all__ = [
     "sitk_to_vtk_image", "voxelise_polydata", "binary_mask_image",
     "label_mask_image", "sync_sitk_from_array", "border_padding",
     "segmentation_to_polydata", "relabel_halfspace",
+    "WELD_FRACTION", "StrayShells", "drop_stray_shells",
 ]

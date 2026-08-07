@@ -18,7 +18,7 @@ back-wall geometry) and uses correct device-pixel coordinates.
 Headless-safe: the plotter is a stub that records the kwargs passed to
 ``enable_point_picking``; no rendering or real z-buffer picking happens here
 (that needs a live GL context, exercised in the GUI). The cell-mapping test
-feeds ``_on_cell_picked`` a hand-computed face point directly, so it exercises
+feeds ``add_cell_at_point`` a hand-computed face point directly, so it exercises
 the point->triangle mapping without a real pick.
 """
 
@@ -111,5 +111,5 @@ def test_cell_pick_maps_face_point_to_containing_triangle():
     a, b, c = mesh.points[tris[k]]
     hit = 0.5 * a + 0.3 * b + 0.2 * c
 
-    editor._on_cell_picked(tuple(float(v) for v in hit))
+    editor.add_cell_at_point(tuple(float(v) for v in hit))
     assert editor._pending == {k}

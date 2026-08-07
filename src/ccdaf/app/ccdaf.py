@@ -92,7 +92,8 @@ from ccdaf.core.field_transfer import guard_distance, transfer_fields
 from ccdaf.core.segmentation import (
     LPS, binary_mask_image, is_axis_aligned, negate_xy_inplace,
     relabel_halfspace, reorient_to_lps, restore_orientation,
-    segmentation_to_polydata, sync_sitk_from_array, voxelise_polydata,
+    drop_stray_shells, segmentation_to_polydata, StrayShells,
+    sync_sitk_from_array, voxelise_polydata,
 )
 from ccdaf.core.seed_io import load_seeds, save_seeds
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
@@ -597,8 +598,18 @@ class CCDAF(QtWidgets.QMainWindow):
         # both want it, and when each bound it itself, whoever came last won —
         # or cleared the other's binding outright. Bound once per plotter
         # (bindings die with it); _on_x_key routes by state at press time.
+        # C is the manual editor's alone: X picks, C commits what was picked,
+        # so the two halves of an edit are never the same keystroke.
+        #
+        # PyVista ships its own binding on upper-case C — its rubber-band
+        # enable_cell_picking — and add_key_event *appends*, so without
+        # clearing it first Shift+C would commit the batch and then hand the
+        # mouse to a picker none of our tools own. There is no default on X.
         for key in ("x", "X"):
             self.plotter.add_key_event(key, self._on_x_key)
+        for key in ("c", "C"):
+            self.plotter.clear_events_for_key(key)
+            self.plotter.add_key_event(key, self._on_c_key)
 
         if not spec.is_multiview:
             self.plotter.set_background("black")
@@ -628,8 +639,9 @@ class CCDAF(QtWidgets.QMainWindow):
         """Route the X key to whichever tool it belongs to right now.
 
         An in-progress PV contour takes it — but only while the clipping
-        panel's checkbox says clipping is active. Otherwise it commits the
-        manual-correction batch, which is a no-op with nothing pending.
+        panel's checkbox says clipping is active. Otherwise it goes to the
+        manual editor: a geodesic point for the snake, or the triangle under
+        the mouse for selection mode. Every tool that picks, picks with X.
         """
         if (self.clipper is not None
                 and self.clipping_widget.is_clipping_enabled()
@@ -647,7 +659,29 @@ class CCDAF(QtWidgets.QMainWindow):
                         "Snake: that point isn't reachable from the current "
                         "line — pick closer.")
                 return
-            self.editor.commit_pending()
+            n = self.editor.pick_at_cursor()
+            if n:
+                self.statusBar().showMessage(
+                    f"{n} triangle{'s' if n != 1 else ''} picked — "
+                    "press C to commit.")
+
+    def _on_c_key(self) -> None:
+        """Commit the manual-correction batch — the C key belongs to it alone.
+
+        Selection used to pick with the mouse and commit with X, which put the
+        commit on the same key the snake and the PV contour use to *pick*: one
+        key meaning two opposite things depending on a mode the user could not
+        see. C now commits, so X is free to be the pick key everywhere.
+        """
+        if self.editor is None or self.editor.snake_active:
+            return
+        if not self.editor.pending_count:
+            return
+        n = self.editor.pending_count
+        label = self.editor.active_label
+        self.editor.commit_pending()
+        self.statusBar().showMessage(
+            f"Committed {n} triangle{'s' if n != 1 else ''} as label {label}.")
 
     def _on_clipping_toggled(self, enabled: bool) -> None:
         """Deactivating the clipping panel abandons any clip in flight."""
@@ -725,6 +759,23 @@ class CCDAF(QtWidgets.QMainWindow):
             self._reposition_update3d_overlay()
         return super().eventFilter(obj, event)
 
+    def _new_manual_editor(self, mesh: pv.PolyData) -> ManualEditor:
+        """Build a ManualEditor already on the label the panel is showing.
+
+        The panel pushes a label down only when the combo box *changes*, so an
+        editor that picked its own default started out disagreeing with the
+        control the user reads: every pick committed as LSPV until they cycled
+        the combo box. Every rebuild goes through here so the two can't drift.
+        """
+        return ManualEditor(
+            mesh=mesh,
+            plotter=self.plotter,
+            on_render=self._render_mesh,
+            on_state=lambda s: None,
+            on_commit=self._on_edit_committed,
+            active_label=self.manual_widget.current_label(),
+        )
+
     def _build_mesh_tools(self) -> None:
         """(Re)bind the mesh-side tools to whichever plotter is current.
 
@@ -742,13 +793,7 @@ class CCDAF(QtWidgets.QMainWindow):
             plotter=self.plotter,
             on_status=self.statusBar().showMessage,
         )
-        self.editor = ManualEditor(
-            mesh=self.loader.mesh,
-            plotter=self.plotter,
-            on_render=self._render_mesh,
-            on_state=lambda s: None,
-            on_commit=self._on_edit_committed,
-        )
+        self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
 
@@ -994,13 +1039,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Loaded {source_name}")
 
         # Manual editor live from the start (see the X-key routing).
-        self.editor = ManualEditor(
-            mesh=self.loader.mesh,
-            plotter=self.plotter,
-            on_render=self._render_mesh,
-            on_state=lambda s: None,
-            on_commit=self._on_edit_committed,
-        )
+        self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
 
@@ -1303,13 +1342,7 @@ class CCDAF(QtWidgets.QMainWindow):
             plotter=self.plotter,
             on_status=self.statusBar().showMessage,
         )
-        self.editor = ManualEditor(
-            mesh=self.loader.mesh,
-            plotter=self.plotter,
-            on_render=self._render_mesh,
-            on_state=lambda s: None,
-            on_commit=self._on_edit_committed,
-        )
+        self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
         self.seed_widget.set_start_enabled(True)
@@ -1926,6 +1959,11 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._focus_3d()
         if on:
+            # Adopt whatever the combo box shows before the first pick lands:
+            # a backstop against the editor and the panel disagreeing on the
+            # label, which the user can only see once triangles come back the
+            # wrong colour.
+            self.editor.set_active_label(self.manual_widget.current_label())
             # Selection shares the surface picker with the snake, seed
             # selection and the clip — only one may hold it.
             self._take_picker("selection")
@@ -1938,6 +1976,9 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self._focus_3d()
         if on:
+            # Same backstop as selection mode — the snake tags with the
+            # active label too.
+            self.editor.set_active_label(self.manual_widget.current_label())
             # Mutually exclusive with selection mode, seed selection and the
             # clip — all four drive the one shared picker.
             self._take_picker("snake")
@@ -1969,7 +2010,9 @@ class CCDAF(QtWidgets.QMainWindow):
     def _action_snake_commit(self) -> None:
         if self.editor is None or self.tagger is None:
             return
-        label = self.manual_widget.current_label()
+        # Report the label the commit actually applies, not the one the combo
+        # box shows — they agree, and the message is what proves it.
+        label = self.editor.active_label
         if self.editor.snake_point_count < 2:
             self.statusBar().showMessage(
                 "Snake: drop at least two points (press X) first.")
@@ -2027,14 +2070,16 @@ class CCDAF(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Holes filled while preserving boundaries.")
 
     def _action_smooth_boundary(self, dilate: bool, erode: bool) -> None:
-        """Smooth the active label's boundary — one dilate/erode pass per click."""
+        """Smooth the active label's boundary — one dilate/erode pass per click.
+
+        Body is a target like any other: it has no boundary of its own, so
+        growing it erodes every PV label at once and shrinking it dilates
+        them. The message names the label so the effect is legible either way.
+        """
         if self.editor is None or self.tagger is None:
             return
         label = self.manual_widget.current_label()
-        if label == BODY_LABEL:
-            self.statusBar().showMessage(
-                "Select a PV label to smooth — body is the background.")
-            return
+        name = f"{_label_name(label)} ({label})"
         ops = "+".join(w for w, on in (("dilate", dilate), ("erode", erode)) if on)
         if not ops:
             self.statusBar().showMessage("Tick Dilate and/or Erode first.")
@@ -2042,8 +2087,8 @@ class CCDAF(QtWidgets.QMainWindow):
         n = self.editor.smooth_label(self.tagger, label, dilate, erode)
         self.manual_widget.set_undo_enabled(self.editor.can_undo)
         self.statusBar().showMessage(
-            f"Smoothed label {label} ({ops}): {n} cell{'s' if n != 1 else ''} changed"
-            if n else f"Label {label} ({ops}): nothing to smooth.")
+            f"Smoothed {name} ({ops}): {n} cell{'s' if n != 1 else ''} changed"
+            if n else f"{name} ({ops}): nothing to smooth.")
 
     # ==================================================================
     # Clipping — PV
@@ -2199,15 +2244,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # correction bound to nothing: tagging enables its buttons regardless,
         # so the panel looked live and swallowed every click.
         had_editor = self.editor is not None
-        self.editor = ManualEditor(
-            mesh=new_mesh,
-            plotter=self.plotter,
-            on_render=self._render_mesh,
-            on_state=lambda s: None,
-            on_commit=self._on_edit_committed,
-        )
-        # A fresh editor starts on its own default label; follow the panel.
-        self.editor.set_active_label(self.manual_widget.current_label())
+        self.editor = self._new_manual_editor(new_mesh)
         if not had_editor:
             self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
@@ -2524,6 +2561,14 @@ class CCDAF(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Conversion failed", str(exc))
             return
 
+        # Marching cubes hands back every isosurface it found in one polydata,
+        # so a speck of stray voxels arrives as a second closed shell floating
+        # beside the anatomy — and nothing downstream tells them apart. Drop
+        # the specks, keep anything big enough to be real, and report either
+        # way (the note is appended to the closing status message below).
+        poly, shells = drop_stray_shells(poly)
+        shell_note = self._stray_shell_note(shells)
+
         # Render the converted surface in the 3D quadrant while still in
         # segmentation mode, then close (reverts plotter to 1×1).
         self._action_seg_update_3d()
@@ -2551,12 +2596,39 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
-        notes = [n for n in (getattr(self, "_transfer_note", None),
+        notes = [n for n in (shell_note,
+                             getattr(self, "_transfer_note", None),
                              getattr(self, "_eam_warp_note", None)) if n]
         self._eam_warp_note = self._transfer_note = None
         self.statusBar().showMessage(
             " ".join(["Segmentation converted and visualised."] + notes),
             20000 if notes else 0)
+
+    @staticmethod
+    def _stray_shell_note(shells: StrayShells) -> str:
+        """One sentence on what the connectivity pass found, or ``""``.
+
+        Dropping a shell is a deletion, and one the user did not ask for, so
+        it is always said out loud. A component too big to drop is said out
+        loud too — it means the segmentation has a second structure in it,
+        which is worth going back for before tagging starts.
+        """
+        if shells.n_components <= 1:
+            return ""
+        if shells.dropped:
+            n = len(shells.dropped)
+            pct = 100.0 * shells.dropped_cells / max(sum(shells.kept)
+                                                     + shells.dropped_cells, 1)
+            note = (f"Dropped {n} stray shell{'s' if n != 1 else ''} "
+                    f"({shells.dropped_cells} cells, {pct:.1f}%).")
+        else:
+            note = ""
+        if len(shells.kept) > 1:
+            extra = ", ".join(str(c) for c in shells.kept[1:])
+            note += (f" The surface is still in {len(shells.kept)} separate "
+                     f"pieces ({sum(shells.kept[:1])} cells plus {extra}) — "
+                     "too large to be specks; check the segmentation.")
+        return note.strip()
 
     # ------------------------------------------------------------------
     def _carry_source_onto(self, new_mesh: pv.PolyData, *,
