@@ -92,7 +92,8 @@ from ccdaf.core.field_transfer import guard_distance, transfer_fields
 from ccdaf.core.segmentation import (
     LPS, binary_mask_image, is_axis_aligned, negate_xy_inplace,
     relabel_halfspace, reorient_to_lps, restore_orientation,
-    segmentation_to_polydata, sync_sitk_from_array, voxelise_polydata,
+    drop_stray_shells, segmentation_to_polydata, StrayShells,
+    sync_sitk_from_array, voxelise_polydata,
 )
 from ccdaf.core.seed_io import load_seeds, save_seeds
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
@@ -2560,6 +2561,14 @@ class CCDAF(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Conversion failed", str(exc))
             return
 
+        # Marching cubes hands back every isosurface it found in one polydata,
+        # so a speck of stray voxels arrives as a second closed shell floating
+        # beside the anatomy — and nothing downstream tells them apart. Drop
+        # the specks, keep anything big enough to be real, and report either
+        # way (the note is appended to the closing status message below).
+        poly, shells = drop_stray_shells(poly)
+        shell_note = self._stray_shell_note(shells)
+
         # Render the converted surface in the 3D quadrant while still in
         # segmentation mode, then close (reverts plotter to 1×1).
         self._action_seg_update_3d()
@@ -2587,12 +2596,39 @@ class CCDAF(QtWidgets.QMainWindow):
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
-        notes = [n for n in (getattr(self, "_transfer_note", None),
+        notes = [n for n in (shell_note,
+                             getattr(self, "_transfer_note", None),
                              getattr(self, "_eam_warp_note", None)) if n]
         self._eam_warp_note = self._transfer_note = None
         self.statusBar().showMessage(
             " ".join(["Segmentation converted and visualised."] + notes),
             20000 if notes else 0)
+
+    @staticmethod
+    def _stray_shell_note(shells: StrayShells) -> str:
+        """One sentence on what the connectivity pass found, or ``""``.
+
+        Dropping a shell is a deletion, and one the user did not ask for, so
+        it is always said out loud. A component too big to drop is said out
+        loud too — it means the segmentation has a second structure in it,
+        which is worth going back for before tagging starts.
+        """
+        if shells.n_components <= 1:
+            return ""
+        if shells.dropped:
+            n = len(shells.dropped)
+            pct = 100.0 * shells.dropped_cells / max(sum(shells.kept)
+                                                     + shells.dropped_cells, 1)
+            note = (f"Dropped {n} stray shell{'s' if n != 1 else ''} "
+                    f"({shells.dropped_cells} cells, {pct:.1f}%).")
+        else:
+            note = ""
+        if len(shells.kept) > 1:
+            extra = ", ".join(str(c) for c in shells.kept[1:])
+            note += (f" The surface is still in {len(shells.kept)} separate "
+                     f"pieces ({sum(shells.kept[:1])} cells plus {extra}) — "
+                     "too large to be specks; check the segmentation.")
+        return note.strip()
 
     # ------------------------------------------------------------------
     def _carry_source_onto(self, new_mesh: pv.PolyData, *,
