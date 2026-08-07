@@ -12,8 +12,9 @@ contour in progress does not.
 
 ## Selection mode
 
-- **Activate selection mode**, then **left-click triangles** to add them to a
-  pending yellow batch.
+- **Activate selection mode**, then press **`X`** with the mouse over a
+  triangle to add it to a pending yellow batch. Left-drag still only rotates
+  the view, so aiming and picking never get confused.
 - Press **`C`** to commit the batch to the active label.
 - Changing the active label clears any pending batch (so batches never mix).
 

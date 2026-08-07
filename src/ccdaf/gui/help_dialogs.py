@@ -82,9 +82,9 @@ GETTING_STARTED_HTML = """
 <h2>Getting started</h2>
 <p>CCDAF takes a left-atrial surface from a raw mesh to a tagged, clipped
 result. Each step is a side panel; they unlock in order.</p>
-<p><b>The two shortcuts to remember:</b> over the 3D view, <b>X</b> drops
-points for the geodesic <i>snake</i> tools and <b>C</b> commits the
-manual-correction selection batch.</p>
+<p><b>The two shortcuts to remember:</b> over the 3D view, <b>X</b> picks —
+a triangle, or a point for the geodesic <i>snake</i> tools — and <b>C</b>
+commits the manual-correction selection batch.</p>
 <ol>
   <li><b>Load a mesh</b> — <i>File &rarr; Load</i> a <code>.vtk</code> surface.</li>
   <li><b>Place the six seeds</b> — <i>Seed selection &rarr; Start</i>, then click
@@ -92,7 +92,8 @@ manual-correction selection batch.</p>
   <li><b>Tag automatically</b> — set the radius factors, then
       <i>Run automatic tagging</i>.</li>
   <li><b>Correct by hand</b> — in <i>Manual correction</i>, pick a label, then
-      select triangles (press <b>C</b> to commit) or use the snake.</li>
+      select triangles with <b>X</b> (press <b>C</b> to commit) or use the
+      snake.</li>
   <li><b>Clip</b> — tick <i>Clipping active</i>, then draw a PV contour or place
       a mitral sphere/plane and <i>Apply clip</i>.</li>
   <li><b>Export</b> — <i>File &rarr; Save</i>, or <i>EAM &rarr; Export</i> for a
@@ -113,16 +114,17 @@ SHORTCUTS_HTML = """
 </table>
 <h3>Picking &amp; committing</h3>
 <table cellpadding="4">
-  <tr><td><b>Left-click</b></td><td>Place a seed, or add a triangle to the
-      selection batch</td></tr>
-  <tr><td><b>X</b></td><td>Drop a point for a snake tool</td></tr>
+  <tr><td><b>Left-click</b></td><td>Place a seed (seed selection only)</td></tr>
+  <tr><td><b>X</b></td><td>Pick — add a triangle to the selection batch, or
+      drop a point for a snake tool</td></tr>
   <tr><td><b>C</b></td><td>Commit the manual-correction selection batch</td></tr>
 </table>
-<p><b>Who owns <code>X</code>:</b> it is the <i>pick</i> key, shared by the
-manual snake and the PV-contour snake; the <i>Clipping active</i> checkbox
-decides which of them responds. Committing never shares a key with picking:
-<b>C</b> commits the selection batch, and the snake and the clip have their own
-commit buttons.</p>
+<p><b>Who owns <code>X</code>:</b> it is the <i>pick</i> key, shared by
+manual-correction selection, the manual snake and the PV-contour snake; the
+<i>Clipping active</i> checkbox decides whether it belongs to clipping or to
+manual correction. Seeds are the exception — still placed by left-click.
+Committing never shares a key with picking: <b>C</b> commits the selection
+batch, and the snake and the clip have their own commit buttons.</p>
 """
 
 

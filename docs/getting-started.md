@@ -5,9 +5,9 @@ clipped result. Each step maps to a side panel; the full detail is in the
 [User guide](user-guide/index.md).
 
 !!! tip "The two shortcuts to remember"
-    Over the 3D view, **`X`** drops a point for the geodesic *snake* tools,
-    and **`C`** commits the manual-correction selection batch. See
-    [Keyboard & mouse](shortcuts.md).
+    Over the 3D view, **`X`** picks — a triangle, or a point for the geodesic
+    *snake* tools — and **`C`** commits the manual-correction selection batch.
+    See [Keyboard & mouse](shortcuts.md).
 
 <figure markdown="span">
   ![The CCDAF main window with a mesh loaded](assets/screenshots/overview.png)
@@ -47,8 +47,8 @@ a geodesic region from its seed and writes the labels into `elemTag`.
 
 In **Manual correction**, choose the active **Label**, then either:
 
-- **Activate selection mode** and click triangles to build a batch, then press
-  **`C`** to commit them; or
+- **Activate selection mode** and press **`X`** over triangles to build a
+  batch, then press **`C`** to commit them; or
 - toggle **Snake tag**, press **`X`** to drop points, and **Commit snake** to
   tag every triangle along the geodesic through them.
 

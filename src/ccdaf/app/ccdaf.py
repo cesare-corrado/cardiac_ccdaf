@@ -599,9 +599,15 @@ class CCDAF(QtWidgets.QMainWindow):
         # (bindings die with it); _on_x_key routes by state at press time.
         # C is the manual editor's alone: X picks, C commits what was picked,
         # so the two halves of an edit are never the same keystroke.
+        #
+        # PyVista ships its own binding on upper-case C — its rubber-band
+        # enable_cell_picking — and add_key_event *appends*, so without
+        # clearing it first Shift+C would commit the batch and then hand the
+        # mouse to a picker none of our tools own. There is no default on X.
         for key in ("x", "X"):
             self.plotter.add_key_event(key, self._on_x_key)
         for key in ("c", "C"):
+            self.plotter.clear_events_for_key(key)
             self.plotter.add_key_event(key, self._on_c_key)
 
         if not spec.is_multiview:
@@ -633,7 +639,8 @@ class CCDAF(QtWidgets.QMainWindow):
 
         An in-progress PV contour takes it — but only while the clipping
         panel's checkbox says clipping is active. Otherwise it goes to the
-        manual editor's snake, which drops a geodesic point.
+        manual editor: a geodesic point for the snake, or the triangle under
+        the mouse for selection mode. Every tool that picks, picks with X.
         """
         if (self.clipper is not None
                 and self.clipping_widget.is_clipping_enabled()
@@ -651,6 +658,11 @@ class CCDAF(QtWidgets.QMainWindow):
                         "Snake: that point isn't reachable from the current "
                         "line — pick closer.")
                 return
+            n = self.editor.pick_at_cursor()
+            if n:
+                self.statusBar().showMessage(
+                    f"{n} triangle{'s' if n != 1 else ''} picked — "
+                    "press C to commit.")
 
     def _on_c_key(self) -> None:
         """Commit the manual-correction batch — the C key belongs to it alone.
