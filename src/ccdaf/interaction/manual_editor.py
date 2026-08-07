@@ -213,12 +213,16 @@ class ManualEditor:
         """Morphologically smooth one label's boundary, undoably.
 
         ``dilate`` grows the label into its jagged body fringe, ``erode``
-        shaves its spikes; both together run dilate-then-erode (a closing)
-        that de-jags without net growth. Body is not a smoothing target — it
-        is the background, not a region. Snapshots for undo only when it
-        actually changes something. Returns the number of cells changed.
+        shaves its spikes; both together run dilate-then-erode (a closing),
+        which de-jags with little net growth — small and signed either way,
+        not zero, and not idempotent: a second pass still moves a few cells.
+
+        Body smooths like any other label: it has no boundary of its own, so
+        growing it erodes every PV label at once and shrinking it dilates them
+        (see :meth:`RegionTagger.dilate_label`). Snapshots for undo only when
+        it actually changes something. Returns the number of cells changed.
         """
-        if label not in ALLOWED_LABELS or label == BODY_LABEL:
+        if label not in ALLOWED_LABELS:
             return 0
         if not (dilate or erode):
             return 0

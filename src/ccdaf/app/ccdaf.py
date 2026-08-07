@@ -2069,14 +2069,16 @@ class CCDAF(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Holes filled while preserving boundaries.")
 
     def _action_smooth_boundary(self, dilate: bool, erode: bool) -> None:
-        """Smooth the active label's boundary — one dilate/erode pass per click."""
+        """Smooth the active label's boundary — one dilate/erode pass per click.
+
+        Body is a target like any other: it has no boundary of its own, so
+        growing it erodes every PV label at once and shrinking it dilates
+        them. The message names the label so the effect is legible either way.
+        """
         if self.editor is None or self.tagger is None:
             return
         label = self.manual_widget.current_label()
-        if label == BODY_LABEL:
-            self.statusBar().showMessage(
-                "Select a PV label to smooth — body is the background.")
-            return
+        name = f"{_label_name(label)} ({label})"
         ops = "+".join(w for w, on in (("dilate", dilate), ("erode", erode)) if on)
         if not ops:
             self.statusBar().showMessage("Tick Dilate and/or Erode first.")
@@ -2084,8 +2086,8 @@ class CCDAF(QtWidgets.QMainWindow):
         n = self.editor.smooth_label(self.tagger, label, dilate, erode)
         self.manual_widget.set_undo_enabled(self.editor.can_undo)
         self.statusBar().showMessage(
-            f"Smoothed label {label} ({ops}): {n} cell{'s' if n != 1 else ''} changed"
-            if n else f"Label {label} ({ops}): nothing to smooth.")
+            f"Smoothed {name} ({ops}): {n} cell{'s' if n != 1 else ''} changed"
+            if n else f"{name} ({ops}): nothing to smooth.")
 
     # ==================================================================
     # Clipping — PV

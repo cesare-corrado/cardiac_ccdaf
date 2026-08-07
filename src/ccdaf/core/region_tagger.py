@@ -756,8 +756,14 @@ class RegionTagger:
         make a per-triangle boundary zigzag; the other-PV guard keeps ``label``
         from bridging a thin body seam into a neighbouring region and merging
         the two. Returns a new array; ``tri_label`` is untouched.
+
+        ``label`` may be BODY: body grows exactly where the PV labels give
+        way, so growing it *is* eroding all of them at once (see
+        :meth:`_erode_every_pv`).
         """
         out = np.asarray(tri_label).copy()
+        if label == BODY_LABEL:
+            return self._erode_every_pv(out)
         if label not in LABELS.values():
             return out
         is_label = (out == label).astype(np.int64)
@@ -775,13 +781,53 @@ class RegionTagger:
         A ``label`` cell with at least two background edge-neighbours reverts
         to BODY, which shaves the lone spikes a per-triangle boundary leaves.
         Returns a new array; ``tri_label`` is untouched.
+
+        ``label`` may be BODY: shrinking body is the PV labels claiming it, so
+        it is a dilation of all of them at once (see :meth:`_dilate_every_pv`).
         """
         out = np.asarray(tri_label).copy()
+        if label == BODY_LABEL:
+            return self._dilate_every_pv(out)
         if label not in LABELS.values():
             return out
         is_bg = ((out == BODY_LABEL) | (out == UNASSIGNED)).astype(np.int64)
         n_bg = self._tri_adj.dot(is_bg)
         out[(out == label) & (n_bg >= 2)] = BODY_LABEL
+        return out
+
+    # -- body as a smoothing target -------------------------------------
+    #
+    # Body is the background, so it has no boundary of its own: its boundary
+    # *is* the union of the PV boundaries, read from the other side. Growing
+    # body is therefore every PV label eroding, and shrinking it is every PV
+    # label dilating — the same neighbour rules, applied to all five at once.
+    #
+    # "At once" is the point. Running the single-label passes one after
+    # another feeds each label the previous one's output, so where two regions
+    # come within a triangle of each other the result depends on the order
+    # LABELS happens to be written in. Both passes below read their neighbour
+    # counts from one snapshot of the input, which makes them order-free.
+    def _erode_every_pv(self, tri_label: np.ndarray) -> np.ndarray:
+        """Body grows: a PV cell with >=2 background neighbours reverts."""
+        out = np.asarray(tri_label).copy()
+        is_bg = ((out == BODY_LABEL) | (out == UNASSIGNED)).astype(np.int64)
+        n_bg = self._tri_adj.dot(is_bg)
+        out[np.isin(out, list(LABELS.values())) & (n_bg >= 2)] = BODY_LABEL
+        return out
+
+    def _dilate_every_pv(self, tri_label: np.ndarray) -> np.ndarray:
+        """Body shrinks: a background cell with >=2 neighbours of exactly one
+        PV label joins it. A cell caught between two regions keeps the seam
+        guard of :meth:`dilate_label` — it borders another PV label, so no
+        label may claim it, and the two cannot merge."""
+        base = np.asarray(tri_label)
+        out = base.copy()
+        pvs = list(LABELS.values())
+        is_bg = (base == BODY_LABEL) | (base == UNASSIGNED)
+        n_pv = self._tri_adj.dot(np.isin(base, pvs).astype(np.int64))
+        for label in pvs:
+            n_label = self._tri_adj.dot((base == label).astype(np.int64))
+            out[is_bg & (n_label >= 2) & (n_pv - n_label == 0)] = label
         return out
 
     def _border_majority_label(self, cells: np.ndarray,
