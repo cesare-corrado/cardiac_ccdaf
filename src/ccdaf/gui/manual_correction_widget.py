@@ -72,24 +72,30 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         # Boundary smoothing of the *active* label. Dilate fills the jagged
         # body fringe, erode shaves spikes; the button applies whichever are
         # ticked (both = a closing) one pass per click, so the user smooths by
-        # eye. Body does nothing — it is the background, not a region.
+        # eye. Body smooths like any other label: it has no boundary of its
+        # own, so growing it erodes every PV label at once, and shrinking it
+        # dilates them.
         smooth_row = QtWidgets.QHBoxLayout()
         self.chk_dilate = QtWidgets.QCheckBox("Dilate")
         self.chk_dilate.setToolTip(
             "Include a dilation pass when smoothing — grows the active label "
-            "into its jagged fringe."
+            "into its jagged fringe. With body selected this erodes every PV "
+            "label at once."
         )
         self.chk_dilate.setChecked(True)
         self.chk_erode = QtWidgets.QCheckBox("Erode")
         self.chk_erode.setToolTip(
             "Include an erosion pass when smoothing — shaves spikes off the "
-            "active label."
+            "active label. With body selected this dilates every PV label at "
+            "once."
         )
         self.btn_smooth = QtWidgets.QPushButton("Smooth active label")
         self.btn_smooth.setToolTip(
             "Smooth the boundary of the label selected above, one pass per "
             "click. Dilate grows it into the jagged fringe, Erode shaves "
-            "spikes; both ticked de-jags without net growth. Body does nothing."
+            "spikes; both ticked runs dilate-then-erode, which de-jags with "
+            "little net growth. Body counts as a label: growing it smooths "
+            "every region's boundary at once."
         )
         self.btn_smooth.clicked.connect(
             lambda: self.smooth_requested.emit(

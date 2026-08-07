@@ -50,8 +50,20 @@ whenever manual correction is — with selection mode on **or** off.
   labels do not merge.
 - **Smooth active label** with the **Dilate** / **Erode** checkboxes — one pass
   per click. Dilate grows the label into its jagged fringe; Erode shaves spikes;
-  both together de-jag without net growth. *Body is excluded — it is the
-  background, not a region.*
+  both together run dilate-then-erode, which de-jags with little net growth.
+
+!!! info "Smoothing **body** smooths every region at once"
+    Body is the background, so it has no boundary of its own — its boundary
+    *is* the region boundaries, seen from the other side. It still smooths like
+    any other label, and the checkboxes keep their usual meaning:
+
+    - **Dilate** grows body, which is every PV label eroding one pass;
+    - **Erode** shrinks body, which is every PV label dilating one pass.
+
+    All five labels move together against one snapshot of the mesh, so the
+    result does not depend on the order the labels are stored in, and the seam
+    guard still applies: a triangle caught between two regions is claimed by
+    neither, so smoothing can never merge them.
 
 ## Finishing & undo
 
