@@ -53,7 +53,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_edit_toggle = QtWidgets.QPushButton("Activate selection mode")
         self.btn_edit_toggle.setToolTip(
             "Toggle triangle selection: click triangles to add them to a pending "
-            "batch, then press X to commit them to the active label."
+            "batch, then press C to commit them to the active label."
         )
         self.btn_edit_toggle.setCheckable(True)
         self.btn_edit_toggle.toggled.connect(self._on_edit_toggled)
@@ -159,7 +159,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         layout.addWidget(self.btn_undo)
 
         layout.addWidget(QtWidgets.QLabel(
-            "<i>Click triangles, then press <b>X</b> to commit the batch.</i>"
+            "<i>Click triangles, then press <b>C</b> to commit the batch.</i>"
         ))
 
     def _on_edit_toggled(self, on: bool) -> None:

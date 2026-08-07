@@ -8,10 +8,12 @@ Interaction model
 -----------------
 - User picks triangles on the surface (single-cell picking).
 - Picked triangles are highlighted in yellow as a *pending* batch.
-- Pressing **X** commits the batch: every pending triangle receives the
+- Pressing **C** commits the batch: every pending triangle receives the
   currently active label, the highlight is cleared, and the mesh is
   recolored live. The key itself is bound by the host, which routes it
-  to :meth:`commit_pending` — clipping shares the key.
+  to :meth:`commit_pending`. Commit has its own key because X is the
+  *pick* key of the snake and the PV contour — one key cannot mean both
+  "add this" and "done adding".
 - Changing the active label clears any pending selection (prevents mixed
   batches being committed by accident).
 
@@ -122,6 +124,11 @@ class ManualEditor:
     def reset_undo(self) -> None:
         """Clear the undo history (call after auto-tagging overwrites the mesh)."""
         self._undo_stack.clear()
+
+    @property
+    def pending_count(self) -> int:
+        """Triangles picked but not yet committed."""
+        return len(self._pending)
 
     @property
     def active_label(self) -> int:
