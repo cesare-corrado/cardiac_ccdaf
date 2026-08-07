@@ -597,8 +597,18 @@ class CCDAF(QtWidgets.QMainWindow):
         # both want it, and when each bound it itself, whoever came last won —
         # or cleared the other's binding outright. Bound once per plotter
         # (bindings die with it); _on_x_key routes by state at press time.
+        # C is the manual editor's alone: X picks, C commits what was picked,
+        # so the two halves of an edit are never the same keystroke.
+        #
+        # PyVista ships its own binding on upper-case C — its rubber-band
+        # enable_cell_picking — and add_key_event *appends*, so without
+        # clearing it first Shift+C would commit the batch and then hand the
+        # mouse to a picker none of our tools own. There is no default on X.
         for key in ("x", "X"):
             self.plotter.add_key_event(key, self._on_x_key)
+        for key in ("c", "C"):
+            self.plotter.clear_events_for_key(key)
+            self.plotter.add_key_event(key, self._on_c_key)
 
         if not spec.is_multiview:
             self.plotter.set_background("black")
@@ -628,8 +638,9 @@ class CCDAF(QtWidgets.QMainWindow):
         """Route the X key to whichever tool it belongs to right now.
 
         An in-progress PV contour takes it — but only while the clipping
-        panel's checkbox says clipping is active. Otherwise it commits the
-        manual-correction batch, which is a no-op with nothing pending.
+        panel's checkbox says clipping is active. Otherwise it goes to the
+        manual editor: a geodesic point for the snake, or the triangle under
+        the mouse for selection mode. Every tool that picks, picks with X.
         """
         if (self.clipper is not None
                 and self.clipping_widget.is_clipping_enabled()
@@ -647,7 +658,29 @@ class CCDAF(QtWidgets.QMainWindow):
                         "Snake: that point isn't reachable from the current "
                         "line — pick closer.")
                 return
-            self.editor.commit_pending()
+            n = self.editor.pick_at_cursor()
+            if n:
+                self.statusBar().showMessage(
+                    f"{n} triangle{'s' if n != 1 else ''} picked — "
+                    "press C to commit.")
+
+    def _on_c_key(self) -> None:
+        """Commit the manual-correction batch — the C key belongs to it alone.
+
+        Selection used to pick with the mouse and commit with X, which put the
+        commit on the same key the snake and the PV contour use to *pick*: one
+        key meaning two opposite things depending on a mode the user could not
+        see. C now commits, so X is free to be the pick key everywhere.
+        """
+        if self.editor is None or self.editor.snake_active:
+            return
+        if not self.editor.pending_count:
+            return
+        n = self.editor.pending_count
+        label = self.editor.active_label
+        self.editor.commit_pending()
+        self.statusBar().showMessage(
+            f"Committed {n} triangle{'s' if n != 1 else ''} as label {label}.")
 
     def _on_clipping_toggled(self, enabled: bool) -> None:
         """Deactivating the clipping panel abandons any clip in flight."""

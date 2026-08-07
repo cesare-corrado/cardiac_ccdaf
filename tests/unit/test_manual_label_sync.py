@@ -94,7 +94,7 @@ def _tag_first_triangle(host: _Host) -> int:
     """Pick a triangle and commit it, as selection mode + X does."""
     mesh = host.loader.mesh
     host.editor.activate()
-    host.editor._on_cell_picked(
+    host.editor.add_cell_at_point(
         np.asarray(mesh.extract_cells(0).points, dtype=float).mean(axis=0))
     host.editor.commit_pending()
     return int(np.asarray(mesh.cell_data["elemTag"])[0])

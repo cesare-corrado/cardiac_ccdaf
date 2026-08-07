@@ -13,19 +13,26 @@
 
 | Input | Result |
 |---|---|
-| **Left-click** | Pick — place a seed, or add a triangle to the selection batch |
-| **`X`** | Commit the active tool's batch, **or** drop a point for a snake tool |
+| **Left-click** | Place a seed (seed selection only) |
+| **`X`** | Pick — add a triangle to the selection batch, or drop a point for a snake tool |
+| **`C`** | Commit the manual-correction selection batch |
 
 !!! info "Who owns `X`"
-    `X` is shared by several tools that cannot all listen at once:
+    `X` is the *pick* key for every tool that picks with the keyboard, and they
+    cannot all listen at once:
 
-    - **Manual correction — selection mode:** `X` commits the pending triangle
-      batch.
-    - **Manual correction — snake / Clipping — PV contour:** `X` drops a geodesic
-      point.
+    - **Manual correction — selection mode:** `X` adds the triangle under the
+      mouse to the batch.
+    - **Manual correction — snake / Clipping — PV contour:** `X` drops a
+      geodesic point.
 
-    The **Clipping active** checkbox decides whether the key belongs to clipping
-    or to manual correction, so only one tool responds at a time.
+    The **Clipping active** checkbox decides whether the key belongs to
+    clipping or to manual correction, so only one tool responds at a time.
+    Seed selection is the exception: seeds are still placed by left-click.
+
+    Committing never shares a key with picking: `C` commits the selection
+    batch, **Commit snake** commits the snake, and clipping has its own
+    **Close & Clip PV** / **Apply clip**.
 
 ## Per-tool buttons
 
