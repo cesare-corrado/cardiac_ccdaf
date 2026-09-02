@@ -47,7 +47,9 @@ whenever manual correction is — with selection mode on **or** off.
 
 - **Fill Holes (Protect Boundaries)** — fills unassigned triangles by region
   growing while keeping existing region boundaries separate, so neighbouring
-  labels do not merge.
+  labels do not merge. It stays available after **Accept tagging**: accept
+  leaves no triangle unassigned, but the pass also pulls apart labels that have
+  grown into each other, so it is still worth a click at that point.
 - **Smooth active label** with the **Dilate** / **Erode** checkboxes — one pass
   per click. Dilate grows the label into its jagged fringe; Erode shaves spikes;
   both together run dilate-then-erode, which de-jags with little net growth.
@@ -69,4 +71,5 @@ whenever manual correction is — with selection mode on **or** off.
 
 - **Undo last edit** reverts the last committed batch (up to 3 levels).
 - **Accept tagging** commits any pending batch and assigns **body** to every
-  still-unassigned triangle, ending the correction stage.
+  still-unassigned triangle, ending the correction stage. The cleanup and
+  smoothing tools stay live afterwards, so the boundaries can still be tidied.

@@ -85,3 +85,27 @@ def test_reset_state_disables_them(panel):
     assert not panel.btn_fill_holes.isEnabled()
     assert not panel.btn_smooth.isEnabled()
     assert not panel.btn_edit_toggle.isEnabled()
+
+
+def test_accepting_the_tagging_keeps_fill_holes_live(panel):
+    """Accept leaves nothing unassigned, but Fill Holes also re-separates
+    labels that have grown together, so it stays reachable afterwards."""
+    panel.on_accepted()
+    assert panel.btn_fill_holes.isEnabled()
+    assert panel.btn_smooth.isEnabled()
+
+
+def test_fill_holes_survives_re_entering_selection_mode_after_accept(panel):
+    panel.on_accepted()
+    panel.btn_edit_toggle.setChecked(True)
+    assert panel.btn_fill_holes.isEnabled()
+    panel.btn_edit_toggle.setChecked(False)
+    assert panel.btn_fill_holes.isEnabled()
+
+
+def test_fill_holes_still_emits_after_accept(panel):
+    fired: list = []
+    panel.fill_holes_requested.connect(lambda: fired.append("fill"))
+    panel.on_accepted()
+    panel.btn_fill_holes.click()
+    assert fired == ["fill"]
