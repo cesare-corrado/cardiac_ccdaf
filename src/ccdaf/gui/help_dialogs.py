@@ -86,7 +86,9 @@ result. Each step is a side panel; they unlock in order.</p>
 a triangle, or a point for the geodesic <i>snake</i> tools — and <b>C</b>
 commits the manual-correction selection batch.</p>
 <ol>
-  <li><b>Load a mesh</b> — <i>File &rarr; Load</i> a <code>.vtk</code> surface.</li>
+  <li><b>Load the data</b> — <i>File &rarr; Load data</i>: a <code>.vtk</code> surface,
+      a <code>.pkl</code> bundle or a <code>.nii</code> segmentation. A path given on
+      the command line (<code>ccdaf file</code>) opens the same way.</li>
   <li><b>Place the six seeds</b> — <i>Seed selection &rarr; Start</i>, then click
       LSPV, LIPV, RSPV, RIPV, LAA, MV in order.</li>
   <li><b>Tag automatically</b> — set the radius factors, then
@@ -96,8 +98,8 @@ commits the manual-correction selection batch.</p>
       snake.</li>
   <li><b>Clip</b> — tick <i>Clipping active</i>, then draw a PV contour or place
       a mitral sphere/plane and <i>Apply clip</i>.</li>
-  <li><b>Export</b> — <i>File &rarr; Save</i>, or <i>EAM &rarr; Export</i> for a
-      Carto bundle / VTK.</li>
+  <li><b>Export</b> — <i>File &rarr; Save data</i>, or <i>EAM &rarr; Export</i> for a
+      Carto bundle / VTK. Closing or quitting with unsaved changes asks first.</li>
 </ol>
 <p>See <b>Help &rarr; Documentation</b> for the full guide.</p>
 """

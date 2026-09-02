@@ -38,7 +38,7 @@ Triangular surfaces are read/written through `ccdaf.io.vtkfunctions`.
 
 ## Session bundles — `.pkl`
 
-A **File → Save** bundle packs the surface, tagging, seeds, LA-UAC landmarks
+A **File → Save data** bundle packs the surface, tagging, seeds, LA-UAC landmarks
 (under the `landmarks_LA_UAC` key) and electrodes together, so a session
 round-trips in one file (`read_bundle` / write path in
 `ccdaf.core.eam_loader`). Each seed set appears only when it has been

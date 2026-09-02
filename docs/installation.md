@@ -36,11 +36,19 @@ Editable install exposes the package **and** the `ccdaf` launcher (see
 ## Running
 
 ```bash
-ccdaf                 # launch the GUI
-ccdaf path/to/mesh.vtk   # optionally open a file on start
+ccdaf                      # launch the GUI
+ccdaf path/to/mesh.vtk     # open a surface on start
+ccdaf path/to/session.pkl  # open a bundle on start
+ccdaf path/to/scan.nii.gz  # open a segmentation on start
+ccdaf --version            # print the version and exit
+ccdaf --help               # usage
 ```
 
-The optional argument is passed to the main window as `initial_data`.
+The optional `PATH` is opened exactly as **File → Load data** would open it:
+the reader is chosen from the extension, so a `.pkl` bundle comes back with its
+tagging, seeds and electrodes, and a `.nii`/`.nii.gz` volume opens the
+segmentation view. A path that does not exist is reported on the command line
+and the window never opens.
 
 ## Documentation build (optional)
 
