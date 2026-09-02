@@ -69,6 +69,8 @@ class _Host:
     """
 
     def __init__(self, panel: ManualCorrectionWidget):
+        self._dirty = False
+        self._mark_dirty = lambda: CCDAF._mark_dirty(self)
         self._replace_mesh = lambda mesh: CCDAF._replace_mesh(self, mesh)
         self._new_manual_editor = lambda mesh: CCDAF._new_manual_editor(self, mesh)
         self.loader = MagicMock(mesh=None, path=None)

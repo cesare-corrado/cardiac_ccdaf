@@ -14,9 +14,11 @@ clipped result. Each step maps to a side panel; the full detail is in the
   <figcaption>The main window: the 3D viewport with the side-panel column and menubar.</figcaption>
 </figure>
 
-## 1. Load a mesh
+## 1. Load the data
 
-**File → Load** and pick a `.vtk` surface. It appears in the 3D view; the
+**File → Load data** and pick a `.vtk` surface — or a `.pkl` bundle, or a
+`.nii`/`.nii.gz` segmentation; the reader follows the extension. The same path
+can be given on the command line: `ccdaf path/to/mesh.vtk`. It appears in the 3D view; the
 **Mesh info** panel reports point/cell counts and available fields. Untagged
 cells start as *body*.
 
@@ -67,8 +69,9 @@ then:
 
 ## 6. Export
 
-**File → Save** writes the mesh (with tags, seeds, and — if a mapping is
-loaded — electrodes). For EAM, **EAM → Export** writes a Carto binary bundle or
+**File → Save data** writes the mesh (with tags, seeds, and — if a mapping is
+loaded — electrodes). If you close or quit with unsaved changes, CCDAF asks
+first — **Save**, **Discard** or **Cancel**. For EAM, **EAM → Export** writes a Carto binary bundle or
 a VTK. See [File formats](file-formats.md).
 
 ---

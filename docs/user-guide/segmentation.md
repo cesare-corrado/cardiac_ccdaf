@@ -61,7 +61,25 @@ Then:
 - **Segmentation → Export to VTK…** — runs marching cubes with the same
   parameters, adopts the result as the working mesh, and (if this segmentation
   came from a mesh loaded here) carries its fields and electrodes onto the new
-  surface.
+  surface. Converting closes the volume, so it offers to write it out as a
+  NIfTI file first.
+
+## Keeping the volume
+
+The volume is written by **Segmentation → Save segmentation…**, in the
+orientation it was loaded in.
+
+Anything that edits it — the brush, morphology, fill holes, the plane relabel,
+undo — and voxelising a mesh mark it *modified*. The two operations that drop
+it then offer to write it out first, through the same prompt:
+
+- **Segmentation → Close segmentation**, when there are unsaved edits;
+- **Segmentation → Export to VTK…**, always — the volume it converts from may
+  never have been on disk at all.
+
+**Yes** opens the NIfTI save dialog, **No** goes ahead without writing, and
+**Cancel** — like backing out of the save dialog — leaves the segmentation
+exactly as it was. Quitting, and **File → Close**, ask about it too.
 
 !!! warning "Electrodes and the two paths"
     **Export to VTK** recomputes electrode positions onto the reconstructed
