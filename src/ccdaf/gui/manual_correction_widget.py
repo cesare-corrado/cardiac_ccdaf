@@ -246,7 +246,12 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.uncheck_snake()
         self.btn_snake.setEnabled(True)
         self.btn_accept.setEnabled(True)
-        self.btn_fill_holes.setEnabled(False)
+        # Fill Holes stays live after accept. Accept leaves nothing
+        # unassigned, but the operation is not only a fill: it first drops the
+        # triangles straddling two regions, then regrows, which pulls touching
+        # labels apart again. That is still worth reaching for once tagging is
+        # accepted, so the button follows the panel like the other whole-mesh
+        # tools rather than parking here.
 
 
 __all__ = ["ManualCorrectionWidget"]
