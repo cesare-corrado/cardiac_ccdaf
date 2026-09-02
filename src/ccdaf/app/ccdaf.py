@@ -23,11 +23,15 @@ Segmentation workflow (parallel)
 
 Run
 ---
-    python ccdaf.py [path/to/mesh.vtk]
+    ccdaf [PATH]
+
+``PATH`` is any file File → Load data accepts — a surface mesh, a ``.pkl``
+bundle, or a ``.nii``/``.nii.gz`` segmentation — opened as the window comes up.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -174,6 +178,15 @@ class CCDAF(QtWidgets.QMainWindow):
         else:
             self.resize(1360, 860)
 
+        # Unsaved-work flags, one per thing that can be written out: the
+        # mesh (with its tagging and seeds) and the segmentation volume.
+        # Set by every edit, cleared by a load, a save or a close — what
+        # Close and Quit consult before throwing the work away. They are
+        # separate because the two are saved separately: closing a
+        # segmentation must not ask about an unrelated mesh edit.
+        self._dirty: bool = False
+        self._seg_dirty: bool = False
+
         # ---- mesh state -------------------------------------------------
         self.loader = MeshLoader()
         # One selector per seed type, keyed by profile.type_id; both sets can
@@ -249,19 +262,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._build_ui()
 
         if initial_data is not None:
-            _p = initial_data.lower()
-            if _p.endswith(".nii") or _p.endswith(".nii.gz"):
-                try:
-                    img = sitk.ReadImage(initial_data)
-                    self._set_segmentation(img)
-                    self.statusBar().showMessage(
-                        f"Loaded segmentation {Path(initial_data).name}"
-                        f"{self._seg_orientation_note()}"
-                    )
-                except Exception as exc:
-                    QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
-            else:
-                self._load_mesh(initial_data)
+            self._open_path(initial_data)
 
     # ==================================================================
     # UI
@@ -274,12 +275,12 @@ class CCDAF(QtWidgets.QMainWindow):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("&File")
 
-        self.act_load = QtWidgets.QAction("&Load mesh…", self)
+        self.act_load = QtWidgets.QAction("&Load data…", self)
         self.act_load.setShortcut(QtGui.QKeySequence.Open)
         self.act_load.triggered.connect(self._action_load)
         file_menu.addAction(self.act_load)
 
-        self.act_save = QtWidgets.QAction("&Save mesh…", self)
+        self.act_save = QtWidgets.QAction("&Save data…", self)
         self.act_save.setShortcut(QtGui.QKeySequence.Save)
         self.act_save.setEnabled(False)
         self.act_save.triggered.connect(self._action_save)
@@ -998,17 +999,44 @@ class CCDAF(QtWidgets.QMainWindow):
     # ==================================================================
     def _action_load(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load mesh", str(self.recent_folder),
+            self, "Load data", str(self.recent_folder),
             "All files (*);;"
             "Meshes (*.vtk *.vtp *.ply *.stl *.obj);;"
-            "Bundle (*.pkl *.pickle)",
+            "Bundle (*.pkl *.pickle);;"
+            "Segmentations (*.nii *.nii.gz)",
         )
         if not fn:
             return
-        if Path(fn).suffix.lower() in (".pkl", ".pickle"):
-            self._load_bundle(fn)
+        self._open_path(fn)
+
+    def _open_path(self, filename: str) -> None:
+        """Open *filename*, picking the reader from its extension.
+
+        The single entry point for "open this file": File → Load data and the
+        path given on the command line both come through here, so a bundle or
+        a segmentation opens the same way whichever asked for it.
+        """
+        low = filename.lower()
+        if low.endswith((".pkl", ".pickle")):
+            self._load_bundle(filename)
+        elif low.endswith((".nii", ".nii.gz")):
+            self._load_segmentation(filename)
         else:
-            self._load_mesh(fn)
+            self._load_mesh(filename)
+
+    def _load_segmentation(self, filename: str) -> None:
+        """Read a NIfTI volume from disk and make it the active segmentation."""
+        try:
+            img = sitk.ReadImage(filename)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        self.recent_folder = Path(filename).resolve().parent
+        self._set_segmentation(img)
+        self._clear_seg_dirty()
+        self.statusBar().showMessage(
+            f"Loaded segmentation {Path(filename).name}"
+            f"{self._seg_orientation_note()}")
 
     def _adopt_mesh(self, mesh: pv.PolyData, source_name: str) -> None:
         """Common setup once ``mesh`` is the working mesh, whatever its source.
@@ -1059,6 +1087,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.recent_folder = Path(filename).resolve().parent
         self._reset_eam_state()
         self._adopt_mesh(mesh, Path(filename).name)
+        self._clear_dirty()
 
     def _load_bundle(self, filename: str) -> None:
         """Load a File → Save pickle bundle: mesh, tagging, seeds, electrodes."""
@@ -1099,6 +1128,9 @@ class CCDAF(QtWidgets.QMainWindow):
             self._apply_loaded_seeds(landmarks, Path(filename).name,
                                      profile=SEED_PROFILES["landmarks_LA_UAC"])
 
+        # Everything the bundle carried is now exactly what is on disk.
+        self._clear_dirty()
+
     @staticmethod
     def _electrode_points_from_record(electrodes):
         """The (N, 3) electrode coordinates from a raw Carto record, or None."""
@@ -1119,6 +1151,77 @@ class CCDAF(QtWidgets.QMainWindow):
         self.vis_widget.set_electrodes_available(False)
         self.act_eam_export.setEnabled(False)
 
+    # ------------------------------------------------------------------
+    # Unsaved work
+    # ------------------------------------------------------------------
+    def _mark_dirty(self) -> None:
+        """Record that the mesh differs from what is on disk."""
+        self._dirty = True
+
+    def _clear_dirty(self) -> None:
+        """Record that the mesh matches what is on disk (or is gone)."""
+        self._dirty = False
+
+    def _mark_seg_dirty(self) -> None:
+        """Record that the segmentation differs from what is on disk."""
+        self._seg_dirty = True
+
+    def _clear_seg_dirty(self) -> None:
+        """Record that the segmentation matches what is on disk (or is gone)."""
+        self._seg_dirty = False
+
+    def _unsaved(self) -> Tuple[bool, bool]:
+        """``(mesh, segmentation)`` — which of the two is unsaved work.
+
+        A flag only counts while the thing it describes is still loaded, so a
+        stale one can never leave the user unable to close.
+        """
+        return (self._dirty and self.loader.mesh is not None,
+                self._seg_dirty and self._seg_array is not None)
+
+    def _confirm_discard(self, what: str) -> bool:
+        """Ask about unsaved work; True when the caller may proceed.
+
+        Offers Save / Discard / Cancel. Save writes whatever is unsaved — the
+        segmentation through Save segmentation… first, then the mesh through
+        File → Save data — and only lets the caller through once that actually
+        wrote something: cancelling a save dialog cancels the close rather
+        than silently discarding.
+        """
+        mesh_unsaved, seg_unsaved = self._unsaved()
+        if not (mesh_unsaved or seg_unsaved):
+            return True
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle("Unsaved changes")
+        box.setText("The data has been modified.")
+        box.setInformativeText(f"Do you want to save it before {what}?")
+        box.setStandardButtons(QtWidgets.QMessageBox.Save
+                               | QtWidgets.QMessageBox.Discard
+                               | QtWidgets.QMessageBox.Cancel)
+        box.setDefaultButton(QtWidgets.QMessageBox.Save)
+        choice = box.exec_()
+        if choice == QtWidgets.QMessageBox.Discard:
+            return True
+        if choice != QtWidgets.QMessageBox.Save:
+            return False
+        # The segmentation goes first: it is what the user is looking at when
+        # both are open, so it is the one they are answering about.
+        if seg_unsaved:
+            self._action_seg_save()
+        if mesh_unsaved:
+            self._action_save()
+        # A save that went through cleared its flag; one that was cancelled
+        # (or failed) did not, and that cancels the close too.
+        return not any(self._unsaved())
+
+    def closeEvent(self, event) -> None:
+        """Quit — via File → Quit or the window's close button — asks first."""
+        if self._confirm_discard("quitting"):
+            event.accept()
+        else:
+            event.ignore()
+
     def _sync_close_action(self) -> None:
         """File → Close applies whenever a mesh or a segmentation is open."""
         self.act_close.setEnabled(self.loader.mesh is not None
@@ -1126,8 +1229,10 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _action_close(self) -> None:
         """File → Close: unload everything, back to the startup state."""
+        if not self._confirm_discard("closing"):
+            return
         if self._seg_array is not None:
-            self._action_seg_close()
+            self._close_segmentation()
 
         # EAM state.
         self._eam_directory = None
@@ -1166,6 +1271,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_save.setEnabled(False)
         self.act_seg_from_mesh.setEnabled(False)
         self._sync_close_action()
+        self._clear_dirty()
         self.statusBar().showMessage("Closed.")
 
     def _action_save(self) -> None:
@@ -1207,6 +1313,8 @@ class CCDAF(QtWidgets.QMainWindow):
                     f"— wrote {written}")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self._clear_dirty()
 
     def _seeds_for_key(self, type_id: str) -> "Optional[dict]":
         """Seeds of the *type_id* set as ``{name: xyz}`` when complete, else None."""
@@ -1782,6 +1890,7 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _on_seed_progress(self, profile: SeedProfile, next_name: str,
                           done: int, total: int) -> None:
+        self._mark_dirty()
         # Only the active set drives the panel; a background load stays quiet.
         if profile.type_id != self._seed_type:
             return
@@ -1930,6 +2039,7 @@ class CCDAF(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents()
         try:
             self.tagger.tag(seed_sel.seeds_for_tagging())
+            self._mark_dirty()
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Tagging failed", str(exc))
             return
@@ -2046,6 +2156,7 @@ class CCDAF(QtWidgets.QMainWindow):
             stray = int(np.count_nonzero(cleaned != tags))
             if stray:
                 self.loader.mesh.cell_data["elemTag"] = cleaned
+        self._mark_dirty()
         self.manual_widget.on_accepted()
         self._render_mesh()
         self.clipping_widget.set_enabled_after_accept()
@@ -2055,6 +2166,7 @@ class CCDAF(QtWidgets.QMainWindow):
             f"Tagging accepted{note}. Proceed to clipping.")
 
     def _on_edit_committed(self) -> None:
+        self._mark_dirty()
         if self.editor is not None:
             self.manual_widget.set_undo_enabled(self.editor.can_undo)
 
@@ -2233,6 +2345,7 @@ class CCDAF(QtWidgets.QMainWindow):
     # ==================================================================
     def _replace_mesh(self, new_mesh: pv.PolyData) -> None:
         self.loader.mesh = new_mesh
+        self._mark_dirty()
         # Post-processing can add or drop arrays, so re-offer what the new
         # mesh actually has — keeping the user on their field if it survived.
         self._populate_fields(keep_selection=True)
@@ -2488,6 +2601,7 @@ class CCDAF(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
             return False
+        self._clear_seg_dirty()
         self.statusBar().showMessage(
             f"Saved segmentation to {fn}{self._seg_orientation_note()}")
         return True
@@ -2508,6 +2622,8 @@ class CCDAF(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Voxelisation failed", str(exc))
             return
         self._set_segmentation(img)
+        # A voxelisation exists nowhere on disk yet, however clean the mesh is.
+        self._mark_seg_dirty()
         # Remember what this segmentation was made from. Converting it back
         # needs all three: the surface to read the fields off, the flip to
         # undo (the export prompt asks again, and may disagree), and the
@@ -2529,22 +2645,10 @@ class CCDAF(QtWidgets.QMainWindow):
         if flip is None:
             return
 
-        # Optionally save the segmentation as NIfTI first.
-        reply = QtWidgets.QMessageBox.question(
-            self, "Save segmentation?",
-            "Save the segmentation as a NIfTI file before converting?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No,
-        )
-        if reply == QtWidgets.QMessageBox.Yes:
-            fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-                self, "Save segmentation", str(self.recent_folder),
-                "NIfTI (*.nii *.nii.gz);;All files (*)",
-            )
-            if fn:
-                self.recent_folder = Path(fn).resolve().parent
-                if not self._write_segmentation(fn):
-                    return
+        # Converting closes the segmentation, so offer to keep it first.
+        if not self._offer_save_segmentation(
+                "Save the segmentation as a NIfTI file before converting?"):
+            return
 
         # Convert segmentation to VTK polydata via marching cubes.
         self.statusBar().showMessage("Running marching cubes…")
@@ -2572,7 +2676,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # Render the converted surface in the 3D quadrant while still in
         # segmentation mode, then close (reverts plotter to 1×1).
         self._action_seg_update_3d()
-        self._action_seg_close()
+        self._close_segmentation()
 
         # Replace the previously loaded mesh with the converted polydata so
         # that all subsequent operations (tagging, clipping, …) act on it.
@@ -2782,8 +2886,50 @@ class CCDAF(QtWidgets.QMainWindow):
         self._action_seg_update_3d()
         self._sync_close_action()
 
+    def _offer_save_segmentation(self, question: str) -> bool:
+        """Offer to write the volume to NIfTI; False means "abort the caller".
+
+        Yes opens the save dialog; No goes on without writing; Cancel — and a
+        cancelled save dialog, and a failed write — abort, so the volume is
+        never dropped on the assumption that it was written. Shared by
+        Segmentation → Close and Export to VTK, so the two offer it alike.
+        """
+        if self._seg_array is None:
+            return True
+        reply = QtWidgets.QMessageBox.question(
+            self, "Save segmentation?", question,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+            | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if reply == QtWidgets.QMessageBox.Cancel:
+            return False
+        if reply != QtWidgets.QMessageBox.Yes:
+            return True
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save segmentation", str(self.recent_folder),
+            "NIfTI (*.nii *.nii.gz);;All files (*)",
+        )
+        if not fn:
+            return False
+        self.recent_folder = Path(fn).resolve().parent
+        return self._write_segmentation(fn)
+
     def _action_seg_close(self) -> None:
-        """Drop the active segmentation and revert the plotter to 1×1."""
+        """Segmentation → Close segmentation, offering to save it first."""
+        if self._seg_dirty and not self._offer_save_segmentation(
+                "The segmentation has been modified.\n\n"
+                "Save it as a NIfTI file before closing it?"):
+            return
+        self._close_segmentation()
+
+    def _close_segmentation(self) -> None:
+        """Drop the active segmentation and revert the plotter to 1×1.
+
+        The teardown alone — asking about unsaved edits is the caller's job,
+        so the callers that already asked (File → Close, Export to VTK) do
+        not ask twice.
+        """
         if self._seg_plane_widget is not None or self.seg_widget.btn_plane.isChecked():
             try:
                 self.plotter.clear_plane_widgets()
@@ -2806,6 +2952,7 @@ class CCDAF(QtWidgets.QMainWindow):
         for other_sec in ["meshinfo","postproc","seeds","tagging","manual","clipping"]:
             self._set_section_visible(other_sec, True)
         self._sync_close_action()
+        self._clear_seg_dirty()
         self.statusBar().showMessage("Segmentation closed.")
 
     def _sync_sitk_from_array(self) -> None:
@@ -3412,6 +3559,7 @@ class CCDAF(QtWidgets.QMainWindow):
         if self._seg_array is None:
             return
         self._seg_undo_stack.append(self._seg_array.copy())
+        self._mark_seg_dirty()
         if len(self._seg_undo_stack) > 2:
             self._seg_undo_stack.pop(0)
         self.seg_widget.set_undo_enabled(True)
@@ -3420,6 +3568,7 @@ class CCDAF(QtWidgets.QMainWindow):
         if not self._seg_undo_stack:
             return
         self._seg_array = self._seg_undo_stack.pop()
+        self._mark_seg_dirty()
         self._sync_sitk_from_array()
         self._refresh_slices()
         self.seg_widget.set_undo_enabled(bool(self._seg_undo_stack))
@@ -3714,10 +3863,32 @@ def _label_name(tag: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The command-line parser: one optional file to open on start-up."""
+    parser = argparse.ArgumentParser(
+        prog="ccdaf",
+        description="CCDAF — Cardiac Clinical Data Analysis Framework.",
+    )
+    parser.add_argument(
+        "path", nargs="?", metavar="PATH",
+        help="data file to open on start-up: a surface mesh (.vtk, .vtp, "
+             ".ply, .stl, .obj), a .pkl/.pickle bundle, or a .nii/.nii.gz "
+             "segmentation. Opens the same way as File → Load data.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"ccdaf {__version__}")
+    return parser
+
+
+def main(argv: "Optional[list]" = None) -> int:
+    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    if args.path is not None and not Path(args.path).exists():
+        # Fail on the command line rather than behind a modal dialog the
+        # window would raise a moment after it appeared.
+        print(f"ccdaf: no such file: {args.path}", file=sys.stderr)
+        return 2
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    initial = sys.argv[1] if len(sys.argv) > 1 else None
-    win = CCDAF(initial_data=initial)
+    win = CCDAF(initial_data=args.path)
     win.show()
     return app.exec_()
 
