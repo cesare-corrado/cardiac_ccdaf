@@ -17,12 +17,20 @@ Two clipping operations, driven interactively:
     ``SetClosestPoint``) identifies the PV region, which is then
     discarded. The resulting hole is left open.
 
-2.  **Mitral clip** — either
+2.  **Geometric clip** — either
       * **Sphere**: interactive ``vtkSphereWidget``; triangles whose
         centroid lies inside the sphere are removed; or
       * **Plane**:  interactive ``vtkPlaneWidget``; triangles on the
-        "mitral side" of the plane are removed.
-    The mitral hole is likewise left open.
+        seed's side of the plane are removed.
+    The resulting hole is likewise left open. Both are driven from a
+    *seed* — the anatomical point the widget is first placed on — and
+    so serve the mitral valve and the pulmonary veins alike: the seed
+    is whichever region the user selected, not the MV by construction.
+
+    Each geometry is remembered per seed key once its widget goes away
+    (see ``pose_for`` / ``remember_pose``), so restarting a clip resumes
+    where the last one left off instead of jumping back to the seed
+    default. ``reset_pose`` is the deliberate way back to that default.
 
 All clips preserve ``elemTag`` on surviving triangles (no cells are
 split). Clipped meshes are deliberately non-manifold at the ostium /
@@ -48,8 +56,8 @@ from scipy.spatial import cKDTree
 class ClipMode(Enum):
     NONE        = auto()
     PV_CONTOUR  = auto()
-    MV_SPHERE   = auto()
-    MV_PLANE    = auto()
+    SPHERE      = auto()
+    PLANE       = auto()
 
 
 @dataclass
@@ -177,7 +185,7 @@ def _subgraph_path(graph: csr_matrix, start: int, end: int) -> List[int]:
 
 # ---------------------------------------------------------------------------
 class ClippingTool:
-    """Interactive PV + mitral clipping with multi-undo and integrity checks."""
+    """Interactive contour + geometric clipping with multi-undo and checks."""
 
     _TOL_ABS_FLOOR: float = 1e-8
     _CLOSURE_TOL_REL: float = 1e-6
@@ -193,6 +201,9 @@ class ClippingTool:
         self.set_mesh = mesh_setter
         self.plotter = plotter
         self.on_status = on_status
+        # Fired whenever the live sphere/plane geometry changes, so a panel
+        # can show the numbers. Payload: (ClipMode, dict of named floats).
+        self.on_pose_changed: Optional[Callable[[ClipMode, dict], None]] = None
 
         self._mode: ClipMode = ClipMode.NONE
 
@@ -224,12 +235,20 @@ class ClippingTool:
 
         # Clip preview actor (red overlay of to-be-clipped triangles).
         self._preview_actor = None
-        # Fixed reference point used to determine the mitral-side for the
-        # plane preview (stored on start_mv_plane, equals the initial origin).
-        self._mv_seed: Optional[np.ndarray] = None
+        # Fixed reference point deciding which half of the plane goes; set
+        # by start_plane and held apart from the plane's own origin.
+        self._side_seed: Optional[np.ndarray] = None
 
         # Multi-undo history stack (deep copies).
         self._history: List[pv.PolyData] = []
+
+        # Last geometry per (seed key, mode), captured when a widget goes
+        # away. Restarting a clip on the same seed resumes from it rather
+        # than from the seed default — reverting a clip should not cost the
+        # user the sphere they spent time placing. Scoped to this tool, so a
+        # newly loaded mesh (which rebuilds the tool) starts clean.
+        self._pose_memory: dict = {}
+        self._seed_key: str = ""
 
     # ==================================================================
     # Common helpers
@@ -242,7 +261,7 @@ class ClippingTool:
     def can_undo(self) -> bool:
         """True when a previous mesh state is available to restore.
 
-        Both PV and mitral clips push a snapshot before modifying the mesh,
+        Every clip pushes a snapshot before modifying the mesh,
         so this gates the host's revert/undo button for either clip type."""
         return bool(self._history)
 
@@ -268,6 +287,16 @@ class ClippingTool:
             return
         self._history.append(m.copy(deep=True))
 
+    def drop_snapshot(self) -> None:
+        """Discard the newest snapshot without touching the mesh.
+
+        Restarting a widget-based clip pushes a snapshot of a mesh that was
+        never modified. Resetting the widget is one such restart, and without
+        this the undo stack would grow a rung per reset that reverts to the
+        state already on screen."""
+        if self._history:
+            self._history.pop()
+
     def restore(self) -> None:
         if not self._history:
             return
@@ -285,12 +314,22 @@ class ClippingTool:
         return True
 
     def cancel(self) -> None:
+        # Every exit from a geometric clip funnels through here, so this is
+        # the one place the pose has to be saved for a later resume.
+        self._capture_pose()
         self._mode = ClipMode.NONE
         self._clear_contour()
         self._clear_subgraph()
         self._clear_preview()
         self._remove_sphere_widget()
         self._remove_plane_widget()
+        # Switching a widget off does not repaint on its own, so without this
+        # the sphere or plane stays drawn until something else triggers a
+        # render — looking to the user like two live widgets at once.
+        try:
+            self.plotter.render()
+        except Exception:
+            pass
         try:
             self.plotter.disable_picking()
         except Exception:
@@ -802,11 +841,89 @@ class ClippingTool:
         return ClipResult(mesh=kept, n_removed=n_removed)
 
     # ==================================================================
-    # Mitral clipping — sphere
+    # Pose memory
     # ==================================================================
-    def start_mv_sphere(self, center: Sequence[float], radius: float) -> None:
+    def pose_for(self, seed_key: str, mode: ClipMode) -> Optional[dict]:
+        """The remembered geometry for ``seed_key`` in ``mode``, if any.
+
+        Callers use it to decide whether a clip resumes from where the last
+        one was left or starts at the seed default; ``None`` means nothing
+        has been placed on that seed in that mode yet."""
+        entry = self._pose_memory.get((str(seed_key), mode))
+        return dict(entry) if entry is not None else None
+
+    def remember_pose(self, seed_key: str, mode: ClipMode, pose: dict) -> None:
+        self._pose_memory[(str(seed_key), mode)] = dict(pose)
+
+    def forget_pose(self, seed_key: str, mode: ClipMode) -> None:
+        """Drop the remembered geometry — the "reset to default" half.
+
+        Resetting has to erase the memory as well as move the widget, or the
+        next start would helpfully restore what the user just asked to be rid
+        of."""
+        self._pose_memory.pop((str(seed_key), mode), None)
+
+    def _capture_pose(self) -> None:
+        """Record the live widget's geometry against the current seed key.
+
+        Called wherever a widget is about to disappear — cancel, mode switch,
+        picker hand-off, apply — so every route out of a clip leaves the pose
+        behind rather than only the tidy ones."""
+        if not self._seed_key:
+            return
+        if self._sphere_widget is not None:
+            self.remember_pose(self._seed_key, ClipMode.SPHERE,
+                               self._sphere_pose())
+        if self._plane_widget is not None:
+            self.remember_pose(self._seed_key, ClipMode.PLANE,
+                               self._plane_pose())
+
+    def _sphere_pose(self) -> dict:
+        c = self._sphere_widget.GetCenter()
+        return {"cx": float(c[0]), "cy": float(c[1]), "cz": float(c[2]),
+                "radius": float(self._sphere_widget.GetRadius())}
+
+    def _plane_pose(self) -> dict:
+        o = self._plane_widget.GetOrigin()
+        n = self._plane_widget.GetNormal()
+        return {"ox": float(o[0]), "oy": float(o[1]), "oz": float(o[2]),
+                "nx": float(n[0]), "ny": float(n[1]), "nz": float(n[2])}
+
+    def current_pose(self) -> Optional[dict]:
+        """The live widget's geometry, or ``None`` when no widget is up."""
+        if self._mode is ClipMode.SPHERE and self._sphere_widget is not None:
+            return self._sphere_pose()
+        if self._mode is ClipMode.PLANE and self._plane_widget is not None:
+            return self._plane_pose()
+        return None
+
+    def _emit_pose(self) -> None:
+        if self.on_pose_changed is None:
+            return
+        pose = self.current_pose()
+        if pose is not None:
+            self.on_pose_changed(self._mode, pose)
+
+    # ==================================================================
+    # Geometric clipping — sphere
+    # ==================================================================
+    def start_sphere(
+        self,
+        center: Sequence[float],
+        radius: float,
+        seed_key: str = "",
+    ) -> None:
+        """Raise the sphere widget at ``center`` / ``radius``.
+
+        ``seed_key`` names the anatomical point the sphere belongs to (the
+        region whose seed it was placed on); it is what the pose memory is
+        filed under. Callers wanting the remembered geometry ask ``pose_for``
+        first and pass it in — the tool does not silently override the
+        centre it was handed, so "start where I left off" and "start at the
+        seed" stay the caller's choice, visible in the call."""
         self.cancel()
-        self._mode = ClipMode.MV_SPHERE
+        self._mode = ClipMode.SPHERE
+        self._seed_key = str(seed_key)
         self._snapshot()
 
         w = vtk.vtkSphereWidget()
@@ -816,39 +933,71 @@ class ClippingTool:
         w.SetRadius(float(radius))
         w.GetSphereProperty().SetOpacity(0.35)
         w.GetSphereProperty().SetColor(1.0, 0.3, 0.3)
+        # Two observers, two jobs: the numbers track the drag continuously,
+        # while the red preview — which re-tests every triangle centroid — is
+        # recomputed only once the drag ends.
+        w.AddObserver("InteractionEvent", self._on_sphere_interaction)
         w.AddObserver("EndInteractionEvent", self._update_sphere_preview)
         w.On()
         self._sphere_widget = w
+        self._emit_pose()
         self._status(
             "Sphere: left-drag it to move, right-drag to resize — then "
             "‘Apply clip’ removes everything inside it."
         )
 
-    def apply_mv_sphere(self) -> Optional[ClipResult]:
-        if self._mode is not ClipMode.MV_SPHERE or self._sphere_widget is None:
+    def set_sphere_pose(self, pose: dict) -> None:
+        """Drive the live sphere from typed-in numbers.
+
+        The panel's spin boxes are an equal partner to the mouse, so the
+        preview is refreshed exactly as an end-of-drag would."""
+        if self._sphere_widget is None:
+            return
+        self._sphere_widget.SetCenter(
+            float(pose["cx"]), float(pose["cy"]), float(pose["cz"]))
+        self._sphere_widget.SetRadius(max(float(pose["radius"]),
+                                          self._TOL_ABS_FLOOR))
+        self._update_sphere_preview()
+
+    def apply_sphere(self) -> Optional[ClipResult]:
+        if self._mode is not ClipMode.SPHERE or self._sphere_widget is None:
             return None
         center = np.array(self._sphere_widget.GetCenter(), dtype=float)
         radius = float(self._sphere_widget.GetRadius())
+        self._capture_pose()
 
         mesh = self.get_mesh()
         centroids = self._triangle_centroids(mesh)
         dist = np.linalg.norm(centroids - center, axis=1)
         keep_mask = dist > radius
-        return self._finalize_mv_clip(mesh, keep_mask)
+        return self._finalize_geometric_clip(mesh, keep_mask)
 
     # ==================================================================
-    # Mitral clipping — plane
+    # Geometric clipping — plane
     # ==================================================================
-    def start_mv_plane(
-        self, origin: Sequence[float], normal: Sequence[float],
+    def start_plane(
+        self,
+        origin: Sequence[float],
+        normal: Sequence[float],
+        seed: Optional[Sequence[float]] = None,
+        seed_key: str = "",
     ) -> None:
+        """Raise the plane widget at ``origin`` with ``normal``.
+
+        ``seed`` is the anatomical point whose side of the plane gets clipped,
+        and is kept apart from ``origin`` on purpose: a resumed plane starts at
+        the origin the user left it on, which lies *in* the plane and so says
+        nothing about which half to discard. Defaults to ``origin`` — right for
+        a first placement, where the two coincide."""
         self.cancel()
-        self._mode = ClipMode.MV_PLANE
+        self._mode = ClipMode.PLANE
+        self._seed_key = str(seed_key)
         self._snapshot()
 
-        # Store the initial origin as the fixed mitral-side reference point so
-        # the preview can determine which half to shade while the plane moves.
-        self._mv_seed = np.asarray(origin, dtype=float).copy()
+        # Fixed reference point for the "which half" question, held while the
+        # plane moves.
+        ref = origin if seed is None else seed
+        self._side_seed = np.asarray(ref, dtype=float).copy()
 
         w = vtk.vtkImplicitPlaneWidget()
         w.SetInteractor(self.plotter.iren.interactor)
@@ -860,48 +1009,65 @@ class ClippingTool:
         w.SetNormal(*[float(n) for n in normal])
         w.DrawPlaneOff()
         w.OutlineTranslationOff()
+        w.AddObserver("InteractionEvent", self._on_plane_interaction)
         w.AddObserver("EndInteractionEvent", self._update_plane_preview)
         w.On()
         self._plane_widget = w
+        self._emit_pose()
         self._status(
             "Plane: left-drag the arrowhead to tilt, the rim to slide along "
             "the arrow, the centre ball to shift sideways — then ‘Apply clip’."
         )
 
-    def apply_mv_plane(self, mitral_seed: Sequence[float]) -> Optional[ClipResult]:
-        if self._mode is not ClipMode.MV_PLANE or self._plane_widget is None:
+    def set_plane_pose(self, pose: dict) -> None:
+        """Drive the live plane from typed-in numbers."""
+        if self._plane_widget is None:
+            return
+        normal = np.array([float(pose["nx"]), float(pose["ny"]),
+                           float(pose["nz"])], dtype=float)
+        if float(np.linalg.norm(normal)) < self._TOL_ABS_FLOOR:
+            return
+        self._plane_widget.SetOrigin(
+            float(pose["ox"]), float(pose["oy"]), float(pose["oz"]))
+        self._plane_widget.SetNormal(*normal)
+        self._update_plane_preview()
+
+    def apply_plane(self, side_seed: Sequence[float]) -> Optional[ClipResult]:
+        """Clip away the half of the mesh that ``side_seed`` sits in."""
+        if self._mode is not ClipMode.PLANE or self._plane_widget is None:
             return None
+        self._capture_pose()
         origin = np.array(self._plane_widget.GetOrigin(), dtype=float)
         normal = np.array(self._plane_widget.GetNormal(), dtype=float)
         n_norm = float(np.linalg.norm(normal))
         if n_norm < self._TOL_ABS_FLOOR:
-            self._status("Mitral plane ambiguous — invalid normal.")
+            self._status("Clip plane ambiguous — invalid normal.")
             return None
         normal = normal / n_norm
 
         mesh = self.get_mesh()
-        seed = np.asarray(mitral_seed, dtype=float).reshape(3)
+        seed = np.asarray(side_seed, dtype=float).reshape(3)
 
         eps = self._tolerance(mesh)
         seed_side = float((seed - origin) @ normal)
         if abs(seed_side) < eps:
-            self._status("Mitral plane ambiguous — adjust plane")
+            self._status("Clip plane ambiguous — adjust plane")
             return None
 
         centroids = self._triangle_centroids(mesh)
         signed = (centroids - origin) @ normal
         keep_mask = (signed * seed_side) < 0.0
-        return self._finalize_mv_clip(mesh, keep_mask)
+        return self._finalize_geometric_clip(mesh, keep_mask)
 
     # ==================================================================
-    # Shared mitral finalization
+    # Shared finalization for the geometric clips
     # ==================================================================
-    def _finalize_mv_clip(
+    def _finalize_geometric_clip(
         self, mesh: pv.PolyData, keep_mask: np.ndarray,
     ) -> ClipResult:
         kept_count = int(keep_mask.sum())
         if kept_count == 0 or kept_count == mesh.n_cells:
-            self._status("Mitral clip: nothing would be clipped — aborted.")
+            self._status("Clip: nothing would be clipped — aborted.")
             self.restore()
             self.cancel()
             return ClipResult(mesh=self.get_mesh(), n_removed=0)
@@ -910,7 +1076,7 @@ class ClippingTool:
 
         if not self._validate_mesh(kept):
             self._status(
-                "Mitral clip: post-clip mesh is empty or degenerate — reverted."
+                "Clip: post-clip mesh is empty or degenerate — reverted."
             )
             self.restore()
             self.cancel()
@@ -921,8 +1087,8 @@ class ClippingTool:
 
         n_removed = int(mesh.n_cells - kept_count)
         self._status(
-            f"Mitral clip done — removed {n_removed} triangles "
-            f"(mesh is now open at the mitral annulus)."
+            f"Clip done — removed {n_removed} triangles "
+            f"(mesh is now open where the geometry cut it)."
         )
         return ClipResult(mesh=kept, n_removed=n_removed)
 
@@ -946,7 +1112,19 @@ class ClippingTool:
                 pass
             self._preview_actor = None
 
+    def _on_sphere_interaction(self, obj=None, event=None) -> None:
+        """Mid-drag: publish the numbers, leave the overlay alone.
+
+        Re-testing every triangle centroid on each mouse move is what would
+        make a large mesh feel sticky, and the overlay is the expensive half —
+        the readout is three floats."""
+        self._emit_pose()
+
+    def _on_plane_interaction(self, obj=None, event=None) -> None:
+        self._emit_pose()
+
     def _update_sphere_preview(self, obj=None, event=None) -> None:
+        self._emit_pose()
         self._clear_preview()
         if self._sphere_widget is None:
             return
@@ -972,8 +1150,9 @@ class ClippingTool:
         self.plotter.render()
 
     def _update_plane_preview(self, obj=None, event=None) -> None:
+        self._emit_pose()
         self._clear_preview()
-        if self._plane_widget is None or self._mv_seed is None:
+        if self._plane_widget is None or self._side_seed is None:
             return
         mesh = self.get_mesh()
         if mesh is None:
@@ -984,7 +1163,7 @@ class ClippingTool:
         if n_norm < self._TOL_ABS_FLOOR:
             return
         normal = normal / n_norm
-        seed_side = float((self._mv_seed - origin) @ normal)
+        seed_side = float((self._side_seed - origin) @ normal)
         if abs(seed_side) < self._TOL_ABS_FLOOR:
             return
         centroids = self._triangle_centroids(mesh)

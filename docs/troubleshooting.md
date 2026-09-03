@@ -59,8 +59,8 @@ at the next one in the order — the status bar names it. (Starting over is what
 **Reset seeds** is for; after a reset, **Start** begins from the first seed as
 usual.) A pending triangle selection survives too, and tags are untouched.
 
-Only a **PV contour in progress is abandoned**, since the clip needs its picks
-to mean anything; restart it with **Start PV contour**.
+Only a **contour in progress is abandoned**, since the clip needs its picks
+to mean anything; restart it with **Start**.
 
 ## The clipping controls stay greyed out
 

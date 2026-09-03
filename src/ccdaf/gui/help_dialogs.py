@@ -96,10 +96,14 @@ commits the manual-correction selection batch.</p>
   <li><b>Correct by hand</b> — in <i>Manual correction</i>, pick a label, then
       select triangles with <b>X</b> (press <b>C</b> to commit) or use the
       snake.</li>
-  <li><b>Clip</b> — tick <i>Clipping active</i>, then draw a PV contour or place
-      a mitral sphere/plane and <i>Apply clip</i>. Ticking the box accepts the
-      tagging for you if that step is still open, so a mesh reloaded from an
-      earlier session can start here.</li>
+  <li><b>Clip</b> — tick <i>Clipping active</i>, choose a <i>Region</i> and a
+      <i>Mode</i> (contour, sphere or plane), then <i>Start</i>, place the
+      contour or the widget, and <i>Apply clip</i>. <i>Undo / reset</i> takes
+      back the last contour point, or returns a sphere/plane to the region's
+      seed. <i>Revert clip</i> undoes applied clips one at a time — the sphere
+      or plane comes back where you left it when you press <i>Start</i> again.
+      Ticking the box accepts the tagging for you if that step is still open,
+      so a mesh reloaded from an earlier session can start here.</li>
   <li><b>Export</b> — <i>File &rarr; Save data</i>, or <i>EAM &rarr; Export</i> for a
       Carto bundle / VTK. Closing or quitting with unsaved changes asks first.</li>
 </ol>
@@ -123,7 +127,7 @@ SHORTCUTS_HTML = """
       drop a point for a snake tool</td></tr>
   <tr><td><b>C</b></td><td>Commit the manual-correction selection batch</td></tr>
 </table>
-<h3>Mitral clip widgets</h3>
+<h3>Sphere / plane clip widgets</h3>
 <p>While a sphere or plane is up, a drag that starts <i>on the widget</i> moves
 the widget, not the camera.</p>
 <table cellpadding="4">
@@ -136,6 +140,9 @@ the widget, not the camera.</p>
   <tr><td><b>Plane: right-drag</b></td><td>Resize the widget's box only —
       the clip is unchanged</td></tr>
 </table>
+<p>The panel shows the sphere's centre and radius, or the plane's centre and
+normal, while you drag — and the boxes are editable, so a radius can be typed
+rather than eyeballed.</p>
 <p><b>Who owns <code>X</code>:</b> it is the <i>pick</i> key, shared by
 manual-correction selection, the manual snake and the PV-contour snake; the
 <i>Clipping active</i> checkbox decides whether it belongs to clipping or to

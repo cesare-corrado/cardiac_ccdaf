@@ -8,7 +8,7 @@ Workflow
                                                 │
                                               yes
                                                 ▼
-                          CLIP (PV contours, mitral sphere/plane)
+                          CLIP (contours, sphere/plane on any region)
                                                 │
                                               yes
                                                 ▼
@@ -79,7 +79,9 @@ from ccdaf.gui.mesh_info_widget import MeshInfoWidget
 from ccdaf.gui.seed_widget import SeedWidget
 from ccdaf.gui.tagging_widget import TaggingWidget
 from ccdaf.gui.manual_correction_widget import ManualCorrectionWidget
-from ccdaf.gui.clipping_widget import ClippingWidget
+from ccdaf.gui.clipping_widget import (
+    ClippingWidget, MODE_CONTOUR, MODE_SPHERE, MODE_PLANE,
+)
 from ccdaf.gui.eam_load_dialog import (
     EAMLoadDialog, FORMAT_CARTO_STUDY, FORMAT_CARTO_MAPPINGS,
 )
@@ -454,14 +456,21 @@ class CCDAF(QtWidgets.QMainWindow):
         body.addWidget(self.manual_widget)
 
         # --- Clipping ---------------------------------------------------
-        self.clipping_widget = ClippingWidget(pv_names=list(PV_NAMES))
-        self.clipping_widget.pv_start_requested.connect(self._action_pv_start)
-        self.clipping_widget.pv_undo_point_requested.connect(self._action_pv_undo_point)
-        self.clipping_widget.pv_finish_requested.connect(self._action_pv_finish)
-        self.clipping_widget.mv_sphere_requested.connect(self._action_mv_sphere_start)
-        self.clipping_widget.mv_plane_requested.connect(self._action_mv_plane_start)
-        self.clipping_widget.clip_apply_requested.connect(self._action_clip_apply)
-        self.clipping_widget.clip_revert_requested.connect(self._action_clip_revert)
+        # The mitral valve joins the veins in the region list: a sphere or a
+        # plane is placed on a seed, and MV is a seed like any other.
+        self.clipping_widget = ClippingWidget(
+            region_names=list(PV_NAMES) + ["MV"])
+        self.clipping_widget.start_requested.connect(self._action_clip_start)
+        self.clipping_widget.undo_reset_requested.connect(
+            self._action_clip_undo_reset)
+        self.clipping_widget.apply_requested.connect(self._action_clip_apply)
+        self.clipping_widget.revert_requested.connect(self._action_clip_revert)
+        self.clipping_widget.sphere_pose_edited.connect(
+            self._action_sphere_pose_edited)
+        self.clipping_widget.plane_pose_edited.connect(
+            self._action_plane_pose_edited)
+        self.clipping_widget.selection_changed.connect(
+            self._action_clip_selection_changed)
         self.clipping_widget.clipping_toggled.connect(self._on_clipping_toggled)
         body = self._register_section(v, "clipping", "Clipping")
         body.addWidget(self.clipping_widget)
@@ -893,6 +902,7 @@ class CCDAF(QtWidgets.QMainWindow):
             plotter=self.plotter,
             on_status=self.statusBar().showMessage,
         )
+        self.clipper.on_pose_changed = self._on_clip_pose_changed
         self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
@@ -1157,6 +1167,7 @@ class CCDAF(QtWidgets.QMainWindow):
             plotter=self.plotter,
             on_status=self.statusBar().showMessage,
         )
+        self.clipper.on_pose_changed = self._on_clip_pose_changed
         self._reset_view()
         # A plain mesh has fields too (elemTag, and whatever the file carried),
         # so the visualisation panel applies to it just as much as to a mapping.
@@ -1555,6 +1566,7 @@ class CCDAF(QtWidgets.QMainWindow):
             plotter=self.plotter,
             on_status=self.statusBar().showMessage,
         )
+        self.clipper.on_pose_changed = self._on_clip_pose_changed
         self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
@@ -2339,142 +2351,287 @@ class CCDAF(QtWidgets.QMainWindow):
             if n else f"{name} ({ops}): nothing to smooth.")
 
     # ==================================================================
-    # Clipping — PV
+    # Clipping
     # ==================================================================
-    def _action_pv_start(self, pv_name: str) -> None:
+    def _seed_xyz(self, name: str) -> Optional[np.ndarray]:
+        """The picked coordinate of seed ``name``, or None if unpicked."""
+        seed_sel = self._seed_selector()
+        if seed_sel is None or name not in seed_sel.seeds:
+            return None
+        return seed_sel.seeds[name].xyz
+
+    def _require_seed(self, name: str) -> Optional[np.ndarray]:
+        """``_seed_xyz`` with the complaint attached.
+
+        A sphere or plane has to be placed *somewhere*; the region's seed is
+        that somewhere, so an unpicked seed is a stop, not a fallback."""
+        seed = self._seed_xyz(name)
+        if seed is None:
+            QtWidgets.QMessageBox.warning(
+                self, "No seed",
+                f"Select the {name} seed during seed selection first.",
+            )
+        return seed
+
+    def _default_sphere_pose(self, seed: np.ndarray) -> dict:
+        """First-placement sphere: on the seed, 5 % of the bounding diagonal.
+
+        Scaling to the mesh rather than a fixed length keeps the sphere
+        usable whatever units the mesh arrived in."""
+        b = self.loader.mesh.bounds
+        diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
+        return {"cx": float(seed[0]), "cy": float(seed[1]),
+                "cz": float(seed[2]), "radius": 0.05 * diag}
+
+    def _default_plane_pose(self, seed: np.ndarray) -> dict:
+        """First-placement plane: through the seed, facing out of the mesh.
+
+        The centre→seed direction is the outward one at every seed, so the
+        same construction serves a vein and the mitral valve alike."""
+        c = np.asarray(self.loader.mesh.center, dtype=float)
+        normal = np.asarray(seed, dtype=float) - c
+        n = float(np.linalg.norm(normal))
+        if n < 1e-9:
+            normal = np.array([0.0, 0.0, 1.0])
+        else:
+            normal = normal / n
+        return {"ox": float(seed[0]), "oy": float(seed[1]),
+                "oz": float(seed[2]), "nx": float(normal[0]),
+                "ny": float(normal[1]), "nz": float(normal[2])}
+
+    def _on_clip_pose_changed(self, mode: ClipMode, pose: dict) -> None:
+        """Mirror the 3D widget's geometry into the panel's boxes."""
+        if mode is ClipMode.SPHERE:
+            self.clipping_widget.set_sphere_pose(pose)
+        elif mode is ClipMode.PLANE:
+            self.clipping_widget.set_plane_pose(pose)
+
+    # ------------------------------------------------------------------
+    def _action_clip_start(self, region: str, mode: str) -> None:
         if self.clipper is None:
             return
-        pv_label = LABELS[pv_name]
+        if mode == MODE_CONTOUR:
+            self._start_contour_clip(region)
+        elif mode == MODE_SPHERE:
+            self._start_sphere_clip(region)
+        elif mode == MODE_PLANE:
+            self._start_plane_clip(region)
+
+    def _start_contour_clip(self, region: str) -> None:
+        pv_label = LABELS.get(region)
+        if pv_label is None:
+            QtWidgets.QMessageBox.warning(
+                self, "No contour for this region",
+                f"{region} carries no tagged surface region — clip it with a "
+                f"sphere or a plane instead.",
+            )
+            return
         if pv_label not in np.unique(self.loader.mesh.cell_data["elemTag"]):
             QtWidgets.QMessageBox.warning(
                 self,
-                "Invalid PV selection",
-                f"{pv_name} region is not present in the current tagging."
+                "Invalid region selection",
+                f"{region} region is not present in the current tagging."
             )
             return
         self._focus_3d()
         self._take_picker("clip")
         self.clipper.start_pv_contour(pv_label=pv_label)
-        self.clipping_widget.set_pv_undo_point_enabled(True)
-        self.clipping_widget.set_pv_finish_enabled(True)
-        self.clipping_widget.set_clip_revert_enabled(True)
+        self.clipping_widget.set_undo_reset_enabled(True)
+        self.clipping_widget.set_apply_enabled(True)
+        self.clipping_widget.set_revert_enabled(True)
 
-    def _action_pv_undo_point(self) -> None:
-        if self.clipper is None:
+    def _start_sphere_clip(self, region: str, *, reset: bool = False) -> None:
+        """Raise the sphere on ``region``'s seed.
+
+        Where it appears is the whole point of ``reset``: normally the sphere
+        comes back exactly where this region last left it, so reverting a clip
+        costs nothing but the clip. ``reset=True`` is the user asking for the
+        seed default back."""
+        seed = self._require_seed(region)
+        if seed is None:
             return
-        n = self.clipper.undo_last_point()
-        self.plotter.render()
-        if n < 0:
-            self.statusBar().showMessage("PV clip: no point to undo.")
-        elif n == 0:
-            self.statusBar().showMessage(
-                "PV clip: removed last point — snake is empty.")
+        # A sphere needs no picker, but leaving one on another tool would let
+        # X keep tagging triangles behind a panel that says clipping is
+        # driving. One tool owns the surface at a time, widget or not.
+        self._take_picker("clip")
+        if reset:
+            self.clipper.forget_pose(region, ClipMode.SPHERE)
+        pose = (None if reset
+                else self.clipper.pose_for(region, ClipMode.SPHERE))
+        if pose is None:
+            pose = self._default_sphere_pose(seed)
+        self._focus_3d()
+        self.clipper.start_sphere(
+            center=(pose["cx"], pose["cy"], pose["cz"]),
+            radius=pose["radius"],
+            seed_key=region,
+        )
+        self._after_geometric_start()
+
+    def _start_plane_clip(self, region: str, *, reset: bool = False) -> None:
+        seed = self._require_seed(region)
+        if seed is None:
+            return
+        self._take_picker("clip")
+        if reset:
+            self.clipper.forget_pose(region, ClipMode.PLANE)
+        pose = (None if reset
+                else self.clipper.pose_for(region, ClipMode.PLANE))
+        if pose is None:
+            pose = self._default_plane_pose(seed)
+        self._focus_3d()
+        self.clipper.start_plane(
+            origin=(pose["ox"], pose["oy"], pose["oz"]),
+            normal=(pose["nx"], pose["ny"], pose["nz"]),
+            # The seed, not the resumed origin, says which half to discard:
+            # the origin lies in the plane and so answers nothing.
+            seed=seed,
+            seed_key=region,
+        )
+        self._after_geometric_start()
+
+    def _after_geometric_start(self) -> None:
+        self.clipping_widget.set_undo_reset_enabled(True)
+        self.clipping_widget.set_apply_enabled(True)
+        self.clipping_widget.set_revert_enabled(True)
+
+    def _action_clip_selection_changed(self, region: str, mode: str) -> None:
+        """Keep the 3D view honest about what the panel now says.
+
+        A clip in flight belongs to the region and mode that started it, so
+        once those change it is describing something else — a sphere left on
+        screen under a panel reading "plane" looks like two live widgets. The
+        pending clip is dropped, and a geometric one is raised again on the new
+        selection so the switch is the single action it looks like. A contour
+        is not restarted: it needs picks, and starting one silently would take
+        the X key without being asked.
+
+        Nothing is lost either way — the pose memory is per region and mode, so
+        switching away and back returns the widget as it was.
+        """
+        if self.clipper is None or self.clipper.mode is ClipMode.NONE:
+            return
+        self.clipper.cancel()
+        # The abandoned clip never touched the mesh; its snapshot would be a
+        # revert rung that restores what is already on screen.
+        self.clipper.drop_snapshot()
+        if mode == MODE_SPHERE:
+            self._start_sphere_clip(region)
+        elif mode == MODE_PLANE:
+            self._start_plane_clip(region)
         else:
+            self.clipping_widget.clear_in_flight()
+            self.clipping_widget.set_revert_enabled(self.clipper.can_undo)
             self.statusBar().showMessage(
-                f"PV clip: removed last point — {n} point(s) left.")
+                "Clip in progress dropped — the selection changed. "
+                "Press Start when ready.")
+        self.plotter.render()
 
-    def _action_pv_finish(self) -> None:
-        seed_sel = self._seed_selector()
-        if self.clipper is None or seed_sel is None:
-            return
-        pv_name = self.clipping_widget.selected_pv()
-        seed = seed_sel.seeds.get(pv_name)
-        if seed is None:
-            QtWidgets.QMessageBox.warning(
-                self, "Missing PV seed",
-                f"No {pv_name} seed available — cannot disambiguate clip side.",
-            )
-            return
-        res = self.clipper.finish_pv_contour(pv_seed_xyz=seed.xyz)
-        if res is None:
-            return
-        self._render_mesh()
-        self.clipping_widget.set_pv_undo_point_enabled(False)
-        self.clipping_widget.set_pv_finish_enabled(False)
-        self.clipping_widget.set_clip_revert_enabled(self.clipper.can_undo)
-
-    # ==================================================================
-    # Clipping — mitral
-    # ==================================================================
-    def _mitral_seed_xyz(self) -> Optional[np.ndarray]:
-        seed_sel = self._seed_selector()
-        if seed_sel is None or "MV" not in seed_sel.seeds:
-            return None
-        return seed_sel.seeds["MV"].xyz
-
-    def _action_mv_sphere_start(self) -> None:
+    # ------------------------------------------------------------------
+    def _action_clip_undo_reset(self) -> None:
+        """One button, read through the live mode: undo a point, or reset."""
         if self.clipper is None:
             return
-        seed = self._mitral_seed_xyz()
-        if seed is None:
-            QtWidgets.QMessageBox.warning(
-                self, "No mitral seed",
-                "Select the mitral seed (MV) during seed selection first.",
-            )
-            return
-        self._focus_3d()
-        b = self.loader.mesh.bounds
-        diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
-        self.clipper.start_mv_sphere(center=seed, radius=0.05 * diag)
-        self.clipping_widget.set_pv_undo_point_enabled(False)
-        self.clipping_widget.set_pv_finish_enabled(False)
-        self.clipping_widget.set_clip_apply_enabled(True)
-        self.clipping_widget.set_clip_revert_enabled(True)
-
-    def _action_mv_plane_start(self) -> None:
-        if self.clipper is None:
-            return
-        seed = self._mitral_seed_xyz()
-        if seed is None:
-            QtWidgets.QMessageBox.warning(
-                self, "No mitral seed",
-                "Select the mitral seed (MV) during seed selection first.",
-            )
-            return
-        self._focus_3d()
-        c = np.asarray(self.loader.mesh.center, dtype=float)
-        normal = seed - c
-        if np.linalg.norm(normal) < 1e-9:
-            normal = np.array([0.0, 0.0, 1.0])
-        normal /= np.linalg.norm(normal)
-        self.clipper.start_mv_plane(origin=seed, normal=normal)
-        self.clipping_widget.set_pv_undo_point_enabled(False)
-        self.clipping_widget.set_pv_finish_enabled(False)
-        self.clipping_widget.set_clip_apply_enabled(True)
-        self.clipping_widget.set_clip_revert_enabled(True)
+        mode = self.clipper.mode
+        if mode is ClipMode.PV_CONTOUR:
+            n = self.clipper.undo_last_point()
+            self.plotter.render()
+            if n < 0:
+                self.statusBar().showMessage("Contour clip: no point to undo.")
+            elif n == 0:
+                self.statusBar().showMessage(
+                    "Contour clip: removed last point — snake is empty.")
+            else:
+                self.statusBar().showMessage(
+                    f"Contour clip: removed last point — {n} point(s) left.")
+        elif mode is ClipMode.SPHERE:
+            region = self.clipping_widget.selected_region()
+            # Restarting drops a fresh mesh snapshot, so pop the one the
+            # sphere being replaced pushed — a reset moves a widget, it is
+            # not a second clip to undo.
+            self.clipper.drop_snapshot()
+            self._start_sphere_clip(region, reset=True)
+            self.statusBar().showMessage(
+                f"Sphere reset to the {region} seed default.")
+        elif mode is ClipMode.PLANE:
+            region = self.clipping_widget.selected_region()
+            self.clipper.drop_snapshot()
+            self._start_plane_clip(region, reset=True)
+            self.statusBar().showMessage(
+                f"Plane reset to the {region} seed default.")
 
     def _action_clip_apply(self) -> None:
         if self.clipper is None:
             return
-        # No confirmation dialog: the mitral clip is revertible from the mesh
-        # history (the "Reject / revert clip" button stays live afterwards).
+        # No confirmation dialog: every clip is revertible from the mesh
+        # history (the "Revert clip" button stays live afterwards).
         mode = self.clipper.mode
-        if mode is ClipMode.MV_SPHERE:
-            self.clipper.apply_mv_sphere()
-        elif mode is ClipMode.MV_PLANE:
-            seed = self._mitral_seed_xyz()
-            self.clipper.apply_mv_plane(mitral_seed=seed)
+        if mode is ClipMode.PV_CONTOUR:
+            self._apply_contour_clip()
+            return
+        if mode is ClipMode.SPHERE:
+            res = self.clipper.apply_sphere()
+        elif mode is ClipMode.PLANE:
+            seed = self._seed_xyz(self.clipping_widget.selected_region())
+            if seed is None:
+                return
+            res = self.clipper.apply_plane(side_seed=seed)
         else:
             return
+        if res is None:
+            # The clip was refused, not committed — a plane sitting on its own
+            # seed cannot say which half to drop. The widget is still up and
+            # still draggable, so the buttons that drive it must stay live:
+            # greying them out would strand the user on a plane they can move
+            # but no longer apply. The tool has said why in the status bar.
+            return
         self._render_mesh()
-        self.clipping_widget.set_clip_apply_enabled(False)
-        self.clipping_widget.set_pv_undo_point_enabled(False)
-        self.clipping_widget.set_pv_finish_enabled(False)
-        # Keep revert available so the applied clip (PV or mitral) can be
-        # undone from the mesh history — gated on there being a snapshot.
-        self.clipping_widget.set_clip_revert_enabled(self.clipper.can_undo)
+        self._after_clip_settled()
+
+    def _apply_contour_clip(self) -> None:
+        region = self.clipping_widget.selected_region()
+        seed = self._require_seed(region)
+        if seed is None:
+            return
+        res = self.clipper.finish_pv_contour(pv_seed_xyz=seed)
+        if res is None:
+            return
+        self._render_mesh()
+        self._after_clip_settled()
 
     def _action_clip_revert(self) -> None:
         if self.clipper is None:
             return
+        # cancel() before restore(): it is what files the live sphere or plane
+        # away, so Start can bring it back where the user had it.
         self.clipper.cancel()
         self.clipper.restore()
         self._render_mesh()
-        self.clipping_widget.set_clip_apply_enabled(False)
-        self.clipping_widget.set_pv_undo_point_enabled(False)
-        self.clipping_widget.set_pv_finish_enabled(False)
+        self._after_clip_settled()
+
+    def _after_clip_settled(self) -> None:
+        """No clip is in flight any more; only revert may still apply."""
+        self.clipping_widget.set_apply_enabled(False)
+        self.clipping_widget.set_undo_reset_enabled(False)
         # Multi-level undo: stay enabled while earlier clips remain to revert.
-        self.clipping_widget.set_clip_revert_enabled(self.clipper.can_undo)
+        self.clipping_widget.set_revert_enabled(self.clipper.can_undo)
+
+    # ------------------------------------------------------------------
+    def _action_sphere_pose_edited(self, cx: float, cy: float, cz: float,
+                                   radius: float) -> None:
+        if self.clipper is None or self.clipper.mode is not ClipMode.SPHERE:
+            return
+        self.clipper.set_sphere_pose(
+            {"cx": cx, "cy": cy, "cz": cz, "radius": radius})
+        self.plotter.render()
+
+    def _action_plane_pose_edited(self, ox: float, oy: float, oz: float,
+                                  nx: float, ny: float, nz: float) -> None:
+        if self.clipper is None or self.clipper.mode is not ClipMode.PLANE:
+            return
+        self.clipper.set_plane_pose(
+            {"ox": ox, "oy": oy, "oz": oz, "nx": nx, "ny": ny, "nz": nz})
+        self.plotter.render()
 
     # ==================================================================
     # Mesh rendering (3D quadrant)
@@ -2506,6 +2663,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 plotter=self.plotter,
                 on_status=self.statusBar().showMessage,
             )
+            self.clipper.on_pose_changed = self._on_clip_pose_changed
         self.mesh_info.update_info(new_mesh)
 
     def _action_export_eam(self) -> None:

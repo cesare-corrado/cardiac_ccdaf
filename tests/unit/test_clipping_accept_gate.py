@@ -69,7 +69,8 @@ class _Host:
         self._on_clipping_toggled = lambda on: CCDAF._on_clipping_toggled(self, on)
 
         self.loader = MagicMock(mesh=mesh, path=None)
-        self.clipping_widget = ClippingWidget(pv_names=list(PV_NAMES))
+        self.clipping_widget = ClippingWidget(
+            region_names=list(PV_NAMES) + ["MV"])
         self.clipping_widget.clipping_toggled.connect(self._on_clipping_toggled)
         self.manual_widget = MagicMock()
         self.editor = MagicMock(pending_count=0, snake_active=False)
@@ -147,8 +148,8 @@ def test_ticking_accepts_silently_when_nothing_would_change(host):
 
     assert host.clipping_widget.chk_active.isChecked()
     assert host.clipping_widget.is_accepted()
-    assert host.clipping_widget.btn_pv_start.isEnabled()
-    assert host.clipping_widget.btn_mv_sphere.isEnabled()
+    assert host.clipping_widget.btn_start.isEnabled()
+    assert host.clipping_widget.btn_start.isEnabled()
     assert "Clipping is active" in host.status_text()
 
 
@@ -167,7 +168,7 @@ def test_ticking_asks_before_consuming_unassigned_triangles(host, monkeypatch):
 
     assert "5 still-unassigned triangles" in asked["text"]
     assert host.clipping_widget.is_accepted()
-    assert host.clipping_widget.btn_pv_start.isEnabled()
+    assert host.clipping_widget.btn_start.isEnabled()
 
 
 def test_declining_withdraws_the_tick_instead_of_greying_out(host, monkeypatch):
@@ -181,7 +182,7 @@ def test_declining_withdraws_the_tick_instead_of_greying_out(host, monkeypatch):
 
     assert not host.clipping_widget.chk_active.isChecked()
     assert not host.clipping_widget.is_accepted()
-    assert not host.clipping_widget.btn_pv_start.isEnabled()
+    assert not host.clipping_widget.btn_start.isEnabled()
     host.editor.accept.assert_not_called()
     assert "accept the tagging" in host.status_text()
 
@@ -205,4 +206,4 @@ def test_an_already_accepted_panel_does_not_re_accept(host):
     host.clipping_widget.chk_active.setChecked(True)
 
     host.editor.accept.assert_not_called()
-    assert host.clipping_widget.btn_pv_start.isEnabled()
+    assert host.clipping_widget.btn_start.isEnabled()
