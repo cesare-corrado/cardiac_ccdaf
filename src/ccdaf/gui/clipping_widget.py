@@ -13,6 +13,18 @@ from typing import List, Optional
 from PyQt5 import QtCore, QtWidgets
 
 
+def _tip(*lines: str) -> str:
+    """One tooltip per line, as rich text.
+
+    Qt only honours line breaks in a tooltip when it reads the string as rich
+    text, and it decides that by looking for a tag — a bare newline in plain
+    text is collapsed into the auto-wrapping. The wrapper is what makes the
+    tag mandatory: a tooltip built from clauses ("what it is", "how to drive
+    it", "what it needs") reads as a list rather than one long sentence.
+    """
+    return "<br>".join(lines)
+
+
 class ClippingWidget(QtWidgets.QGroupBox):
 
     pv_start_requested   = QtCore.pyqtSignal(str)   # emits selected pv_name
@@ -36,10 +48,12 @@ class ClippingWidget(QtWidgets.QGroupBox):
 
         self.chk_active = QtWidgets.QCheckBox("Clipping active")
         self.chk_active.setChecked(False)
-        self.chk_active.setToolTip(
+        self.chk_active.setToolTip(_tip(
             "While unchecked, clipping is dormant and the X key belongs to "
-            "manual correction. Both tools want X — this decides the owner."
-        )
+            "manual correction. Both tools want X — this decides the owner.",
+            "Ticking it accepts the tagging first if that has not happened "
+            "yet, so clipping never waits on a step you cannot see.",
+        ))
         self.chk_active.toggled.connect(self._on_active_toggled)
         layout.addWidget(self.chk_active)
 
@@ -85,18 +99,23 @@ class ClippingWidget(QtWidgets.QGroupBox):
 
         row = QtWidgets.QHBoxLayout()
         self.btn_mv_sphere = QtWidgets.QPushButton("Mitral: sphere")
-        self.btn_mv_sphere.setToolTip(
-            "Show an adjustable sphere at the mitral valve; Apply clip removes "
-            "the surface inside it."
-        )
+        self.btn_mv_sphere.setToolTip(_tip(
+            "Show an adjustable sphere at the mitral seed.",
+            "Left-drag it to move, right-drag to resize.",
+            "Apply clip removes every triangle whose centre falls inside.",
+            "Needs the MV seed.",
+        ))
         self.btn_mv_sphere.clicked.connect(self.mv_sphere_requested.emit)
         self.btn_mv_sphere.setEnabled(False)
         row.addWidget(self.btn_mv_sphere)
         self.btn_mv_plane = QtWidgets.QPushButton("Mitral: plane")
-        self.btn_mv_plane.setToolTip(
-            "Show an adjustable cutting plane at the mitral valve; Apply clip "
-            "removes the surface on one side."
-        )
+        self.btn_mv_plane.setToolTip(_tip(
+            "Show an adjustable cutting plane at the mitral seed.",
+            "Left-drag the arrowhead to tilt it, the plane's rim to slide it "
+            "along the arrow, the centre ball to shift it sideways.",
+            "Apply clip removes the mitral side.",
+            "Needs the MV seed.",
+        ))
         self.btn_mv_plane.clicked.connect(self.mv_plane_requested.emit)
         self.btn_mv_plane.setEnabled(False)
         row.addWidget(self.btn_mv_plane)
@@ -124,6 +143,24 @@ class ClippingWidget(QtWidgets.QGroupBox):
 
     def is_clipping_enabled(self) -> bool:
         return bool(self.chk_active.isChecked())
+
+    def is_accepted(self) -> bool:
+        """Whether the panel has been told the tagging is accepted.
+
+        The host asks before honouring a tick of the activation checkbox: an
+        unaccepted tagging is something it can put right, not a reason to
+        leave the panel dead."""
+        return self._accepted
+
+    def set_active_checked(self, checked: bool) -> None:
+        """Set the activation checkbox without re-entering the toggle handler.
+
+        Used to withdraw a tick the host could not honour. Going through the
+        signal would ask the host again about the answer it just gave."""
+        self.chk_active.blockSignals(True)
+        self.chk_active.setChecked(checked)
+        self.chk_active.blockSignals(False)
+        self._sync_start_buttons()
 
     def set_pv_undo_point_enabled(self, enabled: bool) -> None:
         self.btn_pv_undo_point.setEnabled(enabled)

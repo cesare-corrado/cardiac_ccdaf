@@ -62,6 +62,19 @@ usual.) A pending triangle selection survives too, and tags are untouched.
 Only a **PV contour in progress is abandoned**, since the clip needs its picks
 to mean anything; restart it with **Start PV contour**.
 
+## The clipping controls stay greyed out
+
+Clipping needs an accepted tagging, and ticking **Clipping active** now
+supplies one — silently when accepting changes no tag, otherwise after asking,
+since accepting commits any pending selection batch and gives every unassigned
+triangle the body label. Declining that question withdraws the tick, so a
+ticked box with dead controls is not a state you can reach; if the panel is
+grey, the box is unticked. With no mesh loaded the tick is refused outright and
+the status bar says so.
+
+A mesh that arrives already tagged skips the question entirely: clipping is
+available from the moment it loads.
+
 ## `X` does nothing
 
 `X` is owned by one tool at a time. For clipping, tick **Clipping active**; for

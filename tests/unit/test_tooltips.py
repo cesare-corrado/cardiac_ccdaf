@@ -75,3 +75,20 @@ def test_panel_controls_have_tooltips(qapp):
             if not control.toolTip().strip():
                 missing.append(f"{cls}.{name}")
     assert not missing, "controls missing a tooltip: " + ", ".join(missing)
+
+
+def test_multi_clause_tooltips_break_into_lines(qapp):
+    """The mitral tooltips carry three or four separate points.
+
+    Run together they are a wall of text, and a plain ``\\n`` will not break
+    them: Qt honours line breaks in a tooltip only when it reads the string as
+    rich text, which it decides by finding a tag. ``<br>`` is both the break
+    and the thing that makes Qt look for one.
+    """
+    panel = ClippingWidget(["LSPV", "LIPV", "RSPV", "RIPV"])
+    for name in ("btn_mv_sphere", "btn_mv_plane", "chk_active"):
+        tip = getattr(panel, name).toolTip()
+        assert "<br>" in tip, f"{name} tooltip runs its clauses together"
+        assert "\n" not in tip, (
+            f"{name} tooltip mixes a newline into rich text, where it is "
+            "ignored")

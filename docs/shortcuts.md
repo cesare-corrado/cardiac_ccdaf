@@ -9,6 +9,20 @@
 | Right-drag | Zoom / dolly |
 | Middle-drag | Pan |
 
+## Mitral clip widgets
+
+A drag that starts **on** the sphere or plane drives the widget, not the camera.
+
+| Input | Result |
+|---|---|
+| Sphere: **left-drag** | Move it |
+| Sphere: **right-drag** | Resize it |
+| Plane: **left-drag the arrowhead** | Tilt the plane |
+| Plane: **left-drag the rim** | Slide it along the arrow |
+| Plane: **left-drag the centre ball** | Shift it sideways |
+| Plane: **middle-drag** | Move it freely |
+| Plane: **right-drag** | Resize the widget's box only — the clip is unchanged |
+
 ## Picking & committing
 
 | Input | Result |

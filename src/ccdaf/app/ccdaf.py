@@ -63,7 +63,7 @@ import vtk
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from ccdaf.core.mesh_loader import MeshLoader, BODY_LABEL
+from ccdaf.core.mesh_loader import MeshLoader, BODY_LABEL, UNASSIGNED
 from ccdaf.interaction.seed_selector import SeedSelector, Seed
 from ccdaf.core.seed_profiles import (
     SeedProfile, SEED_PROFILES, SEED_PROFILE_ORDER, DEFAULT_PROFILE,
@@ -131,6 +131,10 @@ SEG_LABEL_COLORS: Dict[int, str] = {
 _SEG_COLOR_LIST = [SEG_LABEL_COLORS[i] for i in range(9)]
 
 PV_NAMES = ("LSPV", "LIPV", "RSPV", "RIPV")
+
+# The non-body labels: their presence in ``elemTag`` is what distinguishes a
+# mesh that carries a tagging from one the loader has only seeded with body.
+_PV_LABELS = tuple(lbl for lbl in ALLOWED_LABELS if lbl != BODY_LABEL)
 
 # Fields whose values are labels rather than measurements. A colour ramp
 # over these would be meaningless, so the visualisation widget hands them
@@ -684,9 +688,64 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Committed {n} triangle{'s' if n != 1 else ''} as label {label}.")
 
+    def _accept_for_clipping(self) -> bool:
+        """Accept the tagging so clipping can start. False if it must not.
+
+        Clipping is gated on an accepted tagging, and that gate used to be
+        invisible: ticking the box with tagging unaccepted left every control
+        grey and said nothing, so the panel looked broken. The tick now does
+        the accepting — silently when accepting changes no tag, and after
+        asking when it would, because accept commits the pending batch and
+        paints every unassigned triangle body, and that fill is not on the
+        undo stack.
+        """
+        if self.loader.mesh is None or self.editor is None:
+            self.statusBar().showMessage(
+                "Load a mesh before activating clipping.")
+            return False
+
+        pending, unassigned = self._pending_accept_changes()
+        if pending or unassigned:
+            parts = []
+            if pending:
+                parts.append(f"commit {pending} pending triangle"
+                             f"{'s' if pending != 1 else ''}")
+            if unassigned:
+                parts.append(f"give {unassigned} still-unassigned triangle"
+                             f"{'s' if unassigned != 1 else ''} the body label")
+            # The warning names the body fill only when there is one: a batch
+            # of picks is on the undo stack, so saying it cannot be undone
+            # would be false for the commit-only case.
+            caveat = " That fill is not on the undo stack." if unassigned else ""
+            answer = QtWidgets.QMessageBox.question(
+                self, "Accept tagging first?",
+                "Clipping works on an accepted tagging.\n\n"
+                f"Accepting now would {' and '.join(parts)}.{caveat}"
+                "\n\nAccept the tagging and start clipping?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                self.statusBar().showMessage(
+                    "Clipping left inactive — accept the tagging when the "
+                    "labels are right.")
+                return False
+
+        stray = self._accept_tagging()
+        self.statusBar().showMessage(
+            f"Tagging accepted{self._stray_note(stray)}. Clipping is active.")
+        return True
+
     def _on_clipping_toggled(self, enabled: bool) -> None:
         """Deactivating the clipping panel abandons any clip in flight."""
-        if enabled or self.clipper is None:
+        if enabled:
+            # An unaccepted tagging is something to put right, not a reason to
+            # hand back a dead panel. If it cannot be, the tick is withdrawn
+            # rather than left standing over greyed-out controls.
+            if not self.clipping_widget.is_accepted() and not self._accept_for_clipping():
+                self.clipping_widget.set_active_checked(False)
+            return
+        if self.clipper is None:
             return
         if self.clipper.mode is not ClipMode.NONE:
             self.clipper.cancel()
@@ -777,6 +836,46 @@ class CCDAF(QtWidgets.QMainWindow):
             active_label=self.manual_widget.current_label(),
         )
 
+    def _sync_clipping_gate(self, *, announce: bool = False) -> bool:
+        """Open clipping when the working mesh already carries a tagging.
+
+        A mesh that arrives tagged — reloaded from an earlier session, or the
+        same mesh coming back from a plotter rebuild that reset the panel —
+        has nothing left for accept to do, so making the user press *Accept
+        tagging* to reach clipping gates the step on a formality. A PV label
+        with nothing unassigned is the evidence: every fresh mesh starts life
+        as body everywhere (the loader seeds ``elemTag``), so body alone says
+        untagged, not tagged.
+
+        Accept's island guard runs here too. Opening the gate without it would
+        let a reloaded mesh reach clipping and export with a label split across
+        two patches, which is exactly what the guard exists to prevent — and
+        the only route to it used to be the button this bypasses.
+        """
+        if self.loader.mesh is None or "elemTag" not in self.loader.mesh.cell_data:
+            return False
+        tags = np.asarray(self.loader.mesh.cell_data["elemTag"])
+        tagged = bool(np.isin(tags, _PV_LABELS).any())
+        if not tagged or bool((tags == UNASSIGNED).any()):
+            return False
+
+        stray = 0
+        if self.tagger is not None:
+            cleaned = self.tagger.reduce_to_single_components(tags)
+            stray = int(np.count_nonzero(cleaned != tags))
+            if stray:
+                # Only a mesh that actually violated the invariant is changed,
+                # so a clean load never arrives with unsaved changes pending.
+                self.loader.mesh.cell_data["elemTag"] = cleaned
+                self._mark_dirty()
+                self._render_mesh()
+        self.clipping_widget.set_enabled_after_accept()
+        if announce or stray:
+            self.statusBar().showMessage(
+                f"Mesh already tagged{self._stray_note(stray)}. "
+                "Clipping is available.")
+        return True
+
     def _build_mesh_tools(self) -> None:
         """(Re)bind the mesh-side tools to whichever plotter is current.
 
@@ -797,6 +896,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
+        # The panel was reset with the plotter, so an accepted tagging has to
+        # be recognised again from the mesh — otherwise a trip through the
+        # segmentation view silently closes clipping behind the user.
+        self._sync_clipping_gate()
 
     def _enter_segmentation_mode(self) -> None:
         if self._view.name == "segmentation":
@@ -1070,6 +1173,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
+        # A mesh that comes in already tagged goes straight to clipping.
+        self._sync_clipping_gate(announce=True)
 
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
@@ -1453,6 +1558,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.editor = self._new_manual_editor(self.loader.mesh)
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
+        self._sync_clipping_gate()
         self.seed_widget.set_start_enabled(True)
         self.seed_widget.set_reset_enabled(True)
         self.seed_widget.set_prompt(
@@ -2136,9 +2242,28 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Snake tagged {n} triangle{'s' if n != 1 else ''} as label {label}.")
 
-    def _action_edit_accept(self) -> None:
-        if self.editor is None:
-            return
+    def _pending_accept_changes(self) -> tuple:
+        """What "Accept tagging" would consume: (pending picks, unassigned).
+
+        Both numbers are what makes accept more than a formality — the batch
+        would be committed and every still-unassigned triangle would become
+        body. Zero on both means accepting changes no tag at all, which is
+        what lets the clipping panel accept on the user's behalf in silence.
+        """
+        pending = self.editor.pending_count if self.editor is not None else 0
+        unassigned = 0
+        if self.loader.mesh is not None:
+            tags = np.asarray(self.loader.mesh.cell_data["elemTag"])
+            unassigned = int(np.count_nonzero(tags == UNASSIGNED))
+        return int(pending), unassigned
+
+    def _accept_tagging(self) -> int:
+        """Finish tagging and open clipping. Returns the stray cells reassigned.
+
+        The body of "Accept tagging", with no message of its own: the clipping
+        panel runs the same steps when it accepts on the user's behalf, and
+        two copies of this would be two things to keep in step.
+        """
         if self.editor.snake_active:
             self.manual_widget.uncheck_snake()
             self.editor.stop_snake()
@@ -2160,10 +2285,21 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.on_accepted()
         self._render_mesh()
         self.clipping_widget.set_enabled_after_accept()
-        note = (f" — reassigned {stray} stray label cell{'s' if stray != 1 else ''} "
-                "to keep each region connected") if stray else ""
+        return stray
+
+    @staticmethod
+    def _stray_note(stray: int) -> str:
+        if not stray:
+            return ""
+        return (f" — reassigned {stray} stray label cell{'s' if stray != 1 else ''} "
+                "to keep each region connected")
+
+    def _action_edit_accept(self) -> None:
+        if self.editor is None:
+            return
+        stray = self._accept_tagging()
         self.statusBar().showMessage(
-            f"Tagging accepted{note}. Proceed to clipping.")
+            f"Tagging accepted{self._stray_note(stray)}. Proceed to clipping.")
 
     def _on_edit_committed(self) -> None:
         self._mark_dirty()

@@ -64,6 +64,9 @@ class _Host:
         self._action_edit_toggle = lambda on: CCDAF._action_edit_toggle(self, on)
         self._action_snake_toggle = lambda on: CCDAF._action_snake_toggle(self, on)
         self._replace_mesh = MagicMock()
+        # Rebuilding the tools also re-reads the clipping gate from the tags;
+        # that path has its own tests, so here it only has to be reachable.
+        self._sync_clipping_gate = MagicMock()
         self.loader = MagicMock(mesh=mesh, path=None)
         self.plotter = MagicMock()
         self.manual_widget = panel
