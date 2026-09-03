@@ -64,8 +64,14 @@ then:
 
 - **PV:** pick a vein, **Start PV contour**, drop points with `X`,
   **Close & Clip PV**.
-- **Mitral:** **Mitral: sphere** or **Mitral: plane**, position the widget,
-  **Apply clip**. **Reject / revert clip** undoes it.
+- **Mitral:** **Mitral: sphere** or **Mitral: plane**, position the widget
+  (left-drag to move or tilt it, right-drag to resize the sphere), **Apply
+  clip**. **Reject / revert clip** undoes it.
+
+Ticking **Clipping active** accepts the tagging if that has not happened yet —
+asking first when accepting would change tags — so a mesh reloaded from an
+earlier session can start at this step. An already-tagged mesh opens clipping
+as soon as it loads.
 
 ## 6. Export
 

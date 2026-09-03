@@ -97,7 +97,9 @@ commits the manual-correction selection batch.</p>
       select triangles with <b>X</b> (press <b>C</b> to commit) or use the
       snake.</li>
   <li><b>Clip</b> — tick <i>Clipping active</i>, then draw a PV contour or place
-      a mitral sphere/plane and <i>Apply clip</i>.</li>
+      a mitral sphere/plane and <i>Apply clip</i>. Ticking the box accepts the
+      tagging for you if that step is still open, so a mesh reloaded from an
+      earlier session can start here.</li>
   <li><b>Export</b> — <i>File &rarr; Save data</i>, or <i>EAM &rarr; Export</i> for a
       Carto bundle / VTK. Closing or quitting with unsaved changes asks first.</li>
 </ol>
@@ -120,6 +122,19 @@ SHORTCUTS_HTML = """
   <tr><td><b>X</b></td><td>Pick — add a triangle to the selection batch, or
       drop a point for a snake tool</td></tr>
   <tr><td><b>C</b></td><td>Commit the manual-correction selection batch</td></tr>
+</table>
+<h3>Mitral clip widgets</h3>
+<p>While a sphere or plane is up, a drag that starts <i>on the widget</i> moves
+the widget, not the camera.</p>
+<table cellpadding="4">
+  <tr><td><b>Sphere: left-drag</b></td><td>Move it</td></tr>
+  <tr><td><b>Sphere: right-drag</b></td><td>Resize it</td></tr>
+  <tr><td><b>Plane: left-drag the arrowhead</b></td><td>Tilt the plane</td></tr>
+  <tr><td><b>Plane: left-drag the rim</b></td><td>Slide it along the arrow</td></tr>
+  <tr><td><b>Plane: left-drag the centre ball</b></td><td>Shift it sideways</td></tr>
+  <tr><td><b>Plane: middle-drag</b></td><td>Move it freely</td></tr>
+  <tr><td><b>Plane: right-drag</b></td><td>Resize the widget's box only —
+      the clip is unchanged</td></tr>
 </table>
 <p><b>Who owns <code>X</code>:</b> it is the <i>pick</i> key, shared by
 manual-correction selection, the manual snake and the PV-contour snake; the

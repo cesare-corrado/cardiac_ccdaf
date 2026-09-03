@@ -7,6 +7,29 @@ Remove the pulmonary-vein cuffs and open the mitral valve.
     active** to hand the key to clipping; untick it to give it back to manual
     correction. Only one tool owns `X` at a time.
 
+## Getting in
+
+Clipping works on an accepted tagging, and the panel reaches that on its own:
+
+- A mesh that arrives **already tagged** — reloaded from an earlier session,
+  say — opens clipping the moment it loads. Starting a session at this step is
+  a click on **Clipping active** and nothing more.
+- Otherwise, ticking **Clipping active** accepts the tagging for you. If
+  accepting would change the tags — a pending selection batch to commit, or
+  triangles still unassigned that would become body — you are asked first,
+  because that body fill is not on the undo stack. Decline and the tick is
+  withdrawn, so the box never sits ticked over greyed-out controls.
+
+**Accept tagging** in the manual-correction panel does the same thing, and is
+still the way to finish tagging deliberately.
+
+!!! note "Stray label cells are repaired without asking"
+    Both routes reduce each region to a single connected patch, reassigning
+    any cell of a label that got stranded away from its main patch — a label
+    split in two is rejected on export. This is a repair rather than a choice,
+    so it is not part of the question; the status bar reports how many cells
+    it moved.
+
 ## PV contour (snake)
 
 Clip a pulmonary vein by drawing a closed loop around its ostium:
@@ -35,10 +58,22 @@ inside the tag to travel on.
 
 Clip the valve with a positionable widget:
 
-- **Mitral: sphere** — an adjustable sphere; **Apply clip** removes the surface
-  inside it.
-- **Mitral: plane** — an adjustable cutting plane; **Apply clip** removes the
-  surface on one side.
+Both widgets appear at the **MV seed**, so that seed has to exist first — the
+buttons say so if it does not.
+
+- **Mitral: sphere** — an adjustable sphere. **Left-drag** it to move,
+  **right-drag** to resize. **Apply clip** removes every triangle whose centre
+  falls inside it.
+- **Mitral: plane** — an adjustable cutting plane, drawn as an arrow through a
+  box with a ball at its centre. **Left-drag the arrowhead** to tilt it,
+  **the rim** (where the plane meets the box) to slide it along the arrow, and
+  **the centre ball** to shift it sideways; **middle-drag** moves it freely.
+  **Apply clip** removes the mitral side.
+
+!!! warning "Drags that start on the widget do not move the camera"
+    Right-drag normally dollies the view, but over the plane widget it resizes
+    the widget's bounding box — which changes nothing about the clip. Start
+    the drag off the widget to move the camera.
 
 <figure markdown="span">
   ![Mitral-valve sphere clip widget](../assets/screenshots/clipping_MV_sphere.png)

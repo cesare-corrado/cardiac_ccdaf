@@ -819,7 +819,10 @@ class ClippingTool:
         w.AddObserver("EndInteractionEvent", self._update_sphere_preview)
         w.On()
         self._sphere_widget = w
-        self._status("Adjust the sphere, then click ‘Apply clip’.")
+        self._status(
+            "Sphere: left-drag it to move, right-drag to resize — then "
+            "‘Apply clip’ removes everything inside it."
+        )
 
     def apply_mv_sphere(self) -> Optional[ClipResult]:
         if self._mode is not ClipMode.MV_SPHERE or self._sphere_widget is None:
@@ -860,7 +863,10 @@ class ClippingTool:
         w.AddObserver("EndInteractionEvent", self._update_plane_preview)
         w.On()
         self._plane_widget = w
-        self._status("Adjust the plane, then click ‘Apply clip’.")
+        self._status(
+            "Plane: left-drag the arrowhead to tilt, the rim to slide along "
+            "the arrow, the centre ball to shift sideways — then ‘Apply clip’."
+        )
 
     def apply_mv_plane(self, mitral_seed: Sequence[float]) -> Optional[ClipResult]:
         if self._mode is not ClipMode.MV_PLANE or self._plane_widget is None:
