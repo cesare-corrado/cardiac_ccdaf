@@ -75,6 +75,7 @@ class _Host:
         self.clipper = None
         self._render_mesh = MagicMock()
         self._on_edit_committed = MagicMock()
+        self._on_clip_pose_changed = MagicMock()
         self._focus_3d = MagicMock()
         self._take_picker = MagicMock()
         self.statusBar = MagicMock()

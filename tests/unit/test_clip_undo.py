@@ -9,10 +9,10 @@ Undo for the clipping tool:
   means the last point may have extended either endpoint, so undo works from
   whole-state snapshots taken before each accepted pick.
 
-* **Mesh-history undo for mitral** (``ClippingTool.can_undo`` / ``restore``) —
-  every clip pushes a pre-clip snapshot; after a mitral clip is finalized the
-  snapshot survives, so ``can_undo`` is True and ``restore`` brings the mesh
-  back. This is what lets the host keep its revert button live for mitral.
+* **Mesh-history undo** (``ClippingTool.can_undo`` / ``restore``) — every clip
+  pushes a pre-clip snapshot; after a clip is finalized the snapshot survives,
+  so ``can_undo`` is True and ``restore`` brings the mesh back. This is what
+  lets the host keep its revert button live.
 
 A minimal fake plotter stands in for the Qt/VTK plotter so the snake logic is
 exercised headlessly (only actor add/remove and picking toggles are touched).
@@ -152,9 +152,9 @@ def test_start_pv_contour_clears_stale_pick_history():
 
 
 # ---------------------------------------------------------------------------
-# mesh-history undo — mitral clip
+# mesh-history undo — geometric clip
 # ---------------------------------------------------------------------------
-def test_mitral_clip_is_undoable_via_history():
+def test_geometric_clip_is_undoable_via_history():
     mesh = _tagged_sphere(1)
     holder = {"mesh": mesh}
     tool = ClippingTool(
@@ -164,13 +164,13 @@ def test_mitral_clip_is_undoable_via_history():
     )
     original_cells = mesh.n_cells
 
-    tool._mode = ClipMode.MV_SPHERE
+    tool._mode = ClipMode.SPHERE
     tool._snapshot()                                  # pre-clip snapshot
     assert tool.can_undo
 
     keep_mask = np.ones(mesh.n_cells, dtype=bool)
     keep_mask[:10] = False                            # remove 10 triangles
-    res = tool._finalize_mv_clip(holder["mesh"], keep_mask)
+    res = tool._finalize_geometric_clip(holder["mesh"], keep_mask)
 
     assert res.n_removed == 10
     assert holder["mesh"].n_cells == original_cells - 10

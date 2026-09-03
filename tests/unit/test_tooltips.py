@@ -47,10 +47,11 @@ def _widgets():
          ["cmb_label", "btn_edit_toggle", "btn_fill_holes", "chk_dilate",
           "chk_erode", "btn_smooth", "btn_snake", "btn_snake_undo_point",
           "btn_snake_clear", "btn_snake_commit", "btn_accept", "btn_undo"]),
-        (ClippingWidget(["LSPV", "LIPV", "RSPV", "RIPV"]),
-         ["chk_active", "cmb_pv", "btn_pv_start", "btn_pv_undo_point",
-          "btn_pv_finish", "btn_mv_sphere", "btn_mv_plane", "btn_apply",
-          "btn_revert"]),
+        (ClippingWidget(["LSPV", "LIPV", "RSPV", "RIPV", "MV"]),
+         ["chk_active", "cmb_region", "cmb_mode", "btn_start",
+          "btn_undo_reset", "btn_apply", "btn_revert",
+          "sph_cx", "sph_cy", "sph_cz", "sph_r", "lbl_diam",
+          "pln_ox", "pln_oy", "pln_oz", "pln_nx", "pln_ny", "pln_nz"]),
         (SegmentationWidget(),
          ["btn_dilate", "btn_erode", "btn_moprh_opening", "btn_moprh_closing",
           "spn_kernel_x", "spn_kernel_y", "spn_kernel_z", "btn_fill",
@@ -78,15 +79,16 @@ def test_panel_controls_have_tooltips(qapp):
 
 
 def test_multi_clause_tooltips_break_into_lines(qapp):
-    """The mitral tooltips carry three or four separate points.
+    """The clipping tooltips carry three or four separate points.
 
     Run together they are a wall of text, and a plain ``\\n`` will not break
     them: Qt honours line breaks in a tooltip only when it reads the string as
     rich text, which it decides by finding a tag. ``<br>`` is both the break
     and the thing that makes Qt look for one.
     """
-    panel = ClippingWidget(["LSPV", "LIPV", "RSPV", "RIPV"])
-    for name in ("btn_mv_sphere", "btn_mv_plane", "chk_active"):
+    panel = ClippingWidget(["LSPV", "LIPV", "RSPV", "RIPV", "MV"])
+    for name in ("btn_start", "btn_undo_reset", "btn_apply", "cmb_mode",
+                 "chk_active"):
         tip = getattr(panel, name).toolTip()
         assert "<br>" in tip, f"{name} tooltip runs its clauses together"
         assert "\n" not in tip, (

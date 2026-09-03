@@ -62,11 +62,17 @@ Finish with **Accept tagging** (unassigned cells become body).
 In **Clipping**, tick **Clipping active** (this hands the `X` key to clipping),
 then:
 
-- **PV:** pick a vein, **Start PV contour**, drop points with `X`,
-  **Close & Clip PV**.
-- **Mitral:** **Mitral: sphere** or **Mitral: plane**, position the widget
-  (left-drag to move or tilt it, right-drag to resize the sphere), **Apply
-  clip**. **Reject / revert clip** undoes it.
+Pick a **Region** (a vein or `MV`) and a **Mode**, then **Start** → place it →
+**Apply clip**:
+
+- **Contour:** drop points with `X` around the ostium; **Undo / reset** takes
+  the last one back.
+- **Sphere / plane:** position the widget (left-drag to move or tilt it,
+  right-drag to resize the sphere), or type the centre and radius into the
+  boxes below. **Undo / reset** returns it to the region's seed.
+
+**Revert clip** undoes an applied clip. The sphere or plane is remembered, so
+pressing **Start** again brings it back where you left it.
 
 Ticking **Clipping active** accepts the tagging if that has not happened yet —
 asking first when accepting would change tags — so a mesh reloaded from an
