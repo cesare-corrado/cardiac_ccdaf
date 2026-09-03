@@ -83,6 +83,7 @@ class _Host:
         self._populate_fields = MagicMock()
         self._render_mesh = MagicMock()
         self._on_edit_committed = MagicMock()
+        self._on_clip_pose_changed = MagicMock()
         self.statusBar = MagicMock()
 
 

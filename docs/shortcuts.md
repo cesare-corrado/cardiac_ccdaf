@@ -9,7 +9,7 @@
 | Right-drag | Zoom / dolly |
 | Middle-drag | Pan |
 
-## Mitral clip widgets
+## Sphere / plane clip widgets
 
 A drag that starts **on** the sphere or plane drives the widget, not the camera.
 
@@ -37,7 +37,7 @@ A drag that starts **on** the sphere or plane drives the widget, not the camera.
 
     - **Manual correction — selection mode:** `X` adds the triangle under the
       mouse to the batch.
-    - **Manual correction — snake / Clipping — PV contour:** `X` drops a
+    - **Manual correction — snake / Clipping — contour:** `X` drops a
       geodesic point.
 
     The **Clipping active** checkbox decides whether the key belongs to
@@ -46,7 +46,7 @@ A drag that starts **on** the sphere or plane drives the widget, not the camera.
 
     Committing never shares a key with picking: `C` commits the selection
     batch, **Commit snake** commits the snake, and clipping has its own
-    **Close & Clip PV** / **Apply clip**.
+    **Apply clip**.
 
 ## Per-tool buttons
 
@@ -55,7 +55,8 @@ Undo is per tool, not global:
 - **Seeds:** Undo / Reset.
 - **Manual correction:** Undo last edit (up to 3 levels); Undo last point / Clear
   (snake).
-- **Clipping:** Undo last point (PV); Reject / revert clip.
+- **Clipping:** Undo / reset (a contour point, or the sphere/plane back to
+  its seed); Revert clip (the mesh, one applied clip at a time).
 - **Segmentation:** Undo (last segmentation edit).
 
 Every hoverable control has a **tooltip** — hover to see what it does.
