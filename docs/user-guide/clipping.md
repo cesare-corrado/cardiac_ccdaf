@@ -82,8 +82,10 @@ Points on the rim of the region are refused too: the contour needs vertices
 inside the tag to travel on.
 
 <figure markdown="span">
-  ![PV contour snake around a vein ostium](../assets/screenshots/clipping_vein.png)
-  <figcaption>A PV contour: the geodesic snake tracing the vein ostium.</figcaption>
+  ![PV contour snake around a vein ostium](../assets/screenshots/clipping_vein_contour.png)
+  <figcaption>A contour on the LIPV: the geodesic snake tracing the vein
+  ostium, confined to that region's tag. The panel shows no readout — a
+  contour has no geometry to report.</figcaption>
 </figure>
 
 ## Sphere and plane
@@ -99,6 +101,12 @@ be taken with a sphere instead.
   arrowhead** to tilt it, **the rim** (where the plane meets the box) to slide
   it along the arrow, and **the centre ball** to shift it sideways;
   **middle-drag** moves it freely. **Apply clip** removes the seed's side.
+
+<figure markdown="span">
+  ![A sphere placed on a pulmonary vein](../assets/screenshots/clipping_vein_sphere.png)
+  <figcaption>A sphere on the LIPV. The red overlay is what Apply clip would
+  remove: every triangle whose centre falls inside the sphere.</figcaption>
+</figure>
 
 !!! warning "Drags that start on the widget do not move the camera"
     Right-drag normally dollies the view, but over the plane widget it resizes
@@ -123,7 +131,9 @@ than eyeballed, and one set on one case can be reproduced on the next.
 
 <figure markdown="span">
   ![Mitral-valve sphere clip widget](../assets/screenshots/clipping_MV_sphere.png)
-  <figcaption>Clipping the mitral valve with the adjustable sphere widget.</figcaption>
+  <figcaption>Clipping the mitral valve with the sphere widget. The panel
+  reports the centre and radius as it is dragged — here a radius of 32.273,
+  ⌀ 64.546 — and either can be typed in to set it exactly.</figcaption>
 </figure>
 
 ## Apply, reset and revert
