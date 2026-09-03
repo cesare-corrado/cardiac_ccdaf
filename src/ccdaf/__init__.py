@@ -1,7 +1,7 @@
 """CCDAF — Cardiac Clinical Data Analysis Framework."""
 import os
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 def _disable_vtk_accelerated_filters() -> None:
