@@ -22,6 +22,11 @@ Two clipping operations, driven interactively:
         centroid lies inside the sphere are removed; or
       * **Plane**:  interactive ``vtkPlaneWidget``; triangles on the
         seed's side of the plane are removed.
+    Both are equally tag-constrained: the geometry says *where* to cut,
+    while ``clip_tag`` says *what* may be cut, so only triangles carrying
+    the clipped region's ``elemTag`` are removed. A sphere on the LSPV
+    that happens to swallow body triangles or a neighbouring vein leaves
+    them untouched.
     The resulting hole is likewise left open. Both are driven from a
     *seed* — the anatomical point the widget is first placed on — and
     so serve the mitral valve and the pulmonary veins alike: the seed
@@ -250,6 +255,13 @@ class ClippingTool:
         self._pose_memory: dict = {}
         self._seed_key: str = ""
 
+        # ``elemTag`` a geometric clip is confined to. A sphere or a plane
+        # placed on one region's seed must not eat a neighbour that happens to
+        # fall inside it, so the geometry decides *where* to cut and the tag
+        # decides *what* may be cut. ``None`` means unconstrained — kept only
+        # for callers with no region to speak of; the app always names one.
+        self._clip_tag: Optional[int] = None
+
     # ==================================================================
     # Common helpers
     # ==================================================================
@@ -318,6 +330,7 @@ class ClippingTool:
         # the one place the pose has to be saved for a later resume.
         self._capture_pose()
         self._mode = ClipMode.NONE
+        self._clip_tag = None
         self._clear_contour()
         self._clear_subgraph()
         self._clear_preview()
@@ -912,6 +925,7 @@ class ClippingTool:
         center: Sequence[float],
         radius: float,
         seed_key: str = "",
+        clip_tag: Optional[int] = None,
     ) -> None:
         """Raise the sphere widget at ``center`` / ``radius``.
 
@@ -920,10 +934,15 @@ class ClippingTool:
         filed under. Callers wanting the remembered geometry ask ``pose_for``
         first and pass it in — the tool does not silently override the
         centre it was handed, so "start where I left off" and "start at the
-        seed" stay the caller's choice, visible in the call."""
+        seed" stay the caller's choice, visible in the call.
+
+        ``clip_tag`` is the ``elemTag`` the cut is confined to: only triangles
+        carrying it are removed, however much else the sphere encloses.
+        ``None`` leaves the clip purely geometric."""
         self.cancel()
         self._mode = ClipMode.SPHERE
         self._seed_key = str(seed_key)
+        self._clip_tag = None if clip_tag is None else int(clip_tag)
         self._snapshot()
 
         w = vtk.vtkSphereWidget()
@@ -943,7 +962,7 @@ class ClippingTool:
         self._emit_pose()
         self._status(
             "Sphere: left-drag it to move, right-drag to resize — then "
-            "‘Apply clip’ removes everything inside it."
+            "‘Apply clip’ removes the selected region's triangles inside it."
         )
 
     def set_sphere_pose(self, pose: dict) -> None:
@@ -969,7 +988,7 @@ class ClippingTool:
         mesh = self.get_mesh()
         centroids = self._triangle_centroids(mesh)
         dist = np.linalg.norm(centroids - center, axis=1)
-        keep_mask = dist > radius
+        keep_mask = ~((dist <= radius) & self._eligible_mask(mesh))
         return self._finalize_geometric_clip(mesh, keep_mask)
 
     # ==================================================================
@@ -981,6 +1000,7 @@ class ClippingTool:
         normal: Sequence[float],
         seed: Optional[Sequence[float]] = None,
         seed_key: str = "",
+        clip_tag: Optional[int] = None,
     ) -> None:
         """Raise the plane widget at ``origin`` with ``normal``.
 
@@ -988,10 +1008,14 @@ class ClippingTool:
         and is kept apart from ``origin`` on purpose: a resumed plane starts at
         the origin the user left it on, which lies *in* the plane and so says
         nothing about which half to discard. Defaults to ``origin`` — right for
-        a first placement, where the two coincide."""
+        a first placement, where the two coincide.
+
+        ``clip_tag`` confines the cut to one ``elemTag``, exactly as for the
+        sphere: the half-space says which side, the tag says which region."""
         self.cancel()
         self._mode = ClipMode.PLANE
         self._seed_key = str(seed_key)
+        self._clip_tag = None if clip_tag is None else int(clip_tag)
         self._snapshot()
 
         # Fixed reference point for the "which half" question, held while the
@@ -1056,7 +1080,8 @@ class ClippingTool:
 
         centroids = self._triangle_centroids(mesh)
         signed = (centroids - origin) @ normal
-        keep_mask = (signed * seed_side) < 0.0
+        keep_mask = ~(((signed * seed_side) >= 0.0)
+                      & self._eligible_mask(mesh))
         return self._finalize_geometric_clip(mesh, keep_mask)
 
     # ==================================================================
@@ -1095,6 +1120,22 @@ class ClippingTool:
     # ==================================================================
     # Geometry helpers
     # ==================================================================
+    def _eligible_mask(self, mesh: pv.PolyData) -> np.ndarray:
+        """Per-triangle mask of what the current clip is allowed to remove.
+
+        The geometry says which triangles a sphere or plane covers; this says
+        which of them belong to the region being clipped. Everything else —
+        a neighbouring vein sharing the sphere, the body behind the plane —
+        survives regardless of where it sits.
+
+        Falls back to "everything" when no tag was named, or when the mesh
+        carries no ``elemTag`` at all: an untagged mesh has no regions to
+        confuse, so the geometric clip is already unambiguous."""
+        if self._clip_tag is None or ELEM_TAG_ARRAY not in mesh.cell_data:
+            return np.ones(mesh.n_cells, dtype=bool)
+        tags = np.asarray(mesh.cell_data[ELEM_TAG_ARRAY])
+        return tags == int(self._clip_tag)
+
     @staticmethod
     def _triangle_centroids(mesh: pv.PolyData) -> np.ndarray:
         faces = np.asarray(mesh.faces).reshape(-1, 4)[:, 1:]
@@ -1134,7 +1175,8 @@ class ClippingTool:
         center = np.array(self._sphere_widget.GetCenter(), dtype=float)
         radius = float(self._sphere_widget.GetRadius())
         centroids = self._triangle_centroids(mesh)
-        clip_mask = np.linalg.norm(centroids - center, axis=1) <= radius
+        clip_mask = ((np.linalg.norm(centroids - center, axis=1) <= radius)
+                     & self._eligible_mask(mesh))
         if not np.any(clip_mask):
             return
         clip_cells = mesh.extract_cells(np.where(clip_mask)[0])
@@ -1168,8 +1210,9 @@ class ClippingTool:
             return
         centroids = self._triangle_centroids(mesh)
         signed = (centroids - origin) @ normal
-        # Triangles on the same side as the seed are the ones that will be clipped.
-        clip_mask = (signed * seed_side) >= 0.0
+        # Triangles on the same side as the seed, and carrying the clipped
+        # region's tag, are the ones that will be removed.
+        clip_mask = ((signed * seed_side) >= 0.0) & self._eligible_mask(mesh)
         if not np.any(clip_mask):
             return
         clip_cells = mesh.extract_cells(np.where(clip_mask)[0])

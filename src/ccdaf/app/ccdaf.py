@@ -2440,6 +2440,31 @@ class CCDAF(QtWidgets.QMainWindow):
         self.clipping_widget.set_apply_enabled(True)
         self.clipping_widget.set_revert_enabled(True)
 
+    def _clip_tag_for(self, region: str) -> Optional[int]:
+        """The ``elemTag`` a geometric clip on ``region`` may remove.
+
+        The four veins carry their tagging label; MV has none of its own — it
+        sits on the untagged body — so it clips the body label. Either way the
+        cut is confined to one region, which is what stops a sphere placed on
+        one vein from taking the body or its neighbour with it.
+
+        Returns ``None`` (having said why) when that tag is nowhere in the
+        mesh: a region that is not in the tagging has nothing to clip, and
+        cutting geometrically instead would be the very over-clip this
+        guards against."""
+        tag = LABELS.get(region, BODY_LABEL)
+        mesh = self.loader.mesh if self.loader is not None else None
+        tags = (None if mesh is None or "elemTag" not in mesh.cell_data
+                else np.unique(mesh.cell_data["elemTag"]))
+        if tags is not None and tag not in tags:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid region selection",
+                f"{region} region is not present in the current tagging."
+            )
+            return None
+        return int(tag)
+
     def _start_sphere_clip(self, region: str, *, reset: bool = False) -> None:
         """Raise the sphere on ``region``'s seed.
 
@@ -2449,6 +2474,9 @@ class CCDAF(QtWidgets.QMainWindow):
         seed default back."""
         seed = self._require_seed(region)
         if seed is None:
+            return
+        clip_tag = self._clip_tag_for(region)
+        if clip_tag is None:
             return
         # A sphere needs no picker, but leaving one on another tool would let
         # X keep tagging triangles behind a panel that says clipping is
@@ -2465,12 +2493,16 @@ class CCDAF(QtWidgets.QMainWindow):
             center=(pose["cx"], pose["cy"], pose["cz"]),
             radius=pose["radius"],
             seed_key=region,
+            clip_tag=clip_tag,
         )
         self._after_geometric_start()
 
     def _start_plane_clip(self, region: str, *, reset: bool = False) -> None:
         seed = self._require_seed(region)
         if seed is None:
+            return
+        clip_tag = self._clip_tag_for(region)
+        if clip_tag is None:
             return
         self._take_picker("clip")
         if reset:
@@ -2487,6 +2519,7 @@ class CCDAF(QtWidgets.QMainWindow):
             # the origin lies in the plane and so answers nothing.
             seed=seed,
             seed_key=region,
+            clip_tag=clip_tag,
         )
         self._after_geometric_start()
 
@@ -2823,6 +2856,13 @@ class CCDAF(QtWidgets.QMainWindow):
                 # applies the format to a double — "%d" is invalid there and
                 # aborts (fatally, from VTK 9.6: "invalid format specifier").
                 "shadow": True,
+                # The theme's font is black and the 3D view is black, so the
+                # bar has to name its colour or it draws invisibly. This one
+                # bar labels regions through `annotations` rather than ticks,
+                # and pyvista paints title, tick and annotation text from the
+                # same value — so white here is what makes the region names
+                # readable at all.
+                "color": "white",
                 # Interactive scalar bars are unsupported on multi-renderer
                 # plotters — disable them on any multi-view layout.
                 "interactive": not self._view.is_multiview,
@@ -3976,6 +4016,11 @@ class CCDAF(QtWidgets.QMainWindow):
                 _on_plane, normal=self._seg_plane_normal, origin=centre,
                 bounds=bounds, factor=1.1, implicit=True,
                 outline_translation=False, tubing=False,
+                # Left unset, pyvista colours the normal arrow and the outline
+                # from the theme font colour — black, and so invisible against
+                # the black viewport. The arrow is how the user reads which
+                # half-space gets relabelled, so it has to be visible.
+                color="white",
             )
         except Exception as exc:
             self.seg_widget.btn_plane.setChecked(False)

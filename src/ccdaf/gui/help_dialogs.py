@@ -102,6 +102,8 @@ commits the manual-correction selection batch.</p>
       back the last contour point, or returns a sphere/plane to the region's
       seed. <i>Revert clip</i> undoes applied clips one at a time — the sphere
       or plane comes back where you left it when you press <i>Start</i> again.
+      Every mode clips only the selected region: a sphere or plane covering
+      the body or a neighbouring vein leaves those untouched.
       Ticking the box accepts the tagging for you if that step is still open,
       so a mesh reloaded from an earlier session can start here.</li>
   <li><b>Export</b> — <i>File &rarr; Save data</i>, or <i>EAM &rarr; Export</i> for a

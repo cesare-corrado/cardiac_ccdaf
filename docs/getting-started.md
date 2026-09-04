@@ -71,6 +71,10 @@ Pick a **Region** (a vein or `MV`) and a **Mode**, then **Start** â†’ place it â
   right-drag to resize the sphere), or type the centre and radius into the
   boxes below. **Undo / reset** returns it to the region's seed.
 
+Every mode clips **only the selected region**: a sphere or plane that also
+covers the body or a neighbouring vein leaves those alone, and the red overlay
+shows exactly what will go. `MV` clips the body it sits on.
+
 **Revert clip** undoes an applied clip. The sphere or plane is remembered, so
 pressing **Start** again brings it back where you left it.
 
