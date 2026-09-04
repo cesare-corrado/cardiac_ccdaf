@@ -249,6 +249,7 @@ class _FakeClipper:
         self.mode = ClipMode.NONE
         self._memory = {}
         self.starts = []
+        self.clip_tags = []
         self.dropped = 0
         # What apply_* hands back: None stands for a refused clip.
         self.result = None
@@ -267,14 +268,17 @@ class _FakeClipper:
     def drop_snapshot(self):
         self.dropped += 1
 
-    def start_sphere(self, center, radius, seed_key=""):
+    def start_sphere(self, center, radius, seed_key="", clip_tag=None):
         self.mode = ClipMode.SPHERE
         self.starts.append(("sphere", tuple(center), radius, seed_key))
+        self.clip_tags.append(clip_tag)
 
-    def start_plane(self, origin, normal, seed=None, seed_key=""):
+    def start_plane(self, origin, normal, seed=None, seed_key="",
+                    clip_tag=None):
         self.mode = ClipMode.PLANE
         self.starts.append(
             ("plane", tuple(origin), tuple(normal), tuple(seed), seed_key))
+        self.clip_tags.append(clip_tag)
 
     def apply_sphere(self):
         return self.result
@@ -292,6 +296,7 @@ class _Host:
     def __init__(self, panel: ClippingWidget):
         self._seed_xyz = lambda name: CCDAF._seed_xyz(self, name)
         self._require_seed = lambda name: CCDAF._require_seed(self, name)
+        self._clip_tag_for = lambda name: CCDAF._clip_tag_for(self, name)
         self._default_sphere_pose = \
             lambda seed: CCDAF._default_sphere_pose(self, seed)
         self._default_plane_pose = \
