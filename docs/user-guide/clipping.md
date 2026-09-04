@@ -93,19 +93,33 @@ inside the tag to travel on.
 Both widgets are placed on the **selected region's seed**, so that seed has to
 exist first — **Start** says so if it does not. They work on any region, not
 just the mitral valve: a vein whose ostium the snake cannot follow cleanly can
-be taken with a sphere instead.
+be taken with a sphere instead. Like the contour, they are confined to the
+selected region — see the note below.
 
 - **Sphere** — **left-drag** it to move, **right-drag** to resize. **Apply
-  clip** removes every triangle whose centre falls inside it.
+  clip** removes the selected region's triangles whose centre falls inside it.
 - **Plane** — an arrow through a box with a ball at its centre. **Left-drag the
   arrowhead** to tilt it, **the rim** (where the plane meets the box) to slide
   it along the arrow, and **the centre ball** to shift it sideways;
-  **middle-drag** moves it freely. **Apply clip** removes the seed's side.
+  **middle-drag** moves it freely. **Apply clip** removes the selected
+  region's triangles on the seed's side.
+
+!!! note "A clip only ever removes the selected region"
+    The widget says *where* to cut; the region says *what* may be cut. A
+    sphere on the `LSPV` that also encloses the body, the `LIPV` or the
+    appendage leaves all of them standing — only `LSPV` triangles go. `MV`,
+    which carries no tag of its own, clips the body it sits on. The red
+    overlay shows exactly this, so what is highlighted is what will be
+    removed.
+
+    A region that is not in the current tagging has nothing to clip, and
+    **Start** says so instead of falling back to a purely geometric cut.
 
 <figure markdown="span">
   ![A sphere placed on a pulmonary vein](../assets/screenshots/clipping_vein_sphere.png)
   <figcaption>A sphere on the LIPV. The red overlay is what Apply clip would
-  remove: every triangle whose centre falls inside the sphere.</figcaption>
+  remove: the LIPV triangles whose centre falls inside the sphere — the body
+  and the neighbouring veins it also encloses are left alone.</figcaption>
 </figure>
 
 !!! warning "Drags that start on the widget do not move the camera"

@@ -6,7 +6,9 @@ Side-panel widget for mesh clipping controls.
 The panel is a *region* and a *mode*, then one set of buttons that mean
 whatever those two say they mean. Region names an anatomical point —
 the four pulmonary veins or the mitral valve — and mode picks how it is
-cut: a tag-constrained contour, a sphere, or a plane. Start / Undo-reset
+cut: a contour, a sphere, or a plane — all three constrained to the
+selected region's tag, so a clip never reaches into a neighbouring
+region that merely happens to share the geometry. Start / Undo-reset
 / Apply therefore read the same in every combination, instead of one
 button per pairing.
 
@@ -116,8 +118,9 @@ class ClippingWidget(QtWidgets.QGroupBox):
         self.cmb_region = QtWidgets.QComboBox()
         self.cmb_region.setToolTip(_tip(
             "The anatomical point this clip works on.",
-            "A contour is confined to that region's tag; a sphere or plane "
-            "starts from its seed.",
+            "Every mode is confined to that region: a contour follows its "
+            "tag, a sphere or plane starts from its seed and removes only "
+            "triangles carrying its label (the body label, for MV).",
         ))
         for name in region_names:
             self.cmb_region.addItem(name, userData=name)
@@ -132,9 +135,11 @@ class ClippingWidget(QtWidgets.QGroupBox):
         self.cmb_mode.setToolTip(_tip(
             "<b>Contour</b> — drop points with X; a geodesic snake follows "
             "the region's tag, and the loop's inside is clipped.",
-            "<b>Sphere</b> — everything whose triangle centre falls inside "
-            "the sphere is clipped.",
-            "<b>Plane</b> — the seed's side of the plane is clipped.",
+            "<b>Sphere</b> — triangles of the selected region whose centre "
+            "falls inside the sphere are clipped; other regions inside it "
+            "are left alone.",
+            "<b>Plane</b> — the selected region's triangles on the seed's "
+            "side of the plane are clipped.",
         ))
         self.cmb_mode.addItem("Contour", userData=MODE_CONTOUR)
         self.cmb_mode.addItem("Sphere", userData=MODE_SPHERE)
