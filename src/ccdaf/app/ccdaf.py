@@ -2856,6 +2856,13 @@ class CCDAF(QtWidgets.QMainWindow):
                 # applies the format to a double — "%d" is invalid there and
                 # aborts (fatally, from VTK 9.6: "invalid format specifier").
                 "shadow": True,
+                # The theme's font is black and the 3D view is black, so the
+                # bar has to name its colour or it draws invisibly. This one
+                # bar labels regions through `annotations` rather than ticks,
+                # and pyvista paints title, tick and annotation text from the
+                # same value — so white here is what makes the region names
+                # readable at all.
+                "color": "white",
                 # Interactive scalar bars are unsupported on multi-renderer
                 # plotters — disable them on any multi-view layout.
                 "interactive": not self._view.is_multiview,
@@ -4009,6 +4016,11 @@ class CCDAF(QtWidgets.QMainWindow):
                 _on_plane, normal=self._seg_plane_normal, origin=centre,
                 bounds=bounds, factor=1.1, implicit=True,
                 outline_translation=False, tubing=False,
+                # Left unset, pyvista colours the normal arrow and the outline
+                # from the theme font colour — black, and so invisible against
+                # the black viewport. The arrow is how the user reads which
+                # half-space gets relabelled, so it has to be visible.
+                color="white",
             )
         except Exception as exc:
             self.seg_widget.btn_plane.setChecked(False)
