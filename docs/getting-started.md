@@ -24,7 +24,9 @@ cells start as *body*.
 
 ## 2. Place the six seeds
 
-Open **Seed selection → Start seed selection** and click, in order:
+Leave **Seed type** on `seed_LA` — it is the left-atrial six-seed workflow, and
+it is what the Tagging, Manual correction and Clipping panels follow. Then open
+**Seed selection → Start seed selection** and click, in order:
 
 `LSPV → LIPV → RSPV → RIPV → LAA → MV`
 

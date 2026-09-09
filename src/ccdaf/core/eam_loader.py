@@ -31,6 +31,7 @@ import numpy as np
 import pyvista as pv
 
 from ccdaf.io.carto_functions import read_carto_mesh_file, load_carto_electrodes
+from ccdaf.core.seed_profiles import SEED_PROFILE_ORDER
 
 
 # Carto vertex-colour sentinel magnitude: |value| >= this ⇒ no data.
@@ -127,20 +128,24 @@ def _read_point_set(payload: dict, key: str
 
 
 def read_bundle(path: str
-                ) -> Tuple[pv.PolyData, Optional[Dict[str, np.ndarray]],
-                           Optional[Dict[str, np.ndarray]], Optional[dict]]:
+                ) -> Tuple[pv.PolyData, Dict[str, Dict[str, np.ndarray]],
+                           Optional[dict]]:
     """Read a File → Save pickle bundle back into working objects.
 
     The inverse of :func:`eam_export.export_binary` used with the bundle
     keys: the ``"surface"`` dict becomes a PolyData through
     :func:`carto_mesh_to_polydata`, the ``"elemTag"`` key (if present)
-    restores the cell tags the Carto surface dict cannot carry, and the
-    ``"seeds"`` / ``"landmarks_LA_UAC"`` / ``"electrodes"`` keys come back
-    as they were saved.
+    restores the cell tags the Carto surface dict cannot carry, and every
+    point-set key a seed profile claims comes back as it was saved.
 
-    Returns ``(mesh, seeds, landmarks, electrodes)`` — ``seeds`` and
-    ``landmarks`` each a name → xyz mapping or ``None``, ``electrodes`` the
-    raw record or ``None``.
+    Returns ``(mesh, point_sets, electrodes)``. ``point_sets`` maps a
+    profile's ``type_id`` to its name → xyz mapping and holds only the
+    sets the file actually carries, so a bundle written from a mesh with
+    no landmarks yields no landmark entry rather than an empty one. A set
+    stored under a profile's older key (the six seeds under ``"seeds"``,
+    from before they were named ``seed_LA``) is returned under that
+    profile's current ``type_id``, which is what converts it: the next
+    save writes the new spelling.
     """
     with open(path, "rb") as fh:
         payload = pickle.load(fh)
@@ -154,10 +159,16 @@ def read_bundle(path: str
         if tags.shape[0] == mesh.n_cells:
             mesh.cell_data["elemTag"] = tags
 
-    seeds = _read_point_set(payload, "seeds")
-    landmarks = _read_point_set(payload, "landmarks_LA_UAC")
+    point_sets: Dict[str, Dict[str, np.ndarray]] = {}
+    for profile in SEED_PROFILE_ORDER:
+        for key in profile.read_keys:
+            found = _read_point_set(payload, key)
+            if found is not None:
+                point_sets[profile.type_id] = found
+                break
+
     electrodes = payload.get("electrodes")
-    return mesh, seeds, landmarks, electrodes
+    return mesh, point_sets, electrodes
 
 
 def load_carto_mapping(directory: str, map_name: str) -> EAMData:

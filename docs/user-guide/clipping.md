@@ -2,6 +2,15 @@
 
 Remove the pulmonary-vein cuffs and open the mitral valve.
 
+!!! note "The panel follows the seed type"
+
+    The regions offered come from the **Seed type** chosen in the
+    [Seed selection](seeds-tagging.md) panel, named at the top of this one.
+    Only `seed_LA` defines any today, so clipping is available for the left
+    atrium and disabled — activation checkbox included — for every other seed
+    type. A sphere or a plane is placed on a *seed* and a contour walks a
+    *tag*, so a seed type that produces neither has nothing to clip on.
+
 !!! note "The `X` key belongs to whoever is active"
     Clipping's snake and manual correction both use `X`. Tick **Clipping
     active** to hand the key to clipping; untick it to give it back to manual

@@ -101,7 +101,7 @@ from ccdaf.core.segmentation import (
     drop_stray_shells, segmentation_to_polydata, StrayShells,
     sync_sitk_from_array, voxelise_polydata,
 )
-from ccdaf.core.seed_io import load_seeds, save_seeds
+from ccdaf.core.seed_io import load_point_set, save_seeds
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
@@ -131,8 +131,6 @@ SEG_LABEL_COLORS: Dict[int, str] = {
 }
 # Ordered list for building a 9-entry discrete colormap (index == label value).
 _SEG_COLOR_LIST = [SEG_LABEL_COLORS[i] for i in range(9)]
-
-PV_NAMES = ("LSPV", "LIPV", "RSPV", "RIPV")
 
 # The non-body labels: their presence in ``elemTag`` is what distinguishes a
 # mesh that carries a tagging from one the loader has only seeded with body.
@@ -440,8 +438,8 @@ class CCDAF(QtWidgets.QMainWindow):
         body.addWidget(self.tagging_widget)
 
         # --- Manual edit (mesh) ----------------------------------------
-        label_entries = [(lbl, _label_name(lbl)) for lbl in ALLOWED_LABELS]
-        self.manual_widget = ManualCorrectionWidget(label_entries=label_entries)
+        self.manual_widget = ManualCorrectionWidget(
+            label_entries=self._label_entries(DEFAULT_PROFILE))
         self.manual_widget.label_changed.connect(self._action_label_changed)
         self.manual_widget.edit_toggled.connect(self._action_edit_toggle)
         self.manual_widget.fill_holes_requested.connect(self._action_fill_holes)
@@ -456,10 +454,11 @@ class CCDAF(QtWidgets.QMainWindow):
         body.addWidget(self.manual_widget)
 
         # --- Clipping ---------------------------------------------------
-        # The mitral valve joins the veins in the region list: a sphere or a
-        # plane is placed on a seed, and MV is a seed like any other.
+        # The regions are the seed type's, not this panel's: the mitral
+        # valve joins the veins there because a sphere or a plane is placed
+        # on a seed, and MV is a seed like any other.
         self.clipping_widget = ClippingWidget(
-            region_names=list(PV_NAMES) + ["MV"])
+            region_names=list(DEFAULT_PROFILE.clip_regions))
         self.clipping_widget.start_requested.connect(self._action_clip_start)
         self.clipping_widget.undo_reset_requested.connect(
             self._action_clip_undo_reset)
@@ -499,6 +498,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self._set_section_visible("visualisation", False)
 
         v.addStretch(1)
+
+        # Every dependent panel now exists, so the starting seed type can
+        # be pushed into all three at once rather than each guessing.
+        self._sync_profile_panels()
 
         # Every section exists now, so what the panel needs is measurable.
         self._side_width = self._measure_side_width(side_scroll, v)
@@ -842,7 +845,13 @@ class CCDAF(QtWidgets.QMainWindow):
             on_render=self._render_mesh,
             on_state=lambda s: None,
             on_commit=self._on_edit_committed,
-            active_label=self.manual_widget.current_label(),
+            # The panel's label when it has one. A seed type offering none
+            # leaves the combo empty, and the editor still needs a valid
+            # starting label to exist: every control that would apply it is
+            # disabled, so which one it is cannot be observed.
+            active_label=(self.manual_widget.current_label()
+                          if self.manual_widget.current_label() is not None
+                          else BODY_LABEL),
         )
 
     def _sync_clipping_gate(self, *, announce: bool = False) -> bool:
@@ -1187,9 +1196,10 @@ class CCDAF(QtWidgets.QMainWindow):
         # A mesh that comes in already tagged goes straight to clipping.
         self._sync_clipping_gate(announce=True)
 
-        self.seed_widget.set_start_enabled(True)
-        self.seed_widget.set_reset_enabled(True)
-        self.seed_widget.set_load_enabled(True)
+        # Through the panel sync rather than button by button: a seed type
+        # with no points must not come back to life just because a mesh
+        # arrived under it.
+        self._sync_seed_panel()
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
         self._sync_close_action()
@@ -1208,7 +1218,7 @@ class CCDAF(QtWidgets.QMainWindow):
     def _load_bundle(self, filename: str) -> None:
         """Load a File → Save pickle bundle: mesh, tagging, seeds, electrodes."""
         try:
-            mesh, seeds, landmarks, electrodes = read_bundle(filename)
+            mesh, point_sets, electrodes = read_bundle(filename)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
             return
@@ -1234,15 +1244,16 @@ class CCDAF(QtWidgets.QMainWindow):
             self.act_eam_export.setEnabled(True)
             self._render_field()
 
-        # Seeds last, so their markers land on the final view. Landmarks (if
-        # the bundle carries them) load into their own background set under
-        # the matching profile, whatever the dropdown currently shows.
-        if seeds:
-            self._apply_loaded_seeds(seeds, Path(filename).name,
-                                     profile=SEED_PROFILES["seed"])
-        if landmarks:
-            self._apply_loaded_seeds(landmarks, Path(filename).name,
-                                     profile=SEED_PROFILES["landmarks_LA_UAC"])
+        # Point sets last, so their markers land on the final view. Each
+        # loads into its own profile's set, whatever the dropdown currently
+        # shows; only the active one touches the panel. A set stored under
+        # a profile's older key arrives here already mapped onto that
+        # profile, so the rename is invisible to this code.
+        for type_id, points in point_sets.items():
+            profile = SEED_PROFILES.get(type_id)
+            if profile is not None and points:
+                self._apply_loaded_seeds(points, Path(filename).name,
+                                         profile=profile)
 
         # Everything the bundle carried is now exactly what is on disk.
         self._clear_dirty()
@@ -1439,17 +1450,27 @@ class CCDAF(QtWidgets.QMainWindow):
             return {name: s.xyz for name, s in sel.seeds.items()}
         return None
 
-    def _collect_seeds(self) -> "Optional[dict]":
-        """The six-seed set as ``{name: xyz}`` when complete, else None.
+    def _collect_point_sets(self) -> "dict":
+        """Every complete point set, keyed by the profile's ``export_key``.
 
-        Shared by the pickle-bundle save and the EAM binary export so both
-        carry the seeds the same way.
+        Only sets that exist and are complete, and only from profiles that
+        persist at all: a bundle that carried an empty key would claim the
+        mesh has a set it does not, and the next reader would act on it.
+        That is what keeps atrial keys off a ventricular mesh and the other
+        way round — nothing declares which anatomy a file is, so what is
+        absent has to mean absent.
+
+        Shared by the pickle-bundle save and the EAM binary export, so both
+        carry the same sets the same way.
         """
-        return self._seeds_for_key(DEFAULT_PROFILE.type_id)
-
-    def _collect_landmarks(self) -> "Optional[dict]":
-        """The LA-UAC landmark set as ``{name: xyz}`` when complete, else None."""
-        return self._seeds_for_key("landmarks_LA_UAC")
+        out = {}
+        for profile in SEED_PROFILE_ORDER:
+            if not profile.persists:
+                continue
+            points = self._seeds_for_key(profile.type_id)
+            if points:
+                out[profile.export_key] = points
+        return out
 
     def _save_bundle(self, fn: str, fields: "list[str]") -> None:
         """Write the pickle bundle: surface (chosen point fields), seeds,
@@ -1462,23 +1483,17 @@ class CCDAF(QtWidgets.QMainWindow):
             if name not in keep:
                 surface.point_data.remove(name)
 
-        seeds = self._collect_seeds()
-        landmarks = self._collect_landmarks()
+        point_sets = self._collect_point_sets()
 
         electrodes = self._eam_data.electrodes if self._eam_data else None
         export_binary(
             fn, surface,
             electrodes=electrodes,
             electrode_points=self._eam_electrode_points,
-            seeds=seeds,
-            landmarks=landmarks,
+            point_sets=point_sets,
             include_elem_tag=("elemTag" in keep),
         )
-        parts = []
-        if seeds:
-            parts.append(f"{len(seeds)} seeds")
-        if landmarks:
-            parts.append(f"{len(landmarks)} landmarks")
+        parts = [f"{len(points)} {key}" for key, points in point_sets.items()]
         if electrodes is not None:
             parts.append("electrodes")
         extra = f" (+ {', '.join(parts)})" if parts else ""
@@ -1571,11 +1586,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.set_active(True)
         self.manual_widget.set_undo_enabled(False)
         self._sync_clipping_gate()
-        self.seed_widget.set_start_enabled(True)
-        self.seed_widget.set_reset_enabled(True)
-        self.seed_widget.set_prompt(
-            "EAM mapping loaded. Click 'Start seed selection'.")
-        self.seed_widget.set_load_enabled(True)
+        self._sync_seed_panel()
+        if self._current_profile().count:
+            self.seed_widget.set_prompt(
+                "EAM mapping loaded. Click 'Start seed selection'.")
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
         self.mesh_info.update_info(mesh)
@@ -1883,6 +1897,42 @@ class CCDAF(QtWidgets.QMainWindow):
     def _current_profile(self) -> SeedProfile:
         return SEED_PROFILES[self._seed_type]
 
+    @staticmethod
+    def _label_entries(profile: SeedProfile) -> "list[tuple[int, str]]":
+        """``(value, name)`` pairs for *profile*'s manual-correction labels."""
+        return [(int(lbl), _label_name(int(lbl)))
+                for lbl in profile.label_values]
+
+    def _sync_profile_panels(self) -> None:
+        """Point Tagging, Manual correction and Clipping at the active type.
+
+        One dropdown decides the anatomy, and the three panels that act on
+        a tagging follow it: each is handed what this seed type defines and
+        switches itself off when that is nothing. Called on every seed-type
+        change and once at start-up, so the panels can never be describing
+        a set other than the one the seed panel shows.
+        """
+        profile = self._current_profile()
+        self.tagging_widget.set_profile(profile)
+        self.manual_widget.set_label_entries(
+            self._label_entries(profile), follows=profile.label)
+        self.clipping_widget.set_regions(
+            list(profile.clip_regions), follows=profile.label)
+
+        # A set already complete keeps tagging live across the switch; one
+        # that is not (or a type that does not tag at all) must not.
+        sel = self._selectors.get(profile.type_id)
+        self.tagging_widget.set_seeds_complete(
+            bool(profile.tags and sel is not None and sel.is_complete))
+
+        # The editor takes its label from the panel, so a switch that
+        # changed the offered set must reach it too, or the next pick is
+        # tagged with a label this seed type does not have.
+        if self.editor is not None:
+            label = self.manual_widget.current_label()
+            if label is not None:
+                self.editor.set_active_label(int(label))
+
     def _new_selector(self, profile: SeedProfile) -> SeedSelector:
         """Build a selector for *profile*, routing its callbacks with the
         profile bound so a background (non-active) set does not touch the
@@ -1913,6 +1963,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 self._take_picker("seeds")
                 self.selector.resume()
         self._sync_seed_panel()
+        self._sync_profile_panels()
 
     def _sync_seed_panel(self) -> None:
         """Reflect the active set's state on the seed panel (progress,
@@ -1922,7 +1973,28 @@ class CCDAF(QtWidgets.QMainWindow):
         mesh_ready = self.loader.mesh is not None
         done = len(sel.seeds) if sel is not None else 0
         total = profile.count
+
+        # A seed type with no points defined is a signpost: it says what the
+        # mesh is and has nothing to pick, undo, reset, save or load. Every
+        # button has to be told, because an empty order reads as *complete*
+        # to the state machine — all() over nothing is True — and Save would
+        # otherwise offer to write a set with no points in it.
+        if total == 0:
+            self.seed_widget.set_progress("No seeds for this type")
+            for setter in (self.seed_widget.set_start_enabled,
+                           self.seed_widget.set_undo_enabled,
+                           self.seed_widget.set_reset_enabled,
+                           self.seed_widget.set_save_enabled,
+                           self.seed_widget.set_load_enabled):
+                setter(False)
+            self.seed_widget.set_prompt(
+                f"<b>{profile.label}</b> has no seeds defined yet. It selects "
+                f"the anatomy; the panels below follow it.")
+            return
+
         self.seed_widget.set_progress(f"Seeds: {done} / {total}")
+        self.seed_widget.set_start_enabled(mesh_ready)
+        self.seed_widget.set_load_enabled(mesh_ready)
         self.seed_widget.set_undo_enabled(mesh_ready and done > 0)
         self.seed_widget.set_save_enabled(sel is not None and sel.is_complete)
         self.seed_widget.set_reset_enabled(mesh_ready and sel is not None)
@@ -1947,7 +2019,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self.seed_widget.set_prompt("All seeds collected.")
 
     def _action_start_seeds(self) -> None:
-        if self.loader.mesh is None:
+        if self.loader.mesh is None or self._current_profile().count == 0:
             return
         if self.selector is not None:
             self.selector.stop()
@@ -2031,6 +2103,12 @@ class CCDAF(QtWidgets.QMainWindow):
         if self.selector is None or not self.selector.is_complete:
             return
         profile = self._current_profile()
+        # Belt and braces against the empty-order case: the panel already
+        # disables Save for a signpost type, but is_complete is True for an
+        # empty order, so anything that reached here with no points would
+        # write a key claiming a set that does not exist.
+        if profile.count == 0 or not self.selector.seeds:
+            return
         stem = Path(self.loader.path).stem if self.loader.path else "mesh"
         default = str(Path(self.recent_folder)
                       / f"{stem}.{profile.export_key}.json")
@@ -2052,7 +2130,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Saved {len(seeds)} {profile.label} to {fn}")
 
     def _action_load_seeds(self) -> None:
-        if self.loader.mesh is None:
+        if self.loader.mesh is None or self._current_profile().count == 0:
             return
         profile = self._current_profile()
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2063,11 +2141,19 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         self.recent_folder = Path(fn).resolve().parent
         try:
-            positions = load_seeds(fn, key=profile.export_key)
+            key, positions = load_point_set(fn, profile.read_keys)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Load seeds failed", str(exc))
             return
         self._apply_loaded_seeds(positions, Path(fn).name, profile=profile)
+        if key != profile.export_key:
+            # Read under an older spelling. Say so rather than converting
+            # quietly: the next save writes the current key, and the user
+            # should know which file is about to stop matching the old one.
+            self.statusBar().showMessage(
+                f"Loaded {len(positions)} {profile.label} from "
+                f"{Path(fn).name} under the legacy key '{key}' — saving "
+                f"writes '{profile.export_key}'.", 15000)
 
     def _apply_loaded_seeds(self, positions: Dict[str, np.ndarray],
                             source_name: str,
@@ -2126,11 +2212,20 @@ class CCDAF(QtWidgets.QMainWindow):
     # Tagging
     # ==================================================================
     def _seed_selector(self) -> Optional[SeedSelector]:
-        """The six-seed set's selector — the one tagging and PV/MV clipping
-        use, independent of which set the dropdown currently shows."""
-        return self._selectors.get(DEFAULT_PROFILE.type_id)
+        """The selector tagging and clipping act on: the chosen seed type's.
+
+        Tagging runs on the set the seed-type dropdown shows and on no
+        other, so choosing a different anatomy never re-runs the atrium's
+        tagging behind the user's back. A type that does not tag has no
+        selector to offer here.
+        """
+        profile = self._current_profile()
+        if not profile.tags:
+            return None
+        return self._selectors.get(profile.type_id)
 
     def _action_run_tagging(self) -> None:
+        profile = self._current_profile()
         seed_sel = self._seed_selector()
         if self.tagger is None or seed_sel is None:
             return
@@ -2143,11 +2238,19 @@ class CCDAF(QtWidgets.QMainWindow):
         try:
             cfg = self.tagger.config
             factors = self.tagging_widget.radius_factors()
-            cfg.lspv_radius_factor = factors["LSPV"]
-            cfg.lipv_radius_factor = factors["LIPV"]
-            cfg.rspv_radius_factor = factors["RSPV"]
-            cfg.ripv_radius_factor = factors["RIPV"]
-            cfg.laa_radius_factor  = factors["LAA"]
+            # By name, from the profile's own radius list: the config field
+            # is <seed>_radius_factor, so a seed type that adds a region
+            # brings its factor with it instead of needing a line here.
+            missing = [n for n in profile.radius_names if n not in factors]
+            if missing:
+                raise ValueError(
+                    f"no radius factor for {', '.join(missing)}")
+            for name, value in factors.items():
+                attr = f"{name.lower()}_radius_factor"
+                if not hasattr(cfg, attr):
+                    raise ValueError(
+                        f"the tagger has no radius factor for {name}")
+                setattr(cfg, attr, value)
             cfg._validate()
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Invalid radius factor", str(exc))
@@ -2171,8 +2274,9 @@ class CCDAF(QtWidgets.QMainWindow):
 
         self.manual_widget.set_active(True)
         self.manual_widget.set_label_index(0)
-        if self.editor:
-            self.editor.set_active_label(self.manual_widget.current_label())
+        label = self.manual_widget.current_label()
+        if self.editor and label is not None:
+            self.editor.set_active_label(int(label))
 
     # ==================================================================
     # Manual editor (mesh)
@@ -2191,7 +2295,9 @@ class CCDAF(QtWidgets.QMainWindow):
             # a backstop against the editor and the panel disagreeing on the
             # label, which the user can only see once triangles come back the
             # wrong colour.
-            self.editor.set_active_label(self.manual_widget.current_label())
+            label = self.manual_widget.current_label()
+            if label is not None:
+                self.editor.set_active_label(int(label))
             # Selection shares the surface picker with the snake, seed
             # selection and the clip — only one may hold it.
             self._take_picker("selection")
@@ -2206,7 +2312,9 @@ class CCDAF(QtWidgets.QMainWindow):
         if on:
             # Same backstop as selection mode — the snake tags with the
             # active label too.
-            self.editor.set_active_label(self.manual_widget.current_label())
+            label = self.manual_widget.current_label()
+            if label is not None:
+                self.editor.set_active_label(int(label))
             # Mutually exclusive with selection mode, seed selection and the
             # clip — all four drive the one shared picker.
             self._take_picker("snake")
@@ -2339,6 +2447,8 @@ class CCDAF(QtWidgets.QMainWindow):
         if self.editor is None or self.tagger is None:
             return
         label = self.manual_widget.current_label()
+        if label is None:
+            return
         name = f"{_label_name(label)} ({label})"
         ops = "+".join(w for w, on in (("dilate", dilate), ("erode", erode)) if on)
         if not ops:
@@ -2737,8 +2847,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 export_binary(path, self.loader.mesh,
                               electrodes=self._eam_data.electrodes,
                               electrode_points=self._eam_electrode_points,
-                              seeds=self._collect_seeds(),
-                              landmarks=self._collect_landmarks(),
+                              point_sets=self._collect_point_sets(),
                               include_elem_tag=True)
             else:
                 export_vtk(path, self.loader.mesh, binary=dlg.selected_binary())
@@ -3031,9 +3140,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_save.setEnabled(True)
         self.plotter.reset_camera()
         self.plotter.render()
-        self.seed_widget.set_start_enabled(True)
-        self.seed_widget.set_reset_enabled(True)
-        self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
+        self._sync_seed_panel()
+        if self._current_profile().count:
+            self.seed_widget.set_prompt(
+                "Mesh loaded. Click 'Start seed selection'.")
         notes = [n for n in (shell_note,
                              getattr(self, "_transfer_note", None),
                              getattr(self, "_eam_warp_note", None)) if n]

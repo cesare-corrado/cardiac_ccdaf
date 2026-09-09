@@ -83,12 +83,20 @@ are settable from scripts:
 ## Clean
 
 Merge duplicate points, drop disconnected points, remove non-manifold and
-degenerate cells, orient normals, and repair low-quality triangles while
-preserving the region labels. The first five are topology work; the last is
+degenerate cells, drop connected components too small to be anatomy, orient
+normals, and repair low-quality triangles while preserving the region labels. The first five are topology work; the last is
 vertex relocation and is also available on its own as
 `ccdaf.core.mesh_postprocessor.improve_quality`, for when you want the repair
 without the topology passes — after a resample, say, where those passes would
 renumber points for nothing.
+
+!!! note "Enclosed cavities survive"
+
+    The connectivity pass keeps every component holding at least 1% of the
+    cells and drops the rest. That threshold matters on a wall around a
+    chamber: the endocardium is a separate component of comparable size, and
+    keeping only the largest would delete it, returning a solid lump instead
+    of a wall. A stray fleck of segmentation is far below 1% and still goes.
 
 - **quality threshold** — triangles whose shape quality is below this are
   repaired. `1.0` = equilateral, `0.0` disables the repair.

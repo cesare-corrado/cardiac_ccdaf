@@ -40,6 +40,15 @@ from scipy.spatial.distance import cdist, pdist
 # =====================================================================
 # data transfer
 # =====================================================================
+#: Smallest share of a surface's cells a connected component may hold and
+#: still be kept by :func:`clean`. Below it the component is an artefact —
+#: a speck of stray segmentation, a shard left by the non-manifold pass —
+#: and above it, it is anatomy: most importantly the inner surface of an
+#: enclosed cavity, which is a separate component of comparable size.
+#: Same value, and same reasoning, as ``segmentation.drop_stray_shells``.
+MIN_COMPONENT_FRACTION: float = 0.01
+
+
 def _transfer_arrays(src: pv.PolyData, dst: pv.PolyData) -> None:
     """Copy all point / cell arrays from *src* onto *dst* by nearest-point
     and nearest-cell-centroid lookup. Integer dtypes are preserved."""
@@ -1948,12 +1957,16 @@ def clean(mesh: pv.PolyData,
           quality_relaxation: float = 0.1,
           smooth_iterations: int = 20,
           merge_tol: float = 0.0,
+          min_component_fraction: float = MIN_COMPONENT_FRACTION,
           on_progress: Optional[Callable[[int, int], None]] = None
           ) -> pv.PolyData:
     """Apply the full cleaning pipeline.
 
     * merge duplicate points, drop unused / non-connected points
     * remove non-manifold and degenerate cells
+    * drop connected components too small to be anatomy — see
+      ``min_component_fraction``, and :func:`_keep_main_components` for why
+      the threshold is not simply "keep the largest"
     * ensure consistent outward normals
     * smooth low-quality triangles (``quality < quality_threshold``) while
       freezing vertices belonging to cells whose ``elemTag`` is listed in
@@ -1984,6 +1997,11 @@ def clean(mesh: pv.PolyData,
     guarantees: near-coincident protected vertices become weldable, so
     protected geometry can shift by up to ``merge_tol``. The restoration
     step still re-appends protected cells at their original coordinates.
+
+    ``min_component_fraction`` is the smallest share of the cells a
+    connected component may hold and still be kept. It exists so a
+    cavity's inner surface, which is a separate component of comparable
+    size, survives the pass that removes specks.
 
     Bookkeeping arrays introduced by the intermediate filters
     (``RegionId``, ``vtkOriginalPointIds``, ``vtkOriginalCellIds``) are
@@ -2021,7 +2039,8 @@ def clean(mesh: pv.PolyData,
     # 2. connectivity: with protection, keep every component containing at
     #    least one protected cell AND the largest; without protection, keep
     #    only the largest.
-    cleaned = _keep_main_components(cleaned, preserve_labels)
+    cleaned = _keep_main_components(cleaned, preserve_labels,
+                                    min_component_fraction)
 
     # 3. triangle filter - kills degenerate/strip cells
     cleaned = cleaned.triangulate()
@@ -2099,10 +2118,25 @@ def _extract_cells(mesh: pv.PolyData, idx: np.ndarray) -> pv.PolyData:
 
 
 def _keep_main_components(mesh: pv.PolyData,
-                          preserve_labels: Sequence[int]) -> pv.PolyData:
-    """Keep the largest connected component and any component containing
-    a protected cell. If no protected labels are given, behaves like
-    ``connectivity(largest=True)``."""
+                          preserve_labels: Sequence[int],
+                          min_fraction: float = MIN_COMPONENT_FRACTION,
+                          ) -> pv.PolyData:
+    """Drop artefact components; keep the anatomy.
+
+    The largest component is always kept, as is any component holding a
+    protected cell. Of the rest, a component is kept when it holds at
+    least ``min_fraction`` of the cells and dropped when it does not.
+
+    That threshold is the whole point. Keeping *only* the largest is right
+    for a stray speck beside an atrial wall and wrong for a cavity: a
+    hollow chamber closed at both ends has its endocardium as a second
+    component, half the mesh by cell count, and dropping it deletes the
+    cavity — the surface comes back solid. The rule here is the one
+    ``segmentation.drop_stray_shells`` already applies on the other side of
+    the round trip: too small to be real, drop it; big enough to be real,
+    keep it. ``min_fraction=0`` keeps every component; a value above 1
+    keeps only the largest, which is the old behaviour.
+    """
     try:
         labelled = mesh.connectivity()
     except Exception:
@@ -2116,6 +2150,10 @@ def _keep_main_components(mesh: pv.PolyData,
     # largest component
     counts = np.bincount(region)
     keep.add(int(np.argmax(counts)))
+    # every other component big enough to be anatomy rather than a speck
+    total = float(counts.sum())
+    if total > 0:
+        keep.update(int(r) for r in np.where(counts >= min_fraction * total)[0])
     # components touching a protected cell
     if preserve_labels and "elemTag" in labelled.cell_data:
         tags = np.asarray(labelled.cell_data["elemTag"])
@@ -2477,6 +2515,10 @@ class PostprocessOptions:
     clean_quality_relaxation: float = 0.05
     clean_preserve_labels: Sequence[int] = field(default_factory=tuple)
     clean_merge_tol: float = 0.0   # absolute weld distance; 0 = coincident only
+    # Smallest share of the cells a connected component may hold and still
+    # be kept. Keeps a cavity's endocardium, which is a component in its
+    # own right; drops specks. See MIN_COMPONENT_FRACTION.
+    clean_min_component_fraction: float = MIN_COMPONENT_FRACTION
 
     # smooth
     smooth_method: str = SMOOTH_TAUBIN
@@ -2574,6 +2616,7 @@ def apply(mesh: pv.PolyData,
                     quality_relaxation=opts.clean_quality_relaxation,
                     smooth_iterations=opts.clean_smooth_iterations,
                     merge_tol=opts.clean_merge_tol,
+                    min_component_fraction=opts.clean_min_component_fraction,
                     on_progress=_stage("quality repair"))
     # max_hole_size == 0 means "no hole filling" (as it does for decimate),
     # so honour that rather than letting fill_holes reject it.

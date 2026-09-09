@@ -30,19 +30,33 @@ Triangular surfaces are read/written through `ccdaf.io.vtkfunctions`.
 
 ## Seeds — `.json` / `.pkl`
 
-- **`.json`** — human-readable `{"seeds": {name: [x, y, z], ...}}`. Stores
+- **`.json`** — human-readable `{"seed_LA": {name: [x, y, z], ...}}`. Stores
   **coordinates only**, no vertex ids, so seeds reload onto a clipped or refined
-  mesh (each snapped to the nearest surface point). The **landmarks_LA_UAC** set
-  uses the same layout under its own `landmarks_LA_UAC` key.
+  mesh (each snapped to the nearest surface point). Every seed type uses the
+  same layout under its own key — **landmarks_LA_UAC** under
+  `landmarks_LA_UAC`, and so on.
 - **`.pkl`** — the seeds alongside a Carto-dict surface.
+
+!!! note "The `seeds` key was renamed"
+
+    The six-seed set is written under `seed_LA`; it used to be `seeds`. Both
+    spellings are accepted on read (`seed` too), and CCDAF says in the status
+    bar when it read a file under the old key. Saving writes `seed_LA`, so a
+    file converts the first time you save it.
 
 ## Session bundles — `.pkl`
 
-A **File → Save data** bundle packs the surface, tagging, seeds, LA-UAC landmarks
-(under the `landmarks_LA_UAC` key) and electrodes together, so a session
+A **File → Save data** bundle packs the surface, tagging, every completed point
+set (each under its seed type's own key) and electrodes together, so a session
 round-trips in one file (`read_bundle` / write path in
-`ccdaf.core.eam_loader`). Each seed set appears only when it has been
-completed.
+`ccdaf.core.eam_loader`).
+
+A set appears **only when it has been completed**. That is load-bearing, not
+tidiness: nothing in the file says which anatomy it holds, so an absent key has
+to mean absent. A ventricular mesh therefore carries no `seed_LA` key, and an
+atrial one carries no right-atrial key, rather than each carrying an empty one
+that a reader would take at face value. A seed type with no points defined
+(`seed_RA` today) is never written at all.
 
 ## EAM export
 

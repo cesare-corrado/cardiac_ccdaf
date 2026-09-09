@@ -89,8 +89,11 @@ commits the manual-correction selection batch.</p>
   <li><b>Load the data</b> — <i>File &rarr; Load data</i>: a <code>.vtk</code> surface,
       a <code>.pkl</code> bundle or a <code>.nii</code> segmentation. A path given on
       the command line (<code>ccdaf file</code>) opens the same way.</li>
-  <li><b>Place the six seeds</b> — <i>Seed selection &rarr; Start</i>, then click
-      LSPV, LIPV, RSPV, RIPV, LAA, MV in order.</li>
+  <li><b>Place the six seeds</b> — leave <i>Seed type</i> on
+      <code>seed_LA</code>, then <i>Seed selection &rarr; Start</i> and click
+      LSPV, LIPV, RSPV, RIPV, LAA, MV in order. The seed type also decides what
+      Tagging, Manual correction and Clipping offer: they follow it and switch
+      off for a type that defines none.</li>
   <li><b>Tag automatically</b> — set the radius factors, then
       <i>Run automatic tagging</i>.</li>
   <li><b>Correct by hand</b> — in <i>Manual correction</i>, pick a label, then
