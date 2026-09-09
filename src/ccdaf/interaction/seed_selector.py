@@ -38,7 +38,7 @@ from ccdaf.core.seed_state_machine import (
 from ccdaf.core.seed_geometry import SeedGeometryResolver, GeometryError
 from ccdaf.core.seed_profiles import (
     SeedProfile,
-    SEED_PROFILE,
+    SEED_LA_PROFILE,
     SEED_PROMPT,
     SEED_COLOR,
 )
@@ -59,7 +59,7 @@ class SeedSelector:
         plotter,
         on_progress: Optional[Callable[[str, int, int], None]] = None,
         on_complete: Optional[Callable[[Dict[str, Seed]], None]] = None,
-        profile: SeedProfile = SEED_PROFILE,
+        profile: SeedProfile = SEED_LA_PROFILE,
     ) -> None:
         self.mesh = mesh
         self.plotter = plotter

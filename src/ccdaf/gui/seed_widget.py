@@ -2,6 +2,12 @@
 SeedWidget
 ==========
 Side-panel widget for seed selection controls.
+
+The **Seed type** dropdown here is the workflow's one anatomy switch:
+Tagging, Manual correction and Clipping all follow whatever it shows,
+each offering only what that seed type defines. A type with no points of
+its own is a signpost — it says what the mesh is and leaves every tool
+that acts on seeds switched off.
 """
 from __future__ import annotations
 
@@ -28,9 +34,9 @@ class SeedWidget(QtWidgets.QGroupBox):
         type_row.addWidget(QtWidgets.QLabel("Seed type:"))
         self.combo_type = QtWidgets.QComboBox()
         self.combo_type.setToolTip(
-            "Choose which set of surface points to pick. 'seed' is the "
-            "six-seed workflow used for tagging; other choices pick "
-            "landmark sets that are only saved/exported."
+            "Choose which set of surface points to pick. This also decides "
+            "what the Tagging, Manual correction and Clipping panels offer: "
+            "each follows the seed type shown here."
         )
         self.combo_type.currentIndexChanged.connect(self._on_type_changed)
         type_row.addWidget(self.combo_type, 1)
@@ -38,8 +44,8 @@ class SeedWidget(QtWidgets.QGroupBox):
 
         self.btn_start = QtWidgets.QPushButton("Start seed selection")
         self.btn_start.setToolTip(
-            "Begin picking the six seeds (LSPV, LIPV, RSPV, RIPV, LAA, MV) in "
-            "order by clicking on the surface."
+            "Begin picking this seed type's points, in order, by clicking on "
+            "the surface."
         )
         self.btn_start.clicked.connect(self.start_requested.emit)
         self.btn_start.setEnabled(False)
@@ -61,16 +67,16 @@ class SeedWidget(QtWidgets.QGroupBox):
         row = QtWidgets.QHBoxLayout()
         self.btn_save = QtWidgets.QPushButton("Save seeds…")
         self.btn_save.setToolTip(
-            "Save the six seeds as names and coordinates — no vertex ids, "
-            "so they reload onto a clipped or refined mesh."
+            "Save this seed type's points as names and coordinates — no "
+            "vertex ids, so they reload onto a clipped or refined mesh."
         )
         self.btn_save.clicked.connect(self.save_requested.emit)
         self.btn_save.setEnabled(False)
         row.addWidget(self.btn_save)
         self.btn_load = QtWidgets.QPushButton("Load seeds…")
         self.btn_load.setToolTip(
-            "Load saved seeds; each is snapped to the current surface by "
-            "nearest point."
+            "Load a saved set of this seed type; each point is snapped to "
+            "the current surface by nearest point."
         )
         self.btn_load.clicked.connect(self.load_requested.emit)
         self.btn_load.setEnabled(False)

@@ -25,6 +25,12 @@ centre + radius for a sphere, origin + normal for a plane. The boxes are
 editable — typing a number drives the 3D widget exactly as dragging it
 would — so a radius can be set to a value rather than eyeballed.
 
+Which regions the panel offers follows the seed type chosen in the Seed
+selection panel, pushed in through :meth:`set_regions`. A sphere or a
+plane is placed on a *seed*, and a contour walks a *tag*, so a seed type
+that produces neither has nothing to clip on: the panel is disabled and
+says which seed type it is following.
+
 All user actions are exposed as signals. The host enables/disables
 individual controls via the provided setter methods.
 """
@@ -92,14 +98,28 @@ class ClippingWidget(QtWidgets.QGroupBox):
                  parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         # Set by set_enabled_after_accept / reset_state; the start button
-        # needs both this and the activation checkbox.
+        # needs this, the activation checkbox and a region to work on.
         self._accepted = False
+        # Whether the active seed type offers any region at all.
+        self._has_regions = bool(region_names)
+        # The last region actually offered, kept across seed types that
+        # offer none, so a switch away and back does not silently re-point
+        # the panel at whichever region happens to come first.
+        self._last_region = str(region_names[0]) if region_names else ""
         # Guards the widget→panel→widget round trip while a pose is being
         # written in from the 3D widget.
         self._syncing = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        self.lbl_follows = QtWidgets.QLabel()
+        self.lbl_follows.setWordWrap(True)
+        self.lbl_follows.setToolTip(
+            "Clipping acts on the seed type selected in the Seed selection "
+            "panel. Change it there to clip a different set."
+        )
+        layout.addWidget(self.lbl_follows)
 
         self.chk_active = QtWidgets.QCheckBox("Clipping active")
         self.chk_active.setChecked(False)
@@ -353,7 +373,54 @@ class ClippingWidget(QtWidgets.QGroupBox):
     # Selection
     # ------------------------------------------------------------------
     def selected_region(self) -> str:
-        return str(self.cmb_region.currentData())
+        """The chosen region, or ``""`` when this seed type offers none."""
+        data = self.cmb_region.currentData()
+        return "" if data is None else str(data)
+
+    def set_regions(self, region_names: List[str], follows: str = "") -> None:
+        """Offer exactly *region_names*, naming the seed type they belong to.
+
+        The current region is kept when the new set still carries it. An
+        empty set disables the whole panel, activation checkbox included:
+        with no region there is nothing for Start to start on, and leaving
+        the tick live would take the X key away from manual correction for
+        a clip that can never begin.
+
+        Signals are blocked while refilling: the intermediate states of a
+        clear-and-repopulate are not selections the host should re-point a
+        clip at.
+        """
+        previous = self.selected_region()
+        if previous:
+            self._last_region = previous
+        wanted = self._last_region
+
+        self.cmb_region.blockSignals(True)
+        self.cmb_region.clear()
+        for name in region_names:
+            self.cmb_region.addItem(name, userData=name)
+        if wanted:
+            idx = self.cmb_region.findData(wanted)
+            if idx >= 0:
+                self.cmb_region.setCurrentIndex(idx)
+        self.cmb_region.blockSignals(False)
+
+        self._has_regions = bool(region_names)
+        self.cmb_region.setEnabled(self._has_regions)
+        self.cmb_mode.setEnabled(self._has_regions)
+        self.chk_active.setEnabled(self._has_regions)
+        self.lbl_follows.setText(
+            f"Follows seed type: <b>{follows}</b>" if self._has_regions
+            else (f"Follows seed type: <b>{follows}</b><br>"
+                  f"<i>This seed type has no regions to clip.</i>")
+        )
+        if not self._has_regions:
+            # Whatever was in flight cannot survive losing its region.
+            self.set_active_checked(False)
+            self.clear_in_flight()
+            self.btn_revert.setEnabled(False)
+        self._sync_mode_gate()
+        self._sync_start_button()
 
     def selected_mode(self) -> str:
         return str(self.cmb_mode.currentData())
@@ -411,7 +478,9 @@ class ClippingWidget(QtWidgets.QGroupBox):
     def reset_state(self) -> None:
         """Disable all controls — used by teardown after plotter rebuild.
 
-        The activation checkbox is the user's choice and survives."""
+        The activation checkbox is the user's choice and survives; so is
+        the region set, which belongs to the seed type, not to the
+        plotter."""
         self._accepted = False
         self.btn_start.setEnabled(False)
         self.btn_undo_reset.setEnabled(False)
@@ -422,7 +491,8 @@ class ClippingWidget(QtWidgets.QGroupBox):
     # Internal gating
     # ------------------------------------------------------------------
     def _sync_start_button(self) -> None:
-        self.btn_start.setEnabled(self._accepted and self.is_clipping_enabled())
+        self.btn_start.setEnabled(self._accepted and self._has_regions
+                                  and self.is_clipping_enabled())
 
     def _sync_mode_gate(self) -> None:
         """Grey out MV + contour, in whichever order the user gets there.
@@ -456,13 +526,16 @@ class ClippingWidget(QtWidgets.QGroupBox):
                 item.setToolTip(no_contour_tip if mode_is_contour else "")
 
     def _on_selection_changed(self) -> None:
-        """Announce the new region/mode pair.
+        """Announce the new region/mode pair, and remember the region.
 
         A clip already in flight is *about* this pair, so the host re-points it
         rather than leaving a sphere on screen that the panel no longer
         describes."""
         self._sync_mode_gate()
-        self.selection_changed.emit(self.selected_region(), self.selected_mode())
+        region = self.selected_region()
+        if region:
+            self._last_region = region
+        self.selection_changed.emit(region, self.selected_mode())
 
     def _on_mode_changed(self) -> None:
         mode = self.selected_mode()
