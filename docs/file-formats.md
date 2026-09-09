@@ -18,7 +18,11 @@ Tags live in the mesh's `elemTag` **cell** array:
 
 ## Meshes — `.vtk`
 
-Triangular surfaces are read/written through `ccdaf.io.vtkfunctions`.
+Triangular surfaces and tetrahedral volumes are read/written through
+`ccdaf.io.vtkfunctions`. `read_dataset` returns what the file holds — a
+surface as polydata, a volume as an unstructured grid — while `readvtk`
+returns a surface whatever the file held, reducing a volume to its boundary.
+`writevtk` picks its writer from the dataset it is given.
 
 - **Encoding:** legacy ASCII, legacy binary, and XML are supported. The project
   default on save is ASCII.
@@ -43,6 +47,21 @@ Triangular surfaces are read/written through `ccdaf.io.vtkfunctions`.
     spellings are accepted on read (`seed` too), and CCDAF says in the status
     bar when it read a file under the old key. Saving writes `seed_LA`, so a
     file converts the first time you save it.
+
+## Volumes — `.vtk`
+
+A legacy `.vtk` holding an unstructured grid of tetrahedra is kept whole.
+Saving writes the volume back with every array it carried, at its original
+precision — unlike the surface path, nothing is cast to `float32` and no
+`Normals` are computed, because both of those exist to satisfy the downstream
+surface format and a volume has no such reader. An integer `elemTag` stays an
+integer, and a fibre field stays whatever it was.
+
+A volume **cannot** be saved as a `.pkl` bundle. The bundle stores a Carto
+surface dictionary — points, triangles and vertex colours — and there is
+nowhere in it to put tetrahedra; a bundle holding only the boundary would be
+a quiet way to lose the volume. The option is greyed out in the save dialog
+rather than left to fail.
 
 ## Session bundles — `.pkl`
 

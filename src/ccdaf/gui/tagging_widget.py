@@ -101,16 +101,23 @@ class TaggingWidget(QtWidgets.QGroupBox):
         self.spn_radius[name] = sp
         return row
 
-    def set_profile(self, profile) -> None:
+    def set_profile(self, profile, reason: str = "",
+                    enabled: bool = True) -> None:
         """Show the radii *profile* tags with, and nothing else.
+
+        *reason* replaces the default explanation when the panel has
+        nothing to offer, so a panel switched off by something other than
+        the seed type says which something. *enabled* False forces that
+        empty state while still naming the seed type — for a condition
+        outside the profile, such as the mesh being a volume.
 
         Rows are re-ordered to the profile's own order rather than the
         order they were first created in, so a set that lists its seeds
         differently reads the way it is picked. Rows for other profiles
         are hidden, not destroyed: their tuned values come back with them.
         """
-        names: Sequence[str] = tuple(profile.radius_names)
-        self._tags = bool(profile.tags) and bool(names)
+        names: Sequence[str] = tuple(profile.radius_names) if enabled else ()
+        self._tags = bool(enabled) and bool(profile.tags) and bool(names)
         self._active = tuple(names)
 
         # Detach every row, then re-attach the wanted ones in order.
@@ -128,10 +135,11 @@ class TaggingWidget(QtWidgets.QGroupBox):
             row.setVisible(True)
 
         self._radius_box.setVisible(bool(names))
+        note = reason or "This seed type has no regions to tag."
         self.lbl_follows.setText(
             f"Follows seed type: <b>{profile.label}</b>" if self._tags
             else (f"Follows seed type: <b>{profile.label}</b><br>"
-                  f"<i>This seed type has no regions to tag.</i>")
+                  f"<i>{note}</i>")
         )
         self._update_button_state()
 

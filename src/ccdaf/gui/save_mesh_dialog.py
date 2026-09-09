@@ -53,7 +53,9 @@ class SaveMeshDialog(QtWidgets.QFileDialog):
                  point_fields: Sequence[str],
                  cell_fields: Sequence[str],
                  start_dir: str = "",
-                 parent: Optional[QtWidgets.QWidget] = None) -> None:
+                 parent: Optional[QtWidgets.QWidget] = None,
+                 *,
+                 volume: bool = False) -> None:
         super().__init__(parent, "Save mesh", start_dir,
                          "All files (*)")
         self.setOption(QtWidgets.QFileDialog.DontUseNativeDialog, True)
@@ -63,29 +65,56 @@ class SaveMeshDialog(QtWidgets.QFileDialog):
         self.setAcceptMode(QtWidgets.QFileDialog.AcceptSave)
         self.setDefaultSuffix("vtk")
 
+        self._volume = bool(volume)
         self._point_fields = [str(f) for f in point_fields]
         self._cell_fields = [str(f) for f in cell_fields]
-        # A mesh may not carry every default field — a Carto mapping arrives
-        # as bare geometry with no Normals. Offer them anyway; saving computes
-        # what is missing rather than quietly writing a file without it.
-        self._derived: List[str] = [
-            f for f in DEFAULT_SAVE_FIELDS
-            if f not in self._point_fields and f not in self._cell_fields
-        ]
-        self._cell_fields += self._derived
-        self._selected: List[str] = [
-            f for f in self._cell_fields + self._point_fields
-            if f in DEFAULT_SAVE_FIELDS
-        ]
+        if self._volume:
+            # No derived fields: Normals describe a surface, and computing
+            # them for a volume would write a field that means nothing.
+            self._derived: List[str] = []
+            # Everything by default. The surface default (elemTag, Normals)
+            # is a contract with the downstream project format; a volume has
+            # no such reader, and honouring it here would silently drop the
+            # fibres, which are the reason the volume is being kept at all.
+            self._selected: List[str] = list(self._cell_fields
+                                             + self._point_fields)
+        else:
+            # A mesh may not carry every default field — a Carto mapping
+            # arrives as bare geometry with no Normals. Offer them anyway;
+            # saving computes what is missing rather than quietly writing a
+            # file without it.
+            self._derived = [
+                f for f in DEFAULT_SAVE_FIELDS
+                if f not in self._point_fields and f not in self._cell_fields
+            ]
+            self._cell_fields += self._derived
+            self._selected = [
+                f for f in self._cell_fields + self._point_fields
+                if f in DEFAULT_SAVE_FIELDS
+            ]
 
         self.cmb_format = QtWidgets.QComboBox()
-        self.cmb_format.addItem("VTK surface (*.vtk)", FORMAT_VTK)
+        self.cmb_format.addItem(
+            "VTK volume (*.vtk)" if self._volume else "VTK surface (*.vtk)",
+            FORMAT_VTK)
         self.cmb_format.addItem("Pickle bundle (*.pkl)", FORMAT_PICKLE)
         self.cmb_format.setToolTip(
-            "VTK writes the surface for the downstream pipeline. The pickle "
+            "VTK writes the mesh for the downstream pipeline. The pickle "
             "bundle also carries the seeds and tagging, so the mesh reloads "
             "with them."
         )
+        if self._volume:
+            # The bundle stores a Carto surface dict — points, triangles and
+            # vertex colours. There is nowhere in it to put tetrahedra, and a
+            # bundle holding only the boundary would be a quiet way to lose
+            # the volume. Greyed out rather than left to fail.
+            item = self.cmb_format.model().item(
+                self.cmb_format.findData(FORMAT_PICKLE))
+            if item is not None:
+                item.setEnabled(False)
+                item.setToolTip(
+                    "A pickle bundle carries a surface and cannot hold "
+                    "tetrahedra. Save the volume as VTK.")
         self.cmb_format.currentIndexChanged.connect(self._on_format_changed)
 
         self.btn_fields = QtWidgets.QPushButton("Choose fields…")

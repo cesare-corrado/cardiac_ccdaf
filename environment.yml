@@ -30,6 +30,10 @@ dependencies:
   - pytest>=7.0
   - pip
   - pip:
+    # Tetrahedral remeshing (MMG3D) for the volumetric workflow. Not on
+    # conda-forge, so it comes from PyPI; the wheel bundles libmmg3d, so
+    # no compiler is needed. MIT wrapper over an LGPL-3 library.
+    - mmgpy>=0.17
     - -e .
 
 variables:

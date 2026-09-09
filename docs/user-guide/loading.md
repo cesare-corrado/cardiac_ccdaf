@@ -2,19 +2,46 @@
 
 ## Loading a mesh
 
-**File → Load data** opens a `.vtk` triangular surface, a `.pkl` session
-bundle, or a `.nii`/`.nii.gz` segmentation — the reader follows the extension.
-The same file can be named on the command line (`ccdaf path/to/file`), which
-opens it as the window comes up.
+**File → Load data** opens a `.vtk` triangular surface, a `.vtk` tetrahedral
+volume, a `.pkl` session bundle, or a `.nii`/`.nii.gz` segmentation — the
+reader follows the extension. The same file can be named on the command line
+(`ccdaf path/to/file`), which opens it as the window comes up.
 
-Loading a surface, CCDAF:
+Loading a mesh, CCDAF:
 
-- reads the surface via VTK (`ccdaf.io.vtkfunctions.readvtk`);
+- reads it via VTK (`ccdaf.io.vtkfunctions.read_dataset`);
 - restores no-data sentinels to `NaN` for legacy **ASCII** `.vtk` files (whose
   reader cannot parse a `nan` token — see [File formats](../file-formats.md));
 - initialises the `elemTag` cell array to **body** (`1`) if the mesh has none.
 
-The mesh must be **purely triangular**; non-triangular input is rejected.
+## Surfaces and volumes
+
+A file holding **tetrahedra** is kept as a volume. Its boundary surface is
+derived and is what you see, pick and colour, but the volume is the working
+mesh: it is what gets saved, and it keeps every field the file carried,
+including a per-element fibre direction.
+
+What a mesh *is* comes from its cells, not from the file's dataset type. A
+triangular surface exported as an unstructured grid is a surface and behaves
+exactly as it always did.
+
+The **Mesh info** panel says which you have: for a volume, *Npt* and *nElem*
+count the volume's points and tetrahedra, an extra row gives the boundary
+triangle count, and *inverted* counts tetrahedra whose nodes wind the other
+way — harmless to view, and normalised before any remeshing sees them.
+
+!!! note "What a volume can and cannot do"
+
+    Seed selection, tagging, manual correction and clipping all act on a
+    surface. On a volume they are switched off, each saying so.
+
+    Reshaping a volume is done by the volumetric branch of
+    [Mesh post-processing](post-processing.md#volumes), which adapts the
+    tetrahedra directly and carries the labels, fibres and point fields onto
+    the result.
+
+Surfaces must be **purely triangular** and volumes purely **tetrahedral**;
+anything else is rejected with a message rather than partly handled.
 
 ## Mesh info panel
 

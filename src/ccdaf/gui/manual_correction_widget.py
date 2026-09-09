@@ -248,8 +248,13 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
 
     def set_label_entries(self,
                           label_entries: List[Tuple[int, str]],
-                          follows: str = "") -> None:
+                          follows: str = "",
+                          reason: str = "") -> None:
         """Offer exactly *label_entries*, naming the seed type they belong to.
+
+        *reason* replaces the default explanation when there are none, so
+        a panel switched off by something other than the seed type says
+        which something.
 
         The current label is kept when the new set still carries it, so
         switching seed type and back does not silently re-point the editor
@@ -276,10 +281,10 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
 
         self._has_labels = bool(label_entries)
         self.cmb_label.setEnabled(self._has_labels)
+        note = reason or "This seed type has no labels to correct."
         self.lbl_follows.setText(
             f"Follows seed type: <b>{follows}</b>" if self._has_labels
-            else (f"Follows seed type: <b>{follows}</b><br>"
-                  f"<i>This seed type has no labels to correct.</i>")
+            else f"Follows seed type: <b>{follows}</b><br><i>{note}</i>"
         )
         if not self._has_labels:
             self.set_active(False)

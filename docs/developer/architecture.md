@@ -21,7 +21,7 @@ flowchart TD
 
 | Package | Responsibility |
 |---|---|
-| `ccdaf.core` | Pure algorithms and state: mesh load, region tagging, seed geometry/state machine, post-processing, field transfer, segmentation, EAM load/export, seed I/O. **No Qt, no VTK interaction** — unit-testable headlessly. |
+| `ccdaf.core` | Pure algorithms and state: mesh load, region tagging, seed geometry/state machine, post-processing (surface and volumetric), field transfer, segmentation, EAM load/export, seed I/O. **No Qt, no VTK interaction** — unit-testable headlessly. |
 | `ccdaf.io` | Low-level file readers/writers (`vtkfunctions`, `carto_functions`). |
 | `ccdaf.interaction` | On-surface tools that own a picker: `seed_selector`, `manual_editor`, `clipping_tool`. Logic (state, geometry) is delegated to `core`; these add markers, HUD, and pick callbacks. |
 | `ccdaf.gui` | Qt widgets — one panel per stage plus dialogs. Widgets expose **signals**; they hold no business logic. |
@@ -48,3 +48,39 @@ flowchart TD
 
 The full symbol-level documentation is generated from the docstrings in the
 [API reference](../reference/index.md).
+
+## Surfaces and volumes
+
+The working mesh is one of two things, and `MeshLoader.kind` says which.
+Deciding it is the cells' job, not the file's: a triangular surface stored as
+an unstructured grid is a surface.
+
+```mermaid
+flowchart LR
+    file["file"] --> loader["MeshLoader"]
+    loader -->|"tetrahedra"| grid["grid<br/>the working mesh"]
+    loader -->|"otherwise"| surf["mesh<br/>the working mesh"]
+    grid -->|"derived"| bsurf["mesh<br/>boundary surface"]
+    bsurf --> render["render · pick · mesh info"]
+    surf --> render
+    grid --> save["save"]
+    surf --> save
+```
+
+**The volume is the master and the surface is a view of it.** Anything that
+changes geometry changes the volume and re-derives the surface, never the
+other way round: re-deriving is cheap and always correct, while pushing a
+changed surface back into a volume is not defined. That is the whole reason
+the surface tools are switched off in volume mode — not that they could not
+run, but that their result would have nowhere to go.
+
+| Module | Kind | Notes |
+|---|---|---|
+| `core.volume_mesh` | both | the vocabulary: what a volume is, its boundary, orientation |
+| `core.mesh_postprocessor` | surface | stages that rebuild a surface |
+| `core.volume_postprocessor` | volume | one MMG3D pass; drives it through temp files |
+| `core.field_transfer` | both | `transfer_fields` for surfaces, `transfer_volume_fields` for volumes |
+
+`core.volume_postprocessor` is the one place that imports `mmgpy`, and it is
+imported inside the call rather than at module scope, so the dependency is
+paid for only by a session that remeshes.

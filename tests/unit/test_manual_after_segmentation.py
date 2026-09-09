@@ -46,7 +46,7 @@ from ccdaf.app.ccdaf import CCDAF
 from ccdaf.gui.manual_correction_widget import ManualCorrectionWidget
 from ccdaf.interaction.clipping_tool import ClippingTool
 from ccdaf.interaction.manual_editor import ALLOWED_LABELS, ManualEditor
-from ccdaf.core.mesh_loader import BODY_LABEL
+from ccdaf.core.mesh_loader import BODY_LABEL, MeshLoader
 
 
 @pytest.fixture(scope="module")
@@ -73,7 +73,11 @@ class _Host:
         self._mark_dirty = lambda: CCDAF._mark_dirty(self)
         self._replace_mesh = lambda mesh: CCDAF._replace_mesh(self, mesh)
         self._new_manual_editor = lambda mesh: CCDAF._new_manual_editor(self, mesh)
-        self.loader = MagicMock(mesh=None, path=None)
+        # A real loader, not a mock: adopting a mesh goes through
+        # ``set_surface``, which is what keeps ``mesh``, ``grid`` and
+        # ``kind`` in step. A mock would record the call and leave the
+        # host holding no mesh at all.
+        self.loader = MeshLoader()
         self.plotter = MagicMock()
         self.manual_widget = panel
         self.mesh_info = MagicMock()

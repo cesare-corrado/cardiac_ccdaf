@@ -26,7 +26,10 @@ The contract:
   would still take the X key from manual correction;
 * repopulating a combo is not a user selection, so it emits no
   ``label_changed`` / ``selection_changed``;
-* the label entries the app builds match the profile.
+* the label entries the app builds match the profile;
+* the mesh kind is a *second*, independent gate on the same panels: a
+  volume switches all of them off whatever the seed type says, and says
+  so in its own words rather than blaming the seed type.
 
 Qt only — no display beyond the offscreen platform, no mesh, no window
 (constructing one needs a GL context).
@@ -47,6 +50,8 @@ from ccdaf.core.seed_profiles import (
 )
 from ccdaf.gui.clipping_widget import ClippingWidget
 from ccdaf.gui.manual_correction_widget import ManualCorrectionWidget
+from ccdaf.gui.postprocessing_widget import PostprocessingWidget
+from ccdaf.gui.volume_postprocessing_widget import VolumePostprocessingWidget
 from ccdaf.gui.tagging_widget import TaggingWidget
 
 
@@ -218,3 +223,137 @@ def test_label_entries_follow_the_profile():
     assert [v for v, _ in entries] == [int(v) for v in SEED_LA_PROFILE.label_values]
     assert all(name for _, name in entries)          # every label is named
     assert CCDAF._label_entries(SEED_RA_PROFILE) == []
+
+
+# ----------------------------------------------------------- volume mode
+def _apply_volume(profile, panels):
+    """Do to the panels what ``_sync_profile_panels`` does on a volume."""
+    tagging, manual, clipping = panels
+    reason = CCDAF.VOLUME_NOTE
+    tagging.set_profile(profile, reason=reason, enabled=False)
+    manual.set_label_entries([], follows=profile.label, reason=reason)
+    clipping.set_regions([], follows=profile.label, reason=reason)
+
+
+def test_a_volume_switches_every_surface_panel_off(panels):
+    tagging, manual, clipping = panels
+    _apply(SEED_LA_PROFILE, panels)          # the fully-capable seed type
+    manual.set_active(True)
+    clipping.set_enabled_after_accept()
+    clipping.chk_active.setChecked(True)
+    assert tagging.radius_factors() and manual.current_label() is not None
+
+    _apply_volume(SEED_LA_PROFILE, panels)
+    tagging.set_seeds_complete(True)         # not enough on a volume
+    assert not tagging.btn_tag.isEnabled()
+    assert tagging.radius_factors() == {}
+    assert manual.current_label() is None
+    assert not manual.btn_edit_toggle.isEnabled()
+    assert not clipping.chk_active.isEnabled()
+    assert not clipping.chk_active.isChecked()
+
+
+def test_a_volume_says_why_rather_than_blaming_the_seed_type(panels):
+    """The message names the real reason.
+
+    seed_LA defines radii, labels and clip regions. Saying "this seed
+    type has none" would be false and would send the user to the one
+    control that cannot help.
+    """
+    tagging, manual, clipping = panels
+    _apply_volume(SEED_LA_PROFILE, panels)
+    for widget in (tagging, manual, clipping):
+        text = widget.lbl_follows.text()
+        assert "volumetric" in text
+        assert "no regions to tag" not in text
+        assert "no labels to correct" not in text
+        assert "no regions to clip" not in text
+        assert SEED_LA_PROFILE.label in text      # still names the seed type
+
+
+def test_leaving_volume_mode_restores_the_panels(panels):
+    tagging, manual, clipping = panels
+    _apply_volume(SEED_LA_PROFILE, panels)
+    _apply(SEED_LA_PROFILE, panels)
+    tagging.set_seeds_complete(True)
+    assert tagging.btn_tag.isEnabled()
+    assert manual.current_label() is not None
+    assert clipping.chk_active.isEnabled()
+
+
+def test_one_post_processing_panel_or_the_other(qapp):
+    """The two panels swap with the mesh kind; they are never both up.
+
+    The surface steps rebuild a surface and hand it back, which on a
+    volume would replace the tetrahedra with their boundary. They are not
+    disabled-in-place but replaced, because what a volume needs is a
+    different set of controls, not a greyed-out version of these.
+    """
+    surface = PostprocessingWidget(
+        mesh_getter=lambda: None, mesh_setter=lambda m: None,
+        on_status=lambda msg: None)
+    volume = VolumePostprocessingWidget()
+
+    for is_volume in (False, True, False):
+        surface.setVisible(not is_volume)
+        volume.setVisible(is_volume)
+        assert surface.isVisibleTo(surface) is not volume.isVisibleTo(volume)
+
+
+def test_the_volume_panel_refuses_a_target_and_a_band_together(qapp):
+    """MMG rejects both; the panel makes the pairing untypable.
+
+    Reported by the controls rather than by an error box after the click.
+    """
+    panel = VolumePostprocessingWidget()
+    assert panel.spn_target.isEnabled() and panel.spn_min.isEnabled()
+
+    panel.spn_target.setValue(2.0)
+    assert not panel.spn_min.isEnabled()
+    assert not panel.spn_max.isEnabled()
+    panel.options().validate()                 # a target alone is valid
+
+    panel.spn_target.setValue(0.0)
+    panel.spn_min.setValue(1.0)
+    assert not panel.spn_target.isEnabled()
+    panel.options().validate()                 # a band alone is valid
+
+
+def test_the_boundary_is_frozen_unless_asked(qapp):
+    """The default must not move the anatomy."""
+    panel = VolumePostprocessingWidget()
+    assert panel.options().freeze_boundary is True
+    # The tolerance is meaningless while the boundary is frozen, and says so.
+    assert not panel.spn_hausdorff.isEnabled()
+
+    panel.chk_adapt_boundary.setChecked(True)
+    assert panel.options().freeze_boundary is False
+    assert panel.spn_hausdorff.isEnabled()
+
+
+def test_the_boundary_knobs_are_inert_while_it_is_frozen(qapp):
+    """Gradation measurably does nothing with a frozen boundary.
+
+    It limits how fast a *varying* size may change, and the size only
+    varies while MMG derives it from surface curvature — which it does
+    only when adapting the boundary. Changing it with the boundary frozen
+    gave byte-identical meshes, so the control is disabled and the value
+    is not sent: a number in the options that had no effect on the result
+    would misdescribe what produced it.
+    """
+    panel = VolumePostprocessingWidget()
+    panel.spn_gradation.setValue(1.05)
+    panel.spn_hausdorff.setValue(0.4)
+
+    assert not panel.spn_gradation.isEnabled()
+    assert not panel.spn_hausdorff.isEnabled()
+    frozen = panel.options()
+    assert frozen.gradation == 0.0 and frozen.hausdorff == 0.0
+    assert "hgrad" not in frozen.as_mmg_options()
+    assert "hausd" not in frozen.as_mmg_options()
+
+    panel.chk_adapt_boundary.setChecked(True)
+    assert panel.spn_gradation.isEnabled()
+    adapting = panel.options()
+    assert adapting.gradation == pytest.approx(1.05)
+    assert adapting.as_mmg_options()["hgrad"] == pytest.approx(1.05)

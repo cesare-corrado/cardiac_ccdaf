@@ -377,8 +377,13 @@ class ClippingWidget(QtWidgets.QGroupBox):
         data = self.cmb_region.currentData()
         return "" if data is None else str(data)
 
-    def set_regions(self, region_names: List[str], follows: str = "") -> None:
+    def set_regions(self, region_names: List[str], follows: str = "",
+                    reason: str = "") -> None:
         """Offer exactly *region_names*, naming the seed type they belong to.
+
+        *reason* replaces the default explanation when there are none, so
+        a panel switched off by something other than the seed type says
+        which something.
 
         The current region is kept when the new set still carries it. An
         empty set disables the whole panel, activation checkbox included:
@@ -409,10 +414,10 @@ class ClippingWidget(QtWidgets.QGroupBox):
         self.cmb_region.setEnabled(self._has_regions)
         self.cmb_mode.setEnabled(self._has_regions)
         self.chk_active.setEnabled(self._has_regions)
+        note = reason or "This seed type has no regions to clip."
         self.lbl_follows.setText(
             f"Follows seed type: <b>{follows}</b>" if self._has_regions
-            else (f"Follows seed type: <b>{follows}</b><br>"
-                  f"<i>This seed type has no regions to clip.</i>")
+            else f"Follows seed type: <b>{follows}</b><br><i>{note}</i>"
         )
         if not self._has_regions:
             # Whatever was in flight cannot survive losing its region.

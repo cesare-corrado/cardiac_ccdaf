@@ -21,6 +21,23 @@ Two rules, following the association the field is stored under:
 So a categorical quantity belongs on the cells, which is where ``elemTag``
 already lives and where anything joining it should go.
 
+Volumes
+-------
+:func:`transfer_volume_fields` does the same job between two tetrahedral
+meshes, which is what a remesh needs: MMG returns bare geometry, so every
+field is carried across by us. The rules are the same with one addition.
+
+A **direction** field — a fibre orientation, one unit vector per element —
+is neither a measurement nor a label. It is *axial*: ``f`` and ``-f`` are
+the same direction, and which of the two a file happens to store is
+arbitrary. Averaging them as vectors is therefore wrong, and not subtly:
+two neighbouring elements whose stored vectors point opposite ways average
+to nothing at all, and the result is a direction pointing nowhere that
+looks like data. :func:`average_axial` averages the outer products
+``f·fᵀ`` and takes the dominant eigenvector instead, which is sign-free by
+construction and gives the right answer whichever way each contributor was
+written down.
+
 No-data
 -------
 Carto's sentinels arrive as NaN. Interpolating a triangle with one invalid
@@ -45,7 +62,7 @@ nearest ``elemTag`` states a fact rather than fabricating a measurement.
 """
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 import numpy as np
 import pyvista as pv
@@ -53,11 +70,20 @@ import vtk
 from scipy.spatial import cKDTree
 
 
-# Bookkeeping the renderer stamps onto whatever mesh is on screen, for
-# picking. It is not the mesh's data and must not be carried anywhere, or it
-# resurfaces as a selectable field. mesh_postprocessor._transfer_arrays skips
-# it for the same reason.
-_INTERNAL_ARRAYS = frozenset({"render_idx"})
+# Bookkeeping stamped on by the renderer (for picking) and by taking a
+# volume's boundary (the map back to the parent tetrahedron). Not the
+# mesh's data, and it must not be carried anywhere — the indices name
+# cells of a mesh the destination is not. mesh_postprocessor skips the
+# same set for the same reason; it is defined once, in mesh_loader.
+from ccdaf.core.mesh_loader import INTERNAL_ARRAYS as _INTERNAL_ARRAYS
+from ccdaf.core.volume_mesh import tetrahedra
+
+#: Cell fields whose vectors are *axial* — a direction with no sign, such
+#: as a fibre orientation. Named rather than guessed from the component
+#: count: a displacement is also three numbers per element and averaging
+#: it as an axis would be just as wrong the other way.
+AXIAL_CELL_FIELDS: frozenset = frozenset({"fiber", "fibre", "sheet",
+                                          "sheet_normal"})
 
 
 def _median_edge_length(mesh: pv.PolyData) -> float:
@@ -223,3 +249,155 @@ def transfer_fields(src: pv.PolyData,
 
 
 __all__ = ["guard_distance", "transfer_fields"]
+
+
+# ---------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------
+def average_axial(vectors: np.ndarray,
+                  weights: Optional[np.ndarray] = None) -> np.ndarray:
+    """The mean *direction* of ``vectors``, ignoring their signs.
+
+    ``vectors`` is ``(n, 3)``. The mean of an axial quantity is the
+    dominant eigenvector of ``Σ w·f·fᵀ``: the sum is unchanged by flipping
+    any contributor, which is exactly the invariance an axis has and a
+    vector does not.
+
+    Returns a unit vector. Its own sign is arbitrary — that is the point —
+    so it is fixed to a deterministic convention (largest component
+    positive) rather than left to the eigensolver, or two runs on the same
+    input could return opposite arrows.
+    """
+    v = np.asarray(vectors, dtype=float).reshape(-1, 3)
+    if v.shape[0] == 0:
+        return np.zeros(3)
+    norm = np.linalg.norm(v, axis=1)
+    good = norm > 0.0
+    if not good.any():
+        return np.zeros(3)
+    unit = v[good] / norm[good, None]
+    w = (np.ones(len(unit)) if weights is None
+         else np.asarray(weights, dtype=float).reshape(-1)[good])
+    tensor = np.einsum("i,ij,ik->jk", w, unit, unit)
+    eigenvalues, eigenvectors = np.linalg.eigh(tensor)
+    axis = eigenvectors[:, int(np.argmax(eigenvalues))]
+    # Deterministic sign: an axis has none, so pick one and always pick it.
+    lead = int(np.argmax(np.abs(axis)))
+    if axis[lead] < 0.0:
+        axis = -axis
+    return axis
+
+
+def _cell_neighbourhoods(src_centres: np.ndarray,
+                         dst_centres: np.ndarray,
+                         radii: np.ndarray) -> "list":
+    """For each destination cell, the source cells near enough to average.
+
+    A ball around the destination centroid, sized by that cell itself, so
+    refining picks up the one cell it came from and coarsening picks up
+    everything it swallowed. Never empty: a cell that catches nothing
+    falls back to its nearest neighbour, because a direction inherited
+    from next door beats no direction at all.
+    """
+    tree = cKDTree(src_centres)
+    found = tree.query_ball_point(dst_centres, radii)
+    empty = [i for i, f in enumerate(found) if not f]
+    if empty:
+        _, nearest = tree.query(dst_centres[empty], k=1)
+        for i, n in zip(empty, np.atleast_1d(nearest)):
+            found[i] = [int(n)]
+    return found
+
+
+def _tet_centres_and_sizes(grid):
+    """Centroids and a characteristic radius for every tetrahedron."""
+    tets = tetrahedra(grid)
+    pts = np.asarray(grid.points, dtype=float)
+    corners = pts[tets]                       # (n, 4, 3)
+    centres = corners.mean(axis=1)
+    # Distance from the centroid to the furthest node: the ball that
+    # contains the element, which is what "the cells this one covers"
+    # means when the mesh has been coarsened.
+    radii = np.linalg.norm(corners - centres[:, None, :], axis=2).max(axis=1)
+    return centres, radii
+
+
+def transfer_volume_fields(src, dst,
+                           axial_fields: Optional[Iterable[str]] = None,
+                           on_status: Optional[Callable[[str], None]] = None
+                           ) -> None:
+    """Copy ``src``'s fields onto the tetrahedral mesh ``dst``, in place.
+
+    Needed because MMG hands back geometry and nothing else: labels,
+    fibres and every point field are ours to carry.
+
+    * **point fields** are interpolated within the source tetrahedron the
+      destination vertex falls in, and taken from the nearest one for a
+      vertex that falls outside the source (which happens at the surface,
+      where a remeshed boundary can sit fractionally outside the old one).
+    * **cell fields** are copied from the source cell containing the
+      destination centroid — labels are never averaged.
+    * **axial cell fields** (see :data:`AXIAL_CELL_FIELDS`) are averaged
+      over the source cells the destination cell covers, by
+      :func:`average_axial`, and renormalised.
+
+    ``src`` is not modified.
+    """
+    if dst.n_points == 0 or src.n_points == 0 or src.n_cells == 0:
+        return
+    axial = frozenset(AXIAL_CELL_FIELDS if axial_fields is None
+                      else {str(a) for a in axial_fields})
+
+    point_names = [n for n in src.point_data.keys()
+                   if n not in _INTERNAL_ARRAYS]
+    cell_names = [n for n in src.cell_data.keys() if n not in _INTERNAL_ARRAYS]
+
+    # -- point fields: VTK's probe does the containing-cell interpolation.
+    outside = 0
+    if point_names:
+        sampled = dst.sample(src, pass_cell_data=False,
+                             pass_point_data=True, categorical=False)
+        valid = np.asarray(
+            sampled.point_data.get("vtkValidPointMask",
+                                   np.ones(dst.n_points))).astype(bool)
+        outside = int((~valid).sum())
+        # Anything the probe could not place takes its nearest source
+        # vertex. Leaving it at the probe's zero would write a plausible
+        # number that was never measured — the same mistake the surface
+        # path guards against with max_distance.
+        if outside:
+            _, near = cKDTree(np.asarray(src.points)).query(
+                np.asarray(dst.points)[~valid], k=1)
+        for name in point_names:
+            arr = np.asarray(sampled.point_data[name])
+            if outside:
+                arr = np.array(arr, copy=True)
+                arr[~valid] = np.asarray(src.point_data[name])[near]
+            dst.point_data[name] = arr
+
+    # -- cell fields: the containing source cell, or the nearest.
+    if cell_names and dst.n_cells:
+        src_centres, _ = _tet_centres_and_sizes(src)
+        dst_centres, dst_radii = _tet_centres_and_sizes(dst)
+        _, containing = cKDTree(src_centres).query(dst_centres, k=1)
+
+        neighbourhoods = None
+        for name in cell_names:
+            arr = np.asarray(src.cell_data[name])
+            if name in axial and arr.ndim == 2 and arr.shape[1] == 3:
+                if neighbourhoods is None:
+                    neighbourhoods = _cell_neighbourhoods(
+                        src_centres, dst_centres, dst_radii)
+                out = np.empty((dst.n_cells, 3), dtype=float)
+                for i, members in enumerate(neighbourhoods):
+                    out[i] = average_axial(arr[members])
+                dst.cell_data[name] = out
+            else:
+                dst.cell_data[name] = arr[containing]   # dtype, labels intact
+
+    if on_status is not None:
+        note = (f"; {outside} of {dst.n_points} vertices fell outside the "
+                f"previous mesh and took their nearest value"
+                if outside else "")
+        on_status(f"Transferred {len(point_names)} point and "
+                  f"{len(cell_names)} cell fields{note}.")
