@@ -10,13 +10,15 @@ id is recovered rather than trusted.
 
 Two formats, chosen by extension:
 
-* ``.json`` — ``{"seeds": {name: [x, y, z], ...}}``. A human-readable
-  sidecar carrying the seeds alone.
+* ``.json`` — ``{"seed_LA": {name: [x, y, z], ...}}``. A human-readable
+  sidecar carrying the seeds alone. The key is the profile's
+  ``export_key``; files written before the six-seed set was renamed
+  carry ``"seeds"`` and are still read (see ``load_point_set``).
 * ``.pkl`` — the surface as ``polydata_to_carto_dict`` plus the same
-  ``"seeds"`` key, following the EAM export pickle's convention
+  point-set key, following the EAM export pickle's convention
   (``{'surface': ..., 'electrodes': ...}``), so the bundle is
-  self-contained. Loading reads only ``"seeds"``: any pickle carrying
-  that key loads, whatever else it holds.
+  self-contained. Loading reads only that key: any pickle carrying it
+  loads, whatever else it holds.
 
 A plain ``.vtk`` cannot carry seeds — the downstream pipeline reads vtk
 and does not need them, so that loss is accepted rather than worked
@@ -29,7 +31,7 @@ import json
 import pickle
 from collections.abc import Mapping as MappingABC
 from pathlib import Path
-from typing import Dict, Mapping, Sequence, Union
+from typing import Dict, Mapping, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -57,10 +59,14 @@ def save_seeds(path: Union[str, Path],
     """Write *seeds* (name → xyz) to *path*; format follows the suffix.
 
     ``.pkl`` embeds *mesh* as its ``"surface"`` — required there, unused
-    for ``.json``. *key* is the dict/JSON key the set is stored under
-    (``"seeds"`` by default; the LA-UAC landmark set uses
-    ``"landmarks_LA_UAC"``), so different point sets round-trip through the
-    same two formats without colliding.
+    for ``.json``. *key* is the dict/JSON key the set is stored under: the
+    profile's ``export_key``, so different point sets round-trip through
+    the same two formats without colliding. The default is the legacy
+    ``"seeds"`` spelling; the application always passes a profile's key.
+
+    An empty set raises rather than writing a key with nothing under it —
+    a set that exists but holds no points is a claim about the mesh that
+    a reader would act on.
     """
     path = Path(path)
     plain = _as_plain(seeds)
@@ -81,12 +87,17 @@ def save_seeds(path: Union[str, Path],
                          "(use .json or .pkl)")
 
 
-def load_seeds(path: Union[str, Path],
-               key: str = SEEDS_KEY) -> Dict[str, np.ndarray]:
-    """Read a seed file back as ``{name: xyz array}``.
+def load_point_set(path: Union[str, Path],
+                   keys: Sequence[str],
+                   ) -> Tuple[str, Dict[str, np.ndarray]]:
+    """Read the first of *keys* the file carries; return ``(key, points)``.
 
-    Reads only the *key* mapping (``"seeds"`` by default), whichever
-    format carries it.
+    *keys* is tried in order, so a profile passes its current spelling
+    first and the older ones after it: a file written before a set was
+    renamed still loads, and the key that matched is returned so the
+    caller can say which one it was rather than converting silently.
+
+    Raises ``ValueError`` when the file carries none of them.
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -98,18 +109,38 @@ def load_seeds(path: Union[str, Path],
     else:
         raise ValueError(f"unknown seed-file suffix '{path.suffix}' "
                          "(use .json or .pkl)")
-    if not isinstance(data, dict) or key not in data:
-        raise ValueError(f"{path.name} carries no '{key}' key")
-    seeds = data[key]
-    if not isinstance(seeds, MappingABC):
-        raise ValueError(f"'{key}' is not a name → xyz mapping")
-    out: Dict[str, np.ndarray] = {}
-    for name, xyz in seeds.items():
-        arr = np.asarray(xyz, dtype=float).reshape(-1)
-        if arr.shape != (3,) or not np.isfinite(arr).all():
-            raise ValueError(f"seed '{name}' is not a finite 3-vector: {xyz}")
-        out[str(name)] = arr
-    return out
+    if not isinstance(data, dict):
+        raise ValueError(f"{path.name} is not a seed file")
+
+    keys = tuple(keys)
+    for key in keys:
+        if key not in data:
+            continue
+        seeds = data[key]
+        if not isinstance(seeds, MappingABC):
+            raise ValueError(f"'{key}' is not a name → xyz mapping")
+        out: Dict[str, np.ndarray] = {}
+        for name, xyz in seeds.items():
+            arr = np.asarray(xyz, dtype=float).reshape(-1)
+            if arr.shape != (3,) or not np.isfinite(arr).all():
+                raise ValueError(
+                    f"seed '{name}' is not a finite 3-vector: {xyz}")
+            out[str(name)] = arr
+        return key, out
+
+    wanted = "' / '".join(keys)
+    raise ValueError(f"{path.name} carries no '{wanted}' key")
 
 
-__all__ = ["save_seeds", "load_seeds", "SEEDS_KEY"]
+def load_seeds(path: Union[str, Path],
+               key: str = SEEDS_KEY) -> Dict[str, np.ndarray]:
+    """Read a seed file back as ``{name: xyz array}``.
+
+    Reads only the *key* mapping (``"seeds"`` by default), whichever
+    format carries it. :func:`load_point_set` is the version that accepts
+    several spellings and reports which one matched.
+    """
+    return load_point_set(path, (key,))[1]
+
+
+__all__ = ["save_seeds", "load_seeds", "load_point_set", "SEEDS_KEY"]

@@ -3,6 +3,14 @@
 Fix the `elemTag` labels after automatic tagging. Pick the **active Label**
 (the PV/LAA regions or *body*) at the top; every tool below applies that label.
 
+!!! note "The panel follows the seed type"
+
+    Which labels the dropdown offers comes from the **Seed type** chosen in
+    the [Seed selection](seeds-tagging.md) panel, named at the top of this one.
+    A seed type with no labels of its own — `landmarks_LA_UAC`, `seed_RA` —
+    leaves nothing to correct, so the whole panel is disabled. Switch back to
+    `seed_LA` to carry on; the label you had is remembered.
+
 The two picking tools are **mutually exclusive** — turning one on turns the
 other off, because both drive the surface picker. So do
 [seed selection](seeds-tagging.md) and the [PV contour clip](clipping.md): only one

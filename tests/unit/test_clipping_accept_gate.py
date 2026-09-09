@@ -31,7 +31,8 @@ import pyvista as pv
 import pytest
 from PyQt5 import QtWidgets
 
-from ccdaf.app.ccdaf import CCDAF, PV_NAMES
+from ccdaf.app.ccdaf import CCDAF
+from ccdaf.core.seed_profiles import SEED_LA_PROFILE
 from ccdaf.gui.clipping_widget import ClippingWidget
 from ccdaf.core.mesh_loader import BODY_LABEL, UNASSIGNED
 
@@ -70,7 +71,7 @@ class _Host:
 
         self.loader = MagicMock(mesh=mesh, path=None)
         self.clipping_widget = ClippingWidget(
-            region_names=list(PV_NAMES) + ["MV"])
+            region_names=list(SEED_LA_PROFILE.clip_regions))
         self.clipping_widget.clipping_toggled.connect(self._on_clipping_toggled)
         self.manual_widget = MagicMock()
         self.editor = MagicMock(pending_count=0, snake_active=False)

@@ -38,7 +38,7 @@ recorded here because they look like omissions and are not:
 from __future__ import annotations
 
 import pickle
-from typing import Optional
+from typing import Mapping, Optional
 
 import numpy as np
 import pyvista as pv
@@ -112,6 +112,12 @@ def electrodes_at(electrodes: Optional[dict],
     return out
 
 
+#: Payload keys ``export_binary`` writes itself. A point set may not
+#: claim one of them: the collision would silently replace the surface
+#: or the electrodes with a name → xyz mapping.
+_RESERVED_KEYS = frozenset(("surface", "electrodes", "elemTag"))
+
+
 def _plain_seeds(seeds) -> dict:
     """Seeds as ``{name: [x, y, z]}`` of plain finite floats."""
     out = {}
@@ -126,28 +132,34 @@ def _plain_seeds(seeds) -> dict:
 def export_binary(path: str, mesh: pv.PolyData,
                   electrodes: Optional[dict] = None,
                   electrode_points: Optional[np.ndarray] = None,
-                  seeds: Optional[dict] = None,
-                  landmarks: Optional[dict] = None,
+                  point_sets: Optional[Mapping[str, dict]] = None,
                   include_elem_tag: bool = False) -> None:
     """Pickle ``{'surface': <reader dict>, 'electrodes': <record>}``.
 
-    ``seeds``, ``landmarks`` and ``include_elem_tag`` extend the payload
-    for the File → Save bundle: a ``"seeds"`` key (name → xyz), a
-    ``"landmarks_LA_UAC"`` key (the LA-UAC landmark set, same name → xyz
-    shape) and an ``"elemTag"`` key (the cell tags, which the Carto
-    surface dict cannot carry) appear only when supplied, so the EAM
-    export's own output is unchanged. The reference downstream reads
+    ``point_sets`` and ``include_elem_tag`` extend the payload for the
+    File → Save bundle. ``point_sets`` maps a seed profile's ``export_key``
+    to its ``{name: xyz}`` mapping — ``"seed_LA"``, ``"landmarks_LA_UAC"``,
+    and whatever anatomy is added next — and only non-empty sets are
+    written, so a bundle never claims a set the session does not hold. An
+    ``"elemTag"`` key (the cell tags, which the Carto surface dict cannot
+    carry) appears only when asked for, so the EAM export's own output is
+    unchanged. The reference downstream reads
     ``['surface']``/``['electrodes']`` and ignores the rest, so the extra
     keys stay compatible.
+
+    A key colliding with the payload's own (``surface``, ``electrodes``,
+    ``elemTag``) is rejected rather than allowed to overwrite it.
     """
     payload = {
         "surface": polydata_to_carto_dict(mesh),
         "electrodes": electrodes_at(electrodes, electrode_points),
     }
-    if seeds:
-        payload["seeds"] = _plain_seeds(seeds)
-    if landmarks:
-        payload["landmarks_LA_UAC"] = _plain_seeds(landmarks)
+    for key, points in (point_sets or {}).items():
+        if not points:
+            continue
+        if key in _RESERVED_KEYS:
+            raise ValueError(f"point-set key '{key}' is reserved")
+        payload[str(key)] = _plain_seeds(points)
     if include_elem_tag and "elemTag" in mesh.cell_data:
         payload["elemTag"] = np.asarray(mesh.cell_data["elemTag"]).astype(int)
     with open(path, "wb") as fh:

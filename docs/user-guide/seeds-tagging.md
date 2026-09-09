@@ -3,18 +3,49 @@
 ## Seed selection
 
 The **Seed type** dropdown at the top of the panel chooses which set of
-surface points you are placing:
+surface points you are placing — and, with it, what the rest of the workflow
+offers:
 
-- **seed** (default) — the six anatomical landmarks below that drive region
-  tagging. Exported under the `seeds` key.
+- **seed_LA** (default) — the six anatomical landmarks below that drive region
+  tagging. Exported under the `seed_LA` key.
 - **landmarks_LA_UAC** — four left-atrium landmarks for a universal-atrial-
   coordinate step: `LSPV_BODY_JCN`, `RSPV_BODY_JCN`, `SEPTAL_WALL`,
   `LATERAL_WALL`. Picked, saved and exported exactly like seeds, but under the
   `landmarks_LA_UAC` key, and **not** used for tagging.
+- **seed_RA** — the right atrium. No points are defined yet: choosing it says
+  what the mesh is and switches the left-atrial tools off.
 
-The two sets are independent: you can complete both in one session — switching
-the dropdown keeps each set's picks — and a saved bundle can carry both keys at
-once. The rest of this section describes the default **seed** set.
+The sets are independent: you can complete several in one session — switching
+the dropdown keeps each set's picks — and a saved bundle carries every
+completed set at once. The rest of this section describes the default
+**seed_LA** set.
+
+!!! note "Renamed from `seed`"
+
+    The six-seed set was called **seed** and written under the `seeds` key.
+    New files use `seed_LA`. Files carrying the old key still load, and the
+    status bar says so; the next save writes the new spelling.
+
+### One dropdown drives four panels
+
+**Seed type** is the workflow's one anatomy switch. Tagging, Manual correction
+and Clipping have no dropdown of their own: each follows this one and offers
+only what that seed type defines, so the left atrium's veins never appear on a
+mesh that has none. Each of the three names the type it is following, and says
+so when there is nothing to offer.
+
+| Seed type | Pick points | Tagging | Manual correction | Clipping |
+|---|---|---|---|---|
+| `seed_LA` | 6 seeds | LSPV, LIPV, RSPV, RIPV, LAA radii | body, LSPV, LIPV, RSPV, RIPV, LAA | LSPV, LIPV, RSPV, RIPV, MV |
+| `landmarks_LA_UAC` | 4 landmarks | — | — | — |
+| `seed_RA` | — | — | — | — |
+
+Switch back to `seed_LA` to correct or clip: those tools act on the tagging
+that seed set produced. Values you tuned — a radius factor, the active label,
+the clip region — are remembered across the switch.
+
+**Run automatic tagging** acts on the chosen seed type and no other, so
+changing the dropdown never re-runs another set's tagging behind your back.
 
 Tagging needs six anatomical landmarks, placed **in order**:
 
