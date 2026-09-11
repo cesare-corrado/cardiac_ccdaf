@@ -78,8 +78,9 @@ run, but that their result would have nowhere to go.
 |---|---|---|
 | `core.volume_mesh` | both | the vocabulary: what a volume is, its boundary, orientation |
 | `core.mesh_postprocessor` | surface | stages that rebuild a surface |
-| `core.volume_postprocessor` | volume | one MMG3D pass; drives it through temp files |
+| `core.volume_postprocessor` | volume | one MMG3D pass, in memory; labels ride as element references |
 | `core.field_transfer` | both | `transfer_fields` for surfaces, `transfer_volume_fields` for volumes |
+| `core.volume_from_segmentation` | volume | cuts the working volume down to a corrected segmentation; refuses when the edit grew it |
 
 `core.volume_postprocessor` is the one place that imports `mmgpy`, and it is
 imported inside the call rather than at module scope, so the dependency is

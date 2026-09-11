@@ -107,6 +107,7 @@ from ccdaf.core.segmentation import (
 from ccdaf.core.seed_io import load_point_set, save_seeds
 from ccdaf.core.volume_mesh import VOLUME
 from ccdaf.core.volume_postprocessor import remesh as remesh_volume
+from ccdaf.core.volume_from_segmentation import carve, growth_outside
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
@@ -174,6 +175,24 @@ EAM_ABOVE_COLOR = "magenta"
 # EAM electrodes, drawn as Gaussian points.
 EAM_ELECTRODE_COLOR = (100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0)
 EAM_ELECTRODE_RADIUS_FRAC = 0.008     # of the mesh's bounding-box diagonal
+
+
+#: Below this share of what it started with, a morphological operation is
+#: confirmed before it is applied — per operation, because they promise
+#: different things.
+#:
+#: **Erode** is a request to shrink, so removing a lot is the point and
+#: only near-total loss is a surprise. **Opening** is a request to
+#: *smooth* — take off small protrusions — and one that deletes most of
+#: the object is not smoothing, whatever the arithmetic says. On a
+#: myocardial wall at 1 mm an opening at radius 2 leaves 13.5%: correct,
+#: and never what anyone meant by "smooth this".
+#:
+#: Dilation and closing can only grow a region, so neither can trip this.
+SEG_SHRINK_WARN_FRACTION: Dict[str, float] = {
+    "erode": 0.10,
+    "morph_open": 0.50,
+}
 
 
 # The three slice orientations of a segmentation volume. Where each one is
@@ -252,6 +271,12 @@ class CCDAF(QtWidgets.QMainWindow):
         # spacing used — what converting it back needs to carry the fields
         # and electrodes over. None ⇔ the segmentation came off disk.
         self._seg_source: Optional[dict] = None
+        #: Growth the user chose to discard on the last conversion, so the
+        #: closing message can say how much rather than staying silent
+        #: about a loss they agreed to.
+        self._growth_dropped = None
+        #: Whether the thin-wall warning has been shown this session.
+        self._perforation_warned = False
         self._transfer_note: Optional[str] = None
         self._seg_idx: Dict[str, int] = {"axial": 0, "sagittal": 0, "coronal": 0}
         self._slice_actors: Dict[str, object] = {}
@@ -3180,13 +3205,34 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Loaded segmentation {Path(fn).name}{self._seg_orientation_note()}")
 
-    def _action_seg_save(self) -> None:
-        if self._seg_array is None:
-            return
+    #: Suffixes the segmentation writer can infer a format from, and the
+    #: one appended when the user types a name without any. SimpleITK
+    #: chooses its writer from the extension alone, so a bare name fails
+    #: deep inside ITK with "Unable to determine ImageIO writer" — a
+    #: message about a library the user never invoked.
+    SEG_SUFFIXES: Tuple[str, ...] = (".nii", ".nii.gz", ".nrrd", ".mha",
+                                     ".mhd", ".nhdr", ".img", ".hdr")
+    SEG_DEFAULT_SUFFIX: str = ".nii.gz"
+
+    @classmethod
+    def _with_segmentation_suffix(cls, filename: str) -> str:
+        """*filename* with a writable suffix, appending one if it has none."""
+        if filename.lower().endswith(cls.SEG_SUFFIXES):
+            return filename
+        return filename + cls.SEG_DEFAULT_SUFFIX
+
+    def _ask_segmentation_path(self) -> str:
+        """The save dialog, with a suffix guaranteed. ``""`` if cancelled."""
         fn, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save segmentation", str(self.recent_folder),
             "NIfTI (*.nii *.nii.gz);;All files (*)",
         )
+        return self._with_segmentation_suffix(fn) if fn else ""
+
+    def _action_seg_save(self) -> None:
+        if self._seg_array is None:
+            return
+        fn = self._ask_segmentation_path()
         if not fn:
             return
         self.recent_folder = Path(fn).resolve().parent
@@ -3243,6 +3289,13 @@ class CCDAF(QtWidgets.QMainWindow):
             "mesh": self.loader.mesh.copy(deep=True),
             "flip": bool(flip),
             "spacing": tuple(float(s) for s in spacing),
+            # The volume, when there was one, so converting back can
+            # return tetrahedra rather than demoting the mesh to its
+            # boundary; and the segmentation as it was at this moment, so
+            # the edits made to it can be measured against it.
+            "grid": (self.loader.grid.copy(deep=True)
+                     if self.loader.kind == VOLUME else None),
+            "image": img,
         }
         self.statusBar().showMessage(
             f"Voxelisation complete — {img.GetSize()} @ spacing {spacing} (flip={flip})."
@@ -3260,6 +3313,13 @@ class CCDAF(QtWidgets.QMainWindow):
         if not self._offer_save_segmentation(
                 "Save the segmentation as a NIfTI file before converting?"):
             return
+
+        # A segmentation made from a volume can go back to one, which is
+        # the whole reason the tetrahedra were kept. It is tried first and
+        # falls back to the surface when it cannot be done honestly.
+        if self._volume_conversion_available():
+            if self._convert_segmentation_to_volume(flip):
+                return
 
         # Convert segmentation to VTK polydata via marching cubes.
         self.statusBar().showMessage("Running marching cubes…")
@@ -3322,6 +3382,161 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             " ".join(["Segmentation converted and visualised."] + notes),
             20000 if notes else 0)
+
+    def _volume_conversion_available(self) -> bool:
+        """Whether this segmentation was made from a volume in this session.
+
+        One loaded from a NIfTI has no mesh behind it to cut, and one made
+        from a surface has no tetrahedra to keep.
+        """
+        src = self._seg_source
+        return bool(src and src.get("grid") is not None
+                    and src.get("image") is not None)
+
+    def _warn_perforation_risk(self) -> bool:
+        """Warn that a round trip can perforate a thin wall. False = abort.
+
+        Unconditional, and once per session. Not a judgement call dressed
+        up as one: two attempts at predicting *which* segmentations
+        perforate both failed — the minimum of the distance field is one
+        voxel for any shape, and the share eroded by one voxel tracks
+        surface-to-volume rather than thinness, scoring a solid sphere the
+        same as this ventricle. Whether a given mesh perforates is only
+        answerable after the fact, by comparing the genus.
+
+        So the warning states the risk rather than predicting it, and says
+        it once. Repeating it on every conversion would train the user to
+        dismiss it, which is worse than not saying it at all.
+        """
+        if self._perforation_warned:
+            return True
+        answer = QtWidgets.QMessageBox.question(
+            self, "A round trip through an image can perforate a thin wall",
+            "Voxelising drops tissue thinner than a voxel, which opens "
+            "holes through a thin wall. Finer voxels do not reliably "
+            "help: on a biventricular mesh whose source had no "
+            "perforations, the reconstruction came back with 28 handles "
+            "at 1 mm spacing, 12 at 0.5 mm and 15 at 0.25 mm.\n\n"
+            "To smooth or repair a mesh you already have, Mesh "
+            "post-processing → Remesh volume with 'Adapt the boundary "
+            "too' does it without going through an image and cannot "
+            "perforate anything.\n\n"
+            "This is said once per session. Continue?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes)
+        if answer != QtWidgets.QMessageBox.Yes:
+            return False
+        self._perforation_warned = True
+        return True
+
+    def _convert_segmentation_to_volume(self, flip: bool) -> bool:
+        """Rebuild the working volume from the corrected segmentation.
+
+        Returns True when it did, False to fall back to the surface path.
+
+        The fallback is not a failure mode to hide. The mesh being cut can
+        only lose elements, never gain them, so a correction that grew the
+        anatomy past the original boundary has nowhere to put the new
+        material and would be quietly clipped — the user asks for a
+        dilation and gets their original shape back with nothing to say
+        why. It is measured before anything is meshed, and said out loud.
+        """
+        src = self._seg_source
+        self._sync_sitk_from_array()
+        try:
+            growth = growth_outside(self._seg_sitk, src["image"])
+        except Exception:
+            return False               # different grids: not comparable
+
+        if growth.exceeds_tolerance:
+            # Three real answers, so three buttons rather than a yes/no
+            # that hides one of them. Keeping the volume and dropping the
+            # new material is a legitimate choice — a closing that bridges
+            # a cavity by a voxel is often not worth losing the mesh over —
+            # but it is only legitimate when the size of what is dropped is
+            # on screen, which is why it is never the default.
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("The correction grew the anatomy")
+            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setText(
+                f"{growth.volume:,.0f} mm³ of the corrected segmentation "
+                f"({100 * growth.fraction:.1f}%) lies outside the current "
+                f"mesh.")
+            box.setInformativeText(
+                "A volume can only be cut from the mesh you have: elements "
+                "can be dropped, never created. So material outside it "
+                "cannot be added.\n\n"
+                "• Convert to a surface — keeps the whole corrected shape, "
+                "with the labels and fibres carried onto the triangles. "
+                "Loses the tetrahedra.\n"
+                "• Carve anyway — keeps the tetrahedra, labels and fibres, "
+                "and drops everything outside the mesh. An edit that only "
+                "*adds* has nothing to cut, so this returns your current "
+                "mesh essentially unchanged.")
+            to_surface = box.addButton("Convert to a surface",
+                                       QtWidgets.QMessageBox.AcceptRole)
+            carve_anyway = box.addButton("Carve anyway",
+                                         QtWidgets.QMessageBox.DestructiveRole)
+            box.addButton(QtWidgets.QMessageBox.Cancel)
+            box.setDefaultButton(to_surface)
+            box.exec_()
+
+            clicked = box.clickedButton()
+            if clicked is to_surface:
+                return False           # fall through to the surface path
+            if clicked is not carve_anyway:
+                return True            # cancelled: nothing happens
+
+        # Whatever lies outside is dropped, whether the user was asked
+        # about it or not. Below the tolerance it is not worth stopping
+        # for, but it is always worth saying: silence is what would make
+        # it a surprise later.
+        self._growth_dropped = growth if growth.added else None
+
+        if flip != bool(src["flip"]):
+            # The mesh and the segmentation would be mirror images, and
+            # every element test would be made against the wrong side.
+            return False
+
+        # Voxelising a thin wall is lossy, and no spacing fixes it: on a
+        # mesh whose source had no perforations the round trip produced
+        # 28 handles at 1 mm, 12 at 0.5 mm and 15 at 0.25 mm, because the
+        # wall tapers to one voxel at every resolution. Said before the
+        # work rather than left to be discovered in the result.
+        if not self._warn_perforation_risk():
+            return True
+
+        self.statusBar().showMessage("Rebuilding the volume…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            grid = carve(
+                src["grid"], self._seg_sitk,
+                # The same smoothing the preview and the surface route
+                # use, so Update 3D predicts what comes out.
+                filt_stdev=list(self.seg_widget.gfilt_standard_deviation()),
+                filt_rfact=list(self.seg_widget.gfilt_radius_factor()),
+                on_status=self.statusBar().showMessage)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "Rebuilding the volume failed",
+                f"{exc}\n\nThe segmentation is unchanged.")
+            return True
+
+        before = src["grid"].n_cells
+        self._close_segmentation()
+        self._replace_volume(grid)
+        self.act_save.setEnabled(True)
+        self.plotter.reset_camera()
+        self.plotter.render()
+        self._sync_close_action()
+        dropped = getattr(self, "_growth_dropped", None)
+        self._growth_dropped = None
+        note = ("" if dropped is None else
+                f" {dropped.volume:,.0f} mm³ outside the mesh was dropped.")
+        self.statusBar().showMessage(
+            f"Volume rebuilt from the segmentation — "
+            f"{before} → {grid.n_cells} tetrahedra.{note}", 20000)
+        return True
 
     @staticmethod
     def _stray_shell_note(shells: StrayShells) -> str:
@@ -3521,10 +3736,7 @@ class CCDAF(QtWidgets.QMainWindow):
             return False
         if reply != QtWidgets.QMessageBox.Yes:
             return True
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save segmentation", str(self.recent_folder),
-            "NIfTI (*.nii *.nii.gz);;All files (*)",
-        )
+        fn = self._ask_segmentation_path()
         if not fn:
             return False
         self.recent_folder = Path(fn).resolve().parent
@@ -4213,6 +4425,43 @@ class CCDAF(QtWidgets.QMainWindow):
                 out = sitk.BinaryErode(sitk.BinaryDilate(mask, radius,kernelType=sitk.sitkBox), radius,kernelType=sitk.sitkBox)
             else:
                 raise Exception(f"{op} not known")
+
+            # Erosion — and the erode half of an opening — takes `radius`
+            # voxels off every side, so a structure thinner than twice the
+            # radius vanishes. That is arithmetic, not a fault, but losing
+            # a segmentation to it without being asked is not something to
+            # discover through the undo button.
+            before = int(np.count_nonzero(sitk.GetArrayFromImage(mask)))
+            after = int(np.count_nonzero(sitk.GetArrayFromImage(out)))
+            limit = SEG_SHRINK_WARN_FRACTION.get(op)
+            if limit is not None and before and after < limit * before:
+                left = ("nothing at all" if after == 0
+                        else f"{after:,} of {before:,} voxels "
+                             f"({100.0 * after / before:.1f}%)")
+                why = ("An opening erodes and then dilates, and anything "
+                       "thinner than twice the radius is gone before the "
+                       "dilation runs — so on a thin wall it removes the "
+                       "wall rather than smoothing it."
+                       if op == "morph_open" else
+                       "Erosion removes the radius from every side, so "
+                       "anything thinner than twice it disappears.")
+                answer = QtWidgets.QMessageBox.question(
+                    self, "This removes most of the segmentation",
+                    f"A {op.replace('morph_', '')} at radius "
+                    f"x={radius[0]}, y={radius[1]}, z={radius[2]} leaves "
+                    f"{left}.\n\n{why} A myocardial wall is often only "
+                    f"two or three voxels thick at 1 mm spacing.\n\n"
+                    f"Apply it anyway?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+                    QtWidgets.QMessageBox.Cancel)
+                if answer != QtWidgets.QMessageBox.Yes:
+                    self._seg_undo_stack.pop()
+                    self.seg_widget.set_undo_enabled(
+                        bool(self._seg_undo_stack))
+                    self.statusBar().showMessage(
+                        f"{op} cancelled — the segmentation is unchanged.")
+                    return
+
             self._seg_sitk = sitk.Cast(out, self._seg_sitk.GetPixelID())
 
         except Exception as exc:

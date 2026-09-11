@@ -12,51 +12,57 @@ meshing from scratch, so an element in the result is a subdivision or a
 merge of elements that were there before. That is what makes carrying a
 fibre field across defensible at all.
 
-Two things about MMG that shape everything here.
+Indices
+-------
+``mmgpy`` takes and returns **0-based** connectivity and converts to
+MMG's own 1-based storage itself. Passing 1-based indices does not raise
+where the mistake is made: MMG accepts the array and then reports
+``tetrahedron N has volume null`` from deep inside its analysis phase,
+which reads as a complaint about the mesh rather than about the caller.
+That cost a feature once — this module was first built around temporary
+files to avoid an in-memory API that had never actually failed — so the
+convention is stated here and asserted in :func:`_from_mmg` rather than
+trusted.
 
-**It is driven through files.** ``mmgpy`` also exposes an in-memory API,
-and on the meshes this was built against that API fails inside MMG's
-analysis phase for every combination of inputs tried — with and without
-boundary triangles, one material and several — while the file path works
-first time. So the mesh goes out to a temporary directory and comes back.
-Nothing is written beside the user's data.
+Labels ride as references
+-------------------------
+MMG carries an integer *reference* per element through the adaptation, so
+``elemTag`` goes across as one and comes back exact. That is better than
+re-deriving it afterwards by proximity, which is what the other fields
+have to settle for. References are positive integers and a labelling is
+not required to be, so tags are encoded to a dense ``1..n`` range on the
+way in and decoded on the way out; a labelling that starts at 0, or skips
+values, survives unchanged.
 
-**It returns geometry and nothing else.** No ``elemTag``, no fibres, no
-point fields: measured, not assumed. Every call here therefore ends in
+Everything else is ours to carry: MMG returns geometry and references,
+not fibres and not point fields. Every call here therefore ends in
 :func:`field_transfer.transfer_volume_fields`, and a caller cannot forget
-to do it because it is not a separate step.
+it because it is not a separate step.
 
 Boundary
 --------
 ``freeze_boundary`` (MMG's ``nosurf``) is the default and is exact: on a
 66,819-vertex ventricle every one of the 38,823 boundary vertices came
-back at distance 0.0 and the surface area was unchanged to two decimal
-places. Letting the surface adapt is a genuinely different operation —
-the same mesh moved by up to 1.5 mm, half a millimetre on average, and
-lost a third of its boundary vertices — so it is opt-in, and the caller
-is expected to say so.
+back at machine zero and the surface area was unchanged. Letting the
+surface adapt is a genuinely different operation — the same mesh moved by
+up to 1.5 mm, half a millimetre on average, and lost a third of its
+boundary vertices — so it is opt-in, and the caller is expected to say so.
 """
 from __future__ import annotations
 
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 import pyvista as pv
 
 from ccdaf.core.field_transfer import transfer_volume_fields
-from ccdaf.core.mesh_loader import INTERNAL_ARRAYS
 from ccdaf.core.volume_mesh import (
-    TETRA, orient_positive, tetrahedra, validate_tetrahedral,
+    TETRA, boundary_surface, orient_positive, tetrahedra, validate_tetrahedral,
 )
 
-#: Prefix of the temporary directory each call works in. Named so that
-#: anything left behind by a hard crash inside the C library — which no
-#: context manager can clean up — is identifiable as ours rather than
-#: mysterious.
-WORKDIR_PREFIX = "ccdaf-mmg-"
+#: The cell array carried across as MMG element references.
+TAG_FIELD = "elemTag"
 
 
 @dataclass
@@ -118,55 +124,102 @@ class RemeshOptions:
         return options
 
 
-def _geometry_only(grid) -> pv.UnstructuredGrid:
-    """The tetrahedra and their points, positively oriented, no arrays.
+# ---------------------------------------------------------------------
+# References
+# ---------------------------------------------------------------------
+def encode_tags(tags: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Tags as dense ``1..n`` references, plus the values to decode with.
 
-    Two reasons to strip the arrays rather than let them ride. MMG
-    discards them anyway, so writing them is time and disk spent on
-    nothing — about a third of the file on a mesh carrying fibres. And a
-    field that made a partial round trip would be worse than one that
-    made none: it would look transferred.
+    MMG's references are positive integers; a labelling need not be. A
+    mesh tagged 0 and 7 is perfectly ordinary and would lose its 0
+    outright, so the values are encoded rather than passed through.
+    """
+    values = np.unique(np.asarray(tags))
+    codes = (np.searchsorted(values, tags) + 1).astype(np.int32)
+    return codes, values
+
+
+def decode_tags(refs: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Invert :func:`encode_tags`, keeping the original values and dtype.
+
+    A reference outside the encoded range would mean MMG invented one,
+    which would silently mislabel elements of a mesh someone is about to
+    simulate. Raised rather than clamped.
+    """
+    refs = np.asarray(refs, dtype=np.int64)
+    if refs.size and (refs.min() < 1 or refs.max() > len(values)):
+        raise RuntimeError(
+            f"MMG returned element references outside the range it was "
+            f"given (1..{len(values)}); the labelling cannot be restored.")
+    return values[refs - 1]
+
+
+# ---------------------------------------------------------------------
+# To and from MMG
+# ---------------------------------------------------------------------
+def _to_mmg(grid):
+    """Build an ``MmgMesh3D`` from *grid*; return it and the tag values.
+
+    The boundary triangles are supplied explicitly. MMG needs them to
+    know which faces are the surface, which is what ``nosurf`` freezes;
+    without them a frozen boundary has nothing to freeze.
 
     Orientation is normalised here rather than at load, so what is read
     from disk is what is written back. MMG refuses a tetrahedron whose
     signed volume is not positive.
     """
+    import mmgpy
+
     validate_tetrahedral(grid)
     points = np.asarray(grid.points, dtype=float)
     tets, _flipped = orient_positive(points, tetrahedra(grid))
-    return pv.UnstructuredGrid({TETRA: tets}, points)
+
+    surface = boundary_surface(grid)
+    origin_ids = np.asarray(surface.point_data["vtkOriginalPointIds"],
+                            dtype=np.int64)
+    faces = np.asarray(surface.faces).reshape(-1, 4)[:, 1:]
+    triangles = origin_ids[faces].astype(np.int32)
+
+    if TAG_FIELD in grid.cell_data:
+        refs, values = encode_tags(np.asarray(grid.cell_data[TAG_FIELD]))
+    else:
+        refs = np.ones(len(tets), dtype=np.int32)
+        values = None
+
+    mesh = mmgpy.MmgMesh3D()
+    mesh.set_mesh_size(len(points), len(tets), 0, len(triangles), 0, 0)
+    mesh.set_vertices(points, np.zeros(len(points), dtype=np.int32))
+    mesh.set_tetrahedra(tets.astype(np.int32), refs)
+    mesh.set_triangles(triangles, np.ones(len(triangles), dtype=np.int32))
+    return mesh, values
 
 
-def _read_tetrahedra(path: Path) -> pv.UnstructuredGrid:
-    """The tetrahedral part of what MMG wrote.
+def _from_mmg(mesh, values: Optional[np.ndarray]) -> pv.UnstructuredGrid:
+    """Read an ``MmgMesh3D`` back as a grid, restoring the tags."""
+    points = np.asarray(mesh.get_vertices_with_refs()[0], dtype=float)
+    tets, refs = mesh.get_tetrahedra_with_refs()
+    tets = np.asarray(tets, dtype=np.int64)
 
-    MMG emits the boundary triangles alongside the tetrahedra in one
-    dataset, so the result has mixed cell types and has to be narrowed
-    before it is a volume again. Its own ``refs`` array goes with them:
-    it is MMG's bookkeeping, not a field of this mesh.
-    """
-    out = pv.read(path)
-    types = np.asarray(out.celltypes, dtype=int)
-    if (types != TETRA).any():
-        out = out.extract_cells(np.where(types == TETRA)[0])
-    for attr in (out.point_data, out.cell_data):
-        for name in list(attr.keys()):
-            if name in INTERNAL_ARRAYS or name == "refs":
-                attr.remove(name)
+    # The 0-based convention, asserted rather than trusted: a silent
+    # off-by-one here produces a mesh that looks plausible and encloses
+    # the wrong volume. See the module docstring.
+    if tets.size and (tets.min() < 0 or tets.max() >= len(points)):
+        raise RuntimeError(
+            "MMG returned connectivity outside the vertex range — the "
+            "0-based index convention no longer holds.")
+
+    out = pv.UnstructuredGrid({TETRA: tets}, points)
+    if values is not None:
+        out.cell_data[TAG_FIELD] = decode_tags(np.asarray(refs), values)
     return out
 
 
 def remesh(grid,
            options: Optional[RemeshOptions] = None,
-           workdir: Optional[str] = None,
            on_status: Optional[Callable[[str], None]] = None):
     """Adapt ``grid`` with MMG3D and return the result, fields and all.
 
-    ``grid`` is not modified. ``workdir`` overrides the temporary
-    directory, which exists so a test can look at exactly what went in
-    and came out; leave it ``None`` in the application, where the
-    directory and everything in it is removed on the way out of this
-    function — including when it raises.
+    ``grid`` is not modified.
 
     Raises ``RuntimeError`` if MMG cannot remesh the mesh, and
     ``ValueError`` for options it would reject.
@@ -175,45 +228,36 @@ def remesh(grid,
     options.validate()
 
     source = pv.wrap(grid)
-    geometry = _geometry_only(source)
     if on_status is not None:
-        on_status(f"Remeshing {geometry.n_cells} tetrahedra…")
+        on_status(f"Remeshing {source.n_cells} tetrahedra…")
 
-    if workdir is not None:
-        return _remesh_in(Path(workdir), geometry, source, options, on_status)
-    with tempfile.TemporaryDirectory(prefix=WORKDIR_PREFIX) as tmp:
-        return _remesh_in(Path(tmp), geometry, source, options, on_status)
-
-
-def _remesh_in(workdir: Path, geometry, source, options: RemeshOptions,
-               on_status: Optional[Callable[[str], None]]):
-    """One MMG round trip inside an existing directory."""
-    in_path = workdir / "in.vtk"
-    out_path = workdir / "out.vtk"
-    geometry.save(in_path, binary=True)
-
+    mesh, values = _to_mmg(source)
     try:
-        ok = mmg_remesh(in_path, out_path, options.as_mmg_options())
-    except Exception as exc:                       # MMG failed internally
-        raise RuntimeError(f"MMG3D could not remesh this volume: {exc}") from exc
-    if not ok or not out_path.exists():
-        raise RuntimeError("MMG3D could not remesh this volume.")
+        report = mesh.remesh(**options.as_mmg_options())
+    except Exception as exc:
+        raise RuntimeError(
+            f"MMG3D could not remesh this volume: {exc}") from exc
 
-    result = _read_tetrahedra(out_path)
+    result = _from_mmg(mesh, values)
     if result.n_cells == 0:
         raise RuntimeError("MMG3D returned a mesh with no tetrahedra.")
 
-    transfer_volume_fields(source, result, on_status=on_status)
+    # elemTag came back exactly, as references. Everything else has to be
+    # carried, and re-deriving the labels by proximity would only make
+    # them worse.
+    transfer_volume_fields(source, result, exclude={TAG_FIELD},
+                           on_status=on_status)
+
     if on_status is not None:
-        on_status(f"Remeshed {source.n_cells} → {result.n_cells} tetrahedra.")
+        quality = ""
+        if isinstance(report, dict) and "quality_mean_after" in report:
+            quality = (f", mean quality "
+                       f"{report['quality_mean_before']:.3f} → "
+                       f"{report['quality_mean_after']:.3f}")
+        on_status(f"Remeshed {source.n_cells} → {result.n_cells} "
+                  f"tetrahedra{quality}.")
     return result
 
 
-def mmg_remesh(in_path: Path, out_path: Path, options: dict) -> bool:
-    """Call MMG3D on two files. Separated so a test can stand in for it."""
-    import mmgpy
-    return bool(mmgpy.mmg3d.remesh(str(in_path), str(out_path),
-                                   options=options))
-
-
-__all__ = ["RemeshOptions", "remesh", "mmg_remesh", "WORKDIR_PREFIX"]
+__all__ = ["RemeshOptions", "remesh", "encode_tags", "decode_tags",
+           "TAG_FIELD"]

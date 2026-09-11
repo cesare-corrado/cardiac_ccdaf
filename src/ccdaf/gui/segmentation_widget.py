@@ -90,8 +90,14 @@ class SegmentationWidget(QtWidgets.QGroupBox):
             sp.setValue(1)
             sp.setPrefix(f"{lbl}=")
             sp.setToolTip(
-                f"Structuring-element radius along {lbl} (in voxels). "
-                f"Set per-axis to handle anisotropic spacing."
+                f"Structuring-element <b>radius</b> along {lbl}, in voxels — "
+                f"not the number of voxels across. The element spans "
+                f"<b>2r+1</b> voxels on each axis independently:<br>"
+                f"&nbsp;&nbsp;(0,0,0) → 1×1×1, a single voxel: does "
+                f"nothing<br>"
+                f"&nbsp;&nbsp;(1,0,0) → 3×1×1: acts along x only<br>"
+                f"&nbsp;&nbsp;(1,1,1) → 3×3×3<br>"
+                f"&nbsp;&nbsp;(2,1,1) → 5×3×3<br>"
             )
             row.addWidget(sp, 1)
         layout.addLayout(row)

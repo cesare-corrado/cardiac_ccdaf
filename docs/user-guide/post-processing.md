@@ -233,14 +233,15 @@ default.
 
 ### What happens to the fields
 
-MMG returns geometry and nothing else — no labels, no fibres, no point
-fields — so CCDAF carries them across itself, by three different rules
-because they are three different kinds of quantity:
+MMG carries an integer reference per element through the adaptation, so the
+labels ride across exactly. Everything else it returns is bare geometry, so
+CCDAF carries those itself, by rules that differ because they are different
+kinds of quantity:
 
 | Field | Rule |
 |---|---|
 | point fields (`scar_probability`, …) | interpolated within the source tetrahedron the new vertex falls in |
-| labels (`elemTag`) | copied from the source element containing the new element's centre. Never averaged: averaging a 1 and a 2 invents a 1.5 |
+| labels (`elemTag`) | carried by MMG itself as an element *reference*, so they come back exact rather than re-derived by proximity |
 | directions (`fiber`) | averaged over the source elements the new element covers, as an **axis** |
 
 That last rule matters more than it looks. A fibre direction is *axial*: `f`
@@ -254,7 +255,8 @@ whichever way each contributor was written down.
 ### A note on speed
 
 MMG is fast when it is told a size and slow when it is not. On the 290,474-tet
-ventricle, a frozen-boundary remesh at a 2 mm target takes about 20 seconds.
+ventricle, a frozen-boundary remesh at a 2 mm target takes about 10 seconds —
+7 in MMG and the rest carrying the fields.
 Asking MMG to optimise quality with no size at all is the pathological case —
 it invents a size map and multiplied the same mesh 23-fold over 8 minutes — so
 the panel always sends a size and never exposes that mode.

@@ -237,6 +237,10 @@ class _SegHost(QtWidgets.QWidget):
 
     _offer_save_segmentation = CCDAF._offer_save_segmentation
     _action_seg_close = CCDAF._action_seg_close
+    # The real dialog wrapper, so the suffix it guarantees is exercised
+    # here rather than stubbed past.
+    _ask_segmentation_path = CCDAF._ask_segmentation_path
+    _with_segmentation_suffix = CCDAF._with_segmentation_suffix
 
     def __init__(self, seg=object(), dirty=True):
         super().__init__()
@@ -271,6 +275,21 @@ def test_yes_writes_the_file_the_dialog_returns(qapp, monkeypatch):
     _file_dialog(monkeypatch, "/tmp/seg.nii")
     assert host._offer_save_segmentation("?") is True
     assert host.written == ["/tmp/seg.nii"]
+
+
+def test_a_name_without_a_suffix_is_still_written(qapp, monkeypatch):
+    """Typing "volumetric" must not fail inside ITK.
+
+    SimpleITK picks its writer from the extension, so a bare name raised
+    "Unable to determine ImageIO writer" — from a library the user never
+    invoked, about a mistake the dialog could fix itself.
+    """
+    host = _SegHost()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    _file_dialog(monkeypatch, "/tmp/volumetric")
+    assert host._offer_save_segmentation("?") is True
+    assert host.written == ["/tmp/volumetric.nii.gz"]
 
 
 def test_no_goes_on_without_writing(qapp, monkeypatch):

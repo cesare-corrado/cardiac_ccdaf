@@ -288,6 +288,68 @@ def average_axial(vectors: np.ndarray,
     return axis
 
 
+def average_axial_grouped(vectors: np.ndarray,
+                          owner: np.ndarray,
+                          member: np.ndarray,
+                          n_groups: int) -> np.ndarray:
+    """:func:`average_axial` for many groups at once.
+
+    ``owner[k]`` is the group that ``vectors[member[k]]`` belongs to. The
+    same answer as calling :func:`average_axial` per group, and the same
+    sign convention, but as a handful of array operations rather than a
+    Python loop: on a 279,000-element remesh the loop was 12 of the 14
+    seconds the whole field transfer took, and this is a fraction of a
+    second. That is the difference between a remesh dominated by MMG and
+    one dominated by us.
+
+    The structure tensor of each group is accumulated component by
+    component with ``bincount`` (nine of them, and it is symmetric so six
+    suffice), then ``eigh`` runs batched over the whole stack.
+    """
+    out = np.zeros((n_groups, 3), dtype=float)
+    v = np.asarray(vectors, dtype=float)[member]
+    norm = np.linalg.norm(v, axis=1)
+    good = norm > 0.0
+    if not good.any():
+        return out
+    unit = v[good] / norm[good, None]
+    grp = np.asarray(owner)[good]
+
+    tensors = np.zeros((n_groups, 3, 3), dtype=float)
+    for a in range(3):
+        for b in range(a, 3):
+            total = np.bincount(grp, weights=unit[:, a] * unit[:, b],
+                                minlength=n_groups)
+            tensors[:, a, b] = total
+            tensors[:, b, a] = total
+
+    # A group that caught nothing has a zero tensor, whose eigenvectors
+    # are arbitrary. Left as the zero vector rather than given a
+    # direction out of numerical noise.
+    populated = np.einsum("nii->n", tensors) > 0.0
+    if not populated.any():
+        return out
+
+    _values, vectors_out = np.linalg.eigh(tensors[populated])
+    axis = vectors_out[:, :, -1]                  # eigh sorts ascending
+    lead = np.argmax(np.abs(axis), axis=1)
+    sign = np.sign(axis[np.arange(len(axis)), lead])
+    sign[sign == 0.0] = 1.0
+    out[populated] = axis * sign[:, None]
+    return out
+
+
+def _flatten_neighbourhoods(neighbourhoods) -> "tuple":
+    """``(owner, member)`` index arrays for a list of member lists."""
+    counts = np.fromiter((len(n) for n in neighbourhoods), dtype=np.int64,
+                         count=len(neighbourhoods))
+    owner = np.repeat(np.arange(len(neighbourhoods), dtype=np.int64), counts)
+    member = (np.concatenate([np.asarray(n, dtype=np.int64)
+                              for n in neighbourhoods])
+              if counts.sum() else np.zeros(0, dtype=np.int64))
+    return owner, member
+
+
 def _cell_neighbourhoods(src_centres: np.ndarray,
                          dst_centres: np.ndarray,
                          radii: np.ndarray) -> "list":
@@ -300,10 +362,10 @@ def _cell_neighbourhoods(src_centres: np.ndarray,
     from next door beats no direction at all.
     """
     tree = cKDTree(src_centres)
-    found = tree.query_ball_point(dst_centres, radii)
+    found = tree.query_ball_point(dst_centres, radii, workers=-1)
     empty = [i for i, f in enumerate(found) if not f]
     if empty:
-        _, nearest = tree.query(dst_centres[empty], k=1)
+        _, nearest = tree.query(dst_centres[empty], k=1, workers=-1)
         for i, n in zip(empty, np.atleast_1d(nearest)):
             found[i] = [int(n)]
     return found
@@ -324,6 +386,7 @@ def _tet_centres_and_sizes(grid):
 
 def transfer_volume_fields(src, dst,
                            axial_fields: Optional[Iterable[str]] = None,
+                           exclude: Optional[Iterable[str]] = None,
                            on_status: Optional[Callable[[str], None]] = None
                            ) -> None:
     """Copy ``src``'s fields onto the tetrahedral mesh ``dst``, in place.
@@ -341,16 +404,22 @@ def transfer_volume_fields(src, dst,
       over the source cells the destination cell covers, by
       :func:`average_axial`, and renormalised.
 
+    ``exclude`` names fields the caller has already carried across by a
+    better route — the remesher brings ``elemTag`` through as an MMG
+    element reference, which is exact, and re-deriving it here by
+    proximity would only make it worse.
+
     ``src`` is not modified.
     """
     if dst.n_points == 0 or src.n_points == 0 or src.n_cells == 0:
         return
     axial = frozenset(AXIAL_CELL_FIELDS if axial_fields is None
                       else {str(a) for a in axial_fields})
+    skip = _INTERNAL_ARRAYS | frozenset(
+        () if exclude is None else {str(e) for e in exclude})
 
-    point_names = [n for n in src.point_data.keys()
-                   if n not in _INTERNAL_ARRAYS]
-    cell_names = [n for n in src.cell_data.keys() if n not in _INTERNAL_ARRAYS]
+    point_names = [n for n in src.point_data.keys() if n not in skip]
+    cell_names = [n for n in src.cell_data.keys() if n not in skip]
 
     # -- point fields: VTK's probe does the containing-cell interpolation.
     outside = 0
@@ -367,7 +436,7 @@ def transfer_volume_fields(src, dst,
         # path guards against with max_distance.
         if outside:
             _, near = cKDTree(np.asarray(src.points)).query(
-                np.asarray(dst.points)[~valid], k=1)
+                np.asarray(dst.points)[~valid], k=1, workers=-1)
         for name in point_names:
             arr = np.asarray(sampled.point_data[name])
             if outside:
@@ -379,19 +448,18 @@ def transfer_volume_fields(src, dst,
     if cell_names and dst.n_cells:
         src_centres, _ = _tet_centres_and_sizes(src)
         dst_centres, dst_radii = _tet_centres_and_sizes(dst)
-        _, containing = cKDTree(src_centres).query(dst_centres, k=1)
+        _, containing = cKDTree(src_centres).query(dst_centres, k=1,
+                                                   workers=-1)
 
-        neighbourhoods = None
+        groups = None
         for name in cell_names:
             arr = np.asarray(src.cell_data[name])
             if name in axial and arr.ndim == 2 and arr.shape[1] == 3:
-                if neighbourhoods is None:
-                    neighbourhoods = _cell_neighbourhoods(
-                        src_centres, dst_centres, dst_radii)
-                out = np.empty((dst.n_cells, 3), dtype=float)
-                for i, members in enumerate(neighbourhoods):
-                    out[i] = average_axial(arr[members])
-                dst.cell_data[name] = out
+                if groups is None:
+                    groups = _flatten_neighbourhoods(_cell_neighbourhoods(
+                        src_centres, dst_centres, dst_radii))
+                dst.cell_data[name] = average_axial_grouped(
+                    arr, groups[0], groups[1], dst.n_cells)
             else:
                 dst.cell_data[name] = arr[containing]   # dtype, labels intact
 

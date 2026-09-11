@@ -19,7 +19,9 @@ The contract:
   products does not. This is the case that makes the difference visible;
 * the result is a valid volume — tetrahedra only, none inverted;
 * options MMG would reject are refused before the call, with a message;
-* nothing is left behind in the working directory.
+* ``elemTag`` rides as an MMG element *reference* and comes back exact,
+  including a labelling that does not start at 1 — references are
+  positive integers and a labelling need not be.
 
 The MMG call itself is real: a stub would test the plumbing and not the
 thing that can actually be wrong. The meshes are small enough to keep it
@@ -36,8 +38,12 @@ import pytest
 import pyvista as pv
 
 from ccdaf.core import volume_mesh as vm
-from ccdaf.core.field_transfer import average_axial, transfer_volume_fields
-from ccdaf.core.volume_postprocessor import RemeshOptions, remesh
+from ccdaf.core.field_transfer import (
+    average_axial, average_axial_grouped, transfer_volume_fields,
+)
+from ccdaf.core.volume_postprocessor import (
+    RemeshOptions, decode_tags, encode_tags, remesh,
+)
 
 
 def _block(n: int = 6, size: float = 6.0) -> pv.UnstructuredGrid:
@@ -92,6 +98,38 @@ def test_axial_average_is_a_unit_vector_with_a_stable_sign():
 def test_axial_average_of_nothing_is_not_a_crash():
     assert np.allclose(average_axial(np.zeros((0, 3))), 0.0)
     assert np.allclose(average_axial(np.zeros((3, 3))), 0.0)
+
+
+def test_the_batched_average_agrees_with_the_single_one():
+    """The batched form exists for speed and must mean the same thing.
+
+    It replaced a per-cell Python loop that was 12 of the 14 seconds a
+    field transfer took; a fast version that quietly disagreed would be
+    the worst of both.
+    """
+    rng = np.random.default_rng(1)
+    vectors = rng.normal(size=(60, 3))
+    groups = [rng.choice(60, size=rng.integers(1, 8), replace=False)
+              for _ in range(25)]
+    owner = np.repeat(np.arange(len(groups)),
+                      [len(g) for g in groups])
+    member = np.concatenate(groups)
+
+    batched = average_axial_grouped(vectors, owner, member, len(groups))
+    for i, g in enumerate(groups):
+        assert np.allclose(batched[i], average_axial(vectors[g]), atol=1e-10)
+
+
+def test_a_group_that_caught_nothing_gets_no_direction():
+    """A zero structure tensor has arbitrary eigenvectors.
+
+    Inventing a direction from numerical noise would be worse than
+    admitting there is none.
+    """
+    vectors = np.array([[1.0, 0.0, 0.0]])
+    out = average_axial_grouped(vectors, np.array([0]), np.array([0]), 3)
+    assert np.isclose(np.linalg.norm(out[0]), 1.0)
+    assert np.allclose(out[1], 0.0) and np.allclose(out[2], 0.0)
 
 
 # ------------------------------------------------------------- the remesh
@@ -186,29 +224,36 @@ def test_only_what_was_asked_for_reaches_mmg():
     assert adapting.as_mmg_options()["hausd"] == 0.4
 
 
-# ------------------------------------------------------------ the workdir
-def test_the_working_directory_is_left_clean(source, tmp_path):
-    remesh(source, RemeshOptions(target_edge=1.0), workdir=str(tmp_path))
-    # An explicit workdir is the caller's, so its files stay for
-    # inspection — that is what it is for.
-    assert {p.name for p in tmp_path.iterdir()} == {"in.vtk", "out.vtk"}
+# ------------------------------------------------------------ references
+def test_tags_survive_a_labelling_that_does_not_start_at_one():
+    """MMG references are positive integers; a labelling need not be.
 
-    # The default is a temporary directory, and nothing survives it.
-    import tempfile
-    before = set(Path(tempfile.gettempdir()).glob("ccdaf-mmg-*"))
-    remesh(source, RemeshOptions(target_edge=1.0))
-    after = set(Path(tempfile.gettempdir()).glob("ccdaf-mmg-*"))
-    assert after == before
+    A mesh tagged 0 and 7 is ordinary, and passing those straight through
+    would lose the 0 outright.
+    """
+    tags = np.array([0, 7, 0, 7, 7], dtype=np.int32)
+    codes, values = encode_tags(tags)
+    assert codes.min() >= 1
+    assert set(codes.tolist()) == {1, 2}
+    assert np.array_equal(decode_tags(codes, values), tags)
+    assert decode_tags(codes, values).dtype == tags.dtype
 
 
-def test_only_geometry_is_sent_to_mmg(source, tmp_path):
-    """Fields are not written: MMG discards them, and a half-transferred
-    field would look transferred."""
-    remesh(source, RemeshOptions(target_edge=1.0), workdir=str(tmp_path))
-    sent = pv.read(tmp_path / "in.vtk")
-    assert list(sent.cell_data.keys()) == []
-    assert list(sent.point_data.keys()) == []
-    assert sent.n_cells == source.n_cells
+def test_an_invented_reference_is_refused_not_guessed():
+    """Silently mislabelling a simulation input is the worst outcome."""
+    _, values = encode_tags(np.array([1, 2]))
+    with pytest.raises(RuntimeError, match="outside the range"):
+        decode_tags(np.array([1, 2, 3]), values)
+
+
+def test_elemtag_comes_back_exact_on_an_odd_labelling(source):
+    """The whole point of carrying it as a reference."""
+    odd = source.copy(deep=True)
+    tags = np.asarray(odd.cell_data["elemTag"])
+    odd.cell_data["elemTag"] = np.where(tags == 1, 0, 7).astype(np.int32)
+
+    out = remesh(odd, RemeshOptions(target_edge=0.6))
+    assert set(np.unique(out.cell_data["elemTag"]).tolist()) == {0, 7}
 
 
 # --------------------------------------------------- transfer on its own

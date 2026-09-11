@@ -179,9 +179,19 @@ class MeshLoader:
         ``None``. Either way ``elemTag`` is present afterwards.
         """
         filename = str(filename)
+        if not Path(filename).is_file():
+            raise FileNotFoundError(f"no such file: {filename}")
         dataset = read_dataset(filename)
         if dataset is None:
             raise ValueError(f"no reader for {filename}")
+        # A reader that could not parse the file returns an empty dataset
+        # rather than failing, and the next check downstream then blames
+        # the geometry — "mesh must contain triangles only" for a file
+        # that was never read at all. Say what actually happened.
+        if dataset.GetNumberOfPoints() == 0:
+            raise ValueError(
+                f"{Path(filename).name} could not be read as a mesh "
+                f"(it has no points)")
 
         kind = kind_of(dataset)
         if kind == VOLUME:

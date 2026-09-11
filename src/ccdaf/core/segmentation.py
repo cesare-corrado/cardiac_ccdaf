@@ -127,6 +127,18 @@ def restore_orientation(img: sitk.Image, code: Optional[str]) -> sitk.Image:
     return sitk.DICOMOrient(img, code)
 
 
+def _as_polydata(mesh):
+    """*mesh* as ``vtkPolyData`` — its boundary, if it is a volume."""
+    if mesh is None:
+        raise ValueError("no mesh to voxelise")
+    if hasattr(mesh, "IsA") and mesh.IsA("vtkPolyData"):
+        return mesh
+    geometry = vtk.vtkGeometryFilter()
+    geometry.SetInputData(mesh)
+    geometry.Update()
+    return geometry.GetOutput()
+
+
 def define_image_from_mesh(poly: vtk.vtkPolyData,
                            spacing: np.ndarray) -> vtk.vtkImageData:
     """Allocate a vtkImageData covering the mesh bounds at *spacing*."""
@@ -194,15 +206,26 @@ def sitk_to_vtk_image(img: sitk.Image) -> vtk.vtkImageData:
 def voxelise_polydata(mesh,
                       spacing: Tuple[float, float, float],
                       *, flip: bool) -> sitk.Image:
-    """Convert a polydata surface to a binary SITK volume.
+    """Convert a surface — or a volume's boundary — to a binary SITK volume.
 
     Self-contained stencil-based rasterisation. Foreground fill is
     vectorised (single allocation through numpy_support).
+
+    A volume is rasterised through its boundary, which is the right
+    semantics (the boundary is what bounds the domain) and closes a
+    silent-failure hole: ``vtkPolyDataToImageStencil`` takes polydata,
+    and deep-copying an unstructured grid into a ``vtkPolyData`` leaves
+    it empty, so passing a volume used to return an all-zero image with
+    no error anywhere. An empty answer is the one failure mode a caller
+    cannot see.
     """
     # Take a writable deep copy of the polydata so optional flips
     # don't mutate the caller's mesh.
     poly = vtk.vtkPolyData()
-    poly.DeepCopy(mesh)
+    poly.DeepCopy(_as_polydata(mesh))
+    if poly.GetNumberOfPolys() == 0:
+        raise ValueError(
+            "nothing to voxelise: the mesh has no polygons")
 
     if flip:
         negate_xy_inplace(poly)
@@ -335,6 +358,92 @@ def border_padding(filt_stdev: "list[float]",
     return [1 + int(r) for r in radii]
 
 
+def smooth_field(field, filt_stdev, filt_rfact):
+    """Gaussian-smooth a distance field, or return it untouched.
+
+    The step that decides how closely the reconstructed boundary follows
+    the voxel staircase. Factored out because two callers must apply it
+    the *same* way or the 3D preview stops predicting the export: marching
+    cubes smooths before contouring, and the volumetric route has to
+    smooth before deciding which elements are inside.
+
+    Zero on either parameter means no smoothing, which is what the panel's
+    zero has always meant.
+    """
+    if not (np.any(np.asarray(filt_stdev) > 0.0)
+            and np.any(np.asarray(filt_rfact) > 0.0)):
+        return field
+    gaussian = vtk.vtkImageGaussianSmooth()
+    gaussian.SetStandardDeviations(filt_stdev[0], filt_stdev[1], filt_stdev[2])
+    gaussian.SetRadiusFactors(filt_rfact[0], filt_rfact[1], filt_rfact[2])
+    gaussian.SetDimensionality(3)
+    gaussian.SetInputData(field)
+    gaussian.Update()
+    return gaussian.GetOutput()
+
+
+def distance_field(binary: sitk.Image, *, metric: bool = False):
+    """Signed distance to the boundary of *binary*, as a ``vtkImageData``.
+
+    **Positive inside the foreground, negative outside.** That is the
+    opposite of the usual convention and it is worth stating loudly: a
+    level set built on the assumption that negative means inside selects
+    the background, which on a ventricle is 93% of the bounding box and
+    looks, from the outside, like the algorithm merely being slow.
+
+    ``metric=False`` (the default) returns VTK's raw output, which is the
+    **squared** distance — a wall 4 mm from the background reads 17, not
+    4. The zero crossing is in the same place either way, so marching
+    cubes does not care, and this is what it has always been given; the
+    Gaussian smoothing it applies afterwards acts on these values, so
+    changing them would change its output.
+
+    ``metric=True`` takes the signed square root, giving millimetres.
+    That is what a level set wants, because a level-set mesher reads the
+    magnitude as a distance and not merely the sign.
+    """
+    vimg = sitk_to_vtk_image(binary)
+
+    outside_dist = vtk.vtkImageEuclideanDistance()
+    outside_dist.SetInputData(vimg)
+    outside_dist.SetConsiderAnisotropy(True)
+    outside_dist.SetAlgorithmToSaito()
+    outside_dist.Update()
+
+    # Flip binary {0,1} → {1,0} so vtkImageEuclideanDistance can compute
+    # distances from outside pixels to the nearest inside boundary.
+    # SetOperationToInvert would compute 1/x, giving inf for 0-pixels
+    # (no background for the distance filter). Use threshold instead.
+    thresh = vtk.vtkImageThreshold()
+    thresh.SetInputData(vimg)
+    thresh.ThresholdByLower(0.5)
+    thresh.SetInValue(1.0)
+    thresh.SetOutValue(0.0)
+    thresh.ReplaceInOn()
+    thresh.ReplaceOutOn()
+    thresh.Update()
+    inside_dist = vtk.vtkImageEuclideanDistance()
+    inside_dist.SetInputData(thresh.GetOutput())
+    inside_dist.SetConsiderAnisotropy(True)
+    inside_dist.SetAlgorithmToSaito()
+    inside_dist.Update()
+
+    sdf = vtk.vtkImageMathematics()
+    sdf.SetInput1Data(outside_dist.GetOutput())
+    sdf.SetInput2Data(inside_dist.GetOutput())
+    sdf.SetOperationToSubtract()
+    sdf.Update()
+    out = sdf.GetOutput()
+
+    if metric:
+        scalars = out.GetPointData().GetScalars()
+        raw = numpy_support.vtk_to_numpy(scalars)
+        signed = np.sign(raw) * np.sqrt(np.abs(raw))
+        out.GetPointData().SetScalars(
+            numpy_support.numpy_to_vtk(signed, deep=True))
+    return out
+
+
 def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
                              filt_stdev: "list[float]",
                              filt_rfact: "list[float]",
@@ -367,50 +476,12 @@ def segmentation_to_polydata(img: Optional[sitk.Image], *, flip: bool,
               else border_padding(filt_stdev, filt_rfact))
     if any(w > 0 for w in widths):
         binary = sitk.ConstantPad(binary, widths, widths, 0)
-    vimg = sitk_to_vtk_image(binary)
-
-    outside_dist = vtk.vtkImageEuclideanDistance()
-    outside_dist.SetInputData(vimg)
-    outside_dist.SetConsiderAnisotropy(True)
-    outside_dist.SetAlgorithmToSaito()
-    outside_dist.Update()
-
-    # Flip binary {0,1} → {1,0} so vtkImageEuclideanDistance can compute
-    # distances from outside pixels to the nearest inside boundary.
-    # SetOperationToInvert would compute 1/x, giving inf for 0-pixels
-    # (no background for the distance filter). Use threshold instead.
-    thresh = vtk.vtkImageThreshold()
-    thresh.SetInputData(vimg)
-    thresh.ThresholdByLower(0.5)
-    thresh.SetInValue(1.0)
-    thresh.SetOutValue(0.0)
-    thresh.ReplaceInOn()
-    thresh.ReplaceOutOn()
-    thresh.Update()
-    inside_dist = vtk.vtkImageEuclideanDistance()
-    inside_dist.SetInputData(thresh.GetOutput())
-    inside_dist.SetConsiderAnisotropy(True)
-    inside_dist.SetAlgorithmToSaito()
-    inside_dist.Update()
-
-    sdf = vtk.vtkImageMathematics()
-    sdf.SetInput1Data(outside_dist.GetOutput())
-    sdf.SetInput2Data(inside_dist.GetOutput())
-    sdf.SetOperationToSubtract()
-    sdf.Update()
-    vimg_sdf = sdf.GetOutput()
+    # Squared, as it has always been: the Gaussian below smooths these
+    # values, so switching to millimetres would change the surface.
+    vimg_sdf = smooth_field(distance_field(binary), filt_stdev, filt_rfact)
 
     mc = vtk.vtkMarchingCubes()
-    if np.any(np.array(filt_stdev) > 0.) and np.any(np.array(filt_rfact) > 0.):
-        gaussian = vtk.vtkImageGaussianSmooth()
-        gaussian.SetStandardDeviations(filt_stdev[0], filt_stdev[1], filt_stdev[2])
-        gaussian.SetRadiusFactors(filt_rfact[0], filt_rfact[1], filt_rfact[2])
-        gaussian.SetDimensionality(3)
-        gaussian.SetInputData(vimg_sdf)
-        gaussian.Update()
-        mc.SetInputConnection(gaussian.GetOutputPort())
-    else:
-        mc.SetInputData(vimg_sdf)
+    mc.SetInputData(vimg_sdf)
     mc.ComputeScalarsOff()
     mc.ComputeNormalsOff()
     mc.ComputeGradientsOff()
@@ -550,6 +621,7 @@ __all__ = [
     "negate_xy_inplace", "define_image_from_mesh", "vtk_image_to_sitk",
     "sitk_to_vtk_image", "voxelise_polydata", "binary_mask_image",
     "label_mask_image", "sync_sitk_from_array", "border_padding",
-    "segmentation_to_polydata", "relabel_halfspace",
+    "segmentation_to_polydata", "relabel_halfspace", "distance_field",
+    "smooth_field",
     "WELD_FRACTION", "StrayShells", "drop_stray_shells",
 ]
