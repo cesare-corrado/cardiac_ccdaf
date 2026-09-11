@@ -2,12 +2,28 @@
 MeshLoader
 ==========
 
-Thin wrapper around the provided ``vtkfunctions`` I/O routines. Returns a
-``pyvista.PolyData`` view of the input mesh and guarantees the presence of
-the ``elemTag`` cell-data scalar (initialized to 1 everywhere, per spec).
+Wrapper around the ``vtkfunctions`` I/O routines. Holds whichever kind of
+mesh the file contained and guarantees the presence of the ``elemTag``
+cell-data scalar (initialized to 1 everywhere, per spec).
 
-The ``vtkfunctions`` module is imported as-is; it is NOT re-implemented and
-NOT inspected beyond calling ``readvtk`` / ``writevtk``.
+Surface or volume
+-----------------
+``kind`` says which, decided by the cells rather than by the file's
+dataset type — a triangular surface exported as an unstructured grid is a
+surface. For a volume:
+
+* ``grid`` is the tetrahedral mesh, exactly as read;
+* ``mesh`` is its boundary surface, derived.
+
+For a surface ``grid`` is ``None`` and ``mesh`` is the mesh, which is
+what every caller has always read.
+
+The volume is the master and the surface is a view of it. Anything that
+changes geometry changes the volume and re-derives the surface, never the
+other way round: re-deriving is cheap and always correct, while pushing a
+changed surface back into a volume is not defined. What is read from disk
+is what is written back, unless something asked for a change — the
+loader normalises nothing on the way in.
 """
 
 from __future__ import annotations
@@ -18,8 +34,11 @@ from typing import Iterable, Union
 import numpy as np
 import pyvista as pv
 
-from ccdaf.io.vtkfunctions import readvtk, writevtk
+from ccdaf.io.vtkfunctions import read_dataset, writevtk
 from ccdaf.core.eam_loader import CARTO_NODATA
+from ccdaf.core.volume_mesh import (
+    SURFACE, VOLUME, boundary_surface, kind_of, validate_tetrahedral,
+)
 
 
 BODY_LABEL: int = 1
@@ -29,6 +48,19 @@ UNASSIGNED: int = -1
 # because the downstream project format expects both; a mesh that carries
 # neither still gets ``Normals``, computed from its geometry on the way out.
 DEFAULT_SAVE_FIELDS: tuple = ("elemTag", "Normals")
+
+#: Arrays that are bookkeeping rather than data. They must never be
+#: offered as a field to colour by, written to a file, or carried through
+#: a filter onto a mesh where their indices no longer mean anything.
+#:
+#: ``render_idx`` is stamped on by the renderer for picking. The two
+#: ``vtkOriginal*`` arrays come from taking a volume's boundary and are
+#: the map from a boundary triangle back to its parent tetrahedron —
+#: real information, and exactly as stale as the mesh they indexed the
+#: moment anything re-tessellates it.
+INTERNAL_ARRAYS: frozenset = frozenset({
+    "render_idx", "vtkOriginalPointIds", "vtkOriginalCellIds",
+})
 
 
 def compute_normals(mesh: pv.PolyData) -> pv.PolyData:
@@ -118,30 +150,89 @@ def _is_ascii_legacy_vtk(filename: Union[str, Path]) -> bool:
 
 
 class MeshLoader:
-    """Load / save atrial surface meshes and manage the ``elemTag`` array."""
+    """Load / save cardiac meshes and manage the ``elemTag`` array."""
 
     def __init__(self) -> None:
         self.path: Union[str, None] = None
         self.mesh: Union[pv.PolyData, None] = None
+        #: The tetrahedral volume, when the file held one; else ``None``.
+        self.grid: Union[pv.UnstructuredGrid, None] = None
+        self.kind: str = SURFACE
 
     # ------------------------------------------------------------------
-    def load(self, filename: Union[str, Path]) -> pv.PolyData:
-        """Read a VTK file and return a validated PolyData."""
+    @property
+    def dataset(self):
+        """The working mesh itself: the volume when there is one.
+
+        What saving writes and what a geometry-changing operation acts
+        on. ``mesh`` stays the thing to render and pick, whichever kind
+        this is.
+        """
+        return self.grid if self.kind == VOLUME else self.mesh
+
+    # ------------------------------------------------------------------
+    def load(self, filename: Union[str, Path]):
+        """Read a mesh file; return the volume, or the surface if flat.
+
+        A file holding tetrahedra becomes ``grid``, with ``mesh`` its
+        boundary; anything else becomes ``mesh`` and leaves ``grid``
+        ``None``. Either way ``elemTag`` is present afterwards.
+        """
         filename = str(filename)
-        vtk_poly = readvtk(filename)           # mandatory entry point
-        mesh = pv.wrap(vtk_poly)
+        if not Path(filename).is_file():
+            raise FileNotFoundError(f"no such file: {filename}")
+        dataset = read_dataset(filename)
+        if dataset is None:
+            raise ValueError(f"no reader for {filename}")
+        # A reader that could not parse the file returns an empty dataset
+        # rather than failing, and the next check downstream then blames
+        # the geometry — "mesh must contain triangles only" for a file
+        # that was never read at all. Say what actually happened.
+        if dataset.GetNumberOfPoints() == 0:
+            raise ValueError(
+                f"{Path(filename).name} could not be read as a mesh "
+                f"(it has no points)")
 
-        if not isinstance(mesh, pv.PolyData):
-            raise TypeError(f"{filename} is not a surface polydata")
+        kind = kind_of(dataset)
+        if kind == VOLUME:
+            validate_tetrahedral(dataset)
+            grid = pv.wrap(dataset)
+            self._ensure_elem_tag(grid)
+            if _is_ascii_legacy_vtk(filename):
+                sentinel_to_nodata(grid)
+            mesh = boundary_surface(grid)
+            self._validate_triangles(mesh)
+            self.grid = grid
+        else:
+            mesh = pv.wrap(dataset)
+            if not isinstance(mesh, pv.PolyData):
+                # A grid of 2-D cells: same surface, wrong container.
+                mesh = boundary_surface(mesh)
+            self._validate_triangles(mesh)
+            self._ensure_elem_tag(mesh)
+            if _is_ascii_legacy_vtk(filename):
+                sentinel_to_nodata(mesh)   # ASCII stores no-data as CARTO_NODATA
+            self.grid = None
 
-        self._validate_triangles(mesh)
-        self._ensure_elem_tag(mesh)
-        if _is_ascii_legacy_vtk(filename):
-            sentinel_to_nodata(mesh)       # ASCII stores no-data as CARTO_NODATA
-
+        self.kind = kind
         self.path = filename
         self.mesh = mesh
-        return mesh
+        return self.dataset
+
+    # ------------------------------------------------------------------
+    def set_surface(self, mesh: pv.PolyData) -> None:
+        """Adopt *mesh* as a surface working mesh, dropping any volume."""
+        self.mesh = mesh
+        self.grid = None
+        self.kind = SURFACE
+
+    def set_volume(self, grid: "pv.UnstructuredGrid") -> None:
+        """Adopt *grid* as the working volume and re-derive the surface."""
+        validate_tetrahedral(grid)
+        self._ensure_elem_tag(grid)
+        self.grid = grid
+        self.mesh = boundary_surface(grid)
+        self.kind = VOLUME
 
     # ------------------------------------------------------------------
     def save(self, filename: Union[str, Path],
@@ -165,6 +256,9 @@ class MeshLoader:
         """
         if self.mesh is None:
             raise RuntimeError("no mesh loaded")
+        if self.kind == VOLUME:
+            self._save_volume(filename, fields, binary)
+            return
 
         keep = (set(DEFAULT_SAVE_FIELDS) if fields is None
                 else {str(f) for f in fields})
@@ -202,10 +296,54 @@ class MeshLoader:
         writevtk(mesh0, str(filename), binary=binary)
 
     # ------------------------------------------------------------------
+    def _save_volume(self, filename: Union[str, Path],
+                     fields: Union[Iterable[str], None],
+                     binary: bool) -> None:
+        """Write the tetrahedral volume, keeping only ``fields``.
+
+        Deliberately unlike the surface path in two ways. There are no
+        ``Normals``: they are a property of a surface, and computing them
+        for a volume would write a field that means nothing. And nothing
+        is cast to ``float32`` — the surface path does that because the
+        downstream project format expects it, whereas a volume has no
+        such reader, and casting would quietly turn an integer label or a
+        double-precision fibre into something else.
+
+        ``fields`` of ``None`` keeps every array, since the surface
+        default (``elemTag`` + ``Normals``) is a surface contract and
+        dropping a volume's fibres to honour it would be silent data
+        loss.
+        """
+        grid = self.grid.copy(deep=True)
+        if fields is not None:
+            keep = {str(f) for f in fields}
+            for attr in (grid.point_data, grid.cell_data):
+                for name in list(attr.keys()):
+                    if name not in keep:
+                        attr.remove(name)
+
+        # elemTag last and active, matching the surface path: a reader
+        # that takes the active scalars finds the labels either way.
+        if "elemTag" in grid.cell_data.keys():
+            elem = np.copy(grid.cell_data["elemTag"])
+            grid.cell_data.remove("elemTag")
+            grid.cell_data["elemTag"] = elem
+            grid.set_active_scalars("elemTag", preference="cell")
+
+        if not binary:
+            nodata_to_sentinel(grid)
+        writevtk(grid, str(filename), binary=binary)
+
+    # ------------------------------------------------------------------
     @staticmethod
     def field_names(mesh: pv.PolyData) -> "list[str]":
-        """Every field on ``mesh``, point arrays first then cell arrays."""
-        return list(mesh.point_data.keys()) + list(mesh.cell_data.keys())
+        """Every field on ``mesh``, point arrays first then cell arrays.
+
+        Bookkeeping arrays are left out — see :data:`INTERNAL_ARRAYS`.
+        """
+        return [n for n in (list(mesh.point_data.keys())
+                            + list(mesh.cell_data.keys()))
+                if n not in INTERNAL_ARRAYS]
 
 
 
@@ -225,5 +363,5 @@ class MeshLoader:
             )
 
 
-__all__ = ["MeshLoader", "BODY_LABEL", "DEFAULT_SAVE_FIELDS", "compute_normals",
-           "nodata_to_sentinel", "sentinel_to_nodata"]
+__all__ = ["MeshLoader", "BODY_LABEL", "DEFAULT_SAVE_FIELDS", "INTERNAL_ARRAYS",
+           "compute_normals", "nodata_to_sentinel", "sentinel_to_nodata"]

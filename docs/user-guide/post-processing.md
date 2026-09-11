@@ -1,5 +1,10 @@
 # Mesh post-processing
 
+The panel has two forms, and which one you see follows the mesh. A surface
+gets the stages below. A **tetrahedral volume** gets the volumetric panel
+instead — different operations, not a greyed-out version of these — described
+in [Volumes](#volumes) at the end.
+
 The **Mesh post-processing** panel exposes `ccdaf.core.mesh_postprocessor.apply`
 as a set of togglable stages, run in order on the working mesh. Enable the
 stages you want with their checkboxes and set their parameters.
@@ -176,3 +181,100 @@ smoothing, which only nudges bad triangles).
     the moved wall. The **Clean** stage's quality smoothing also nudges
     vertices but does **not** trigger electrode displacement. See
     [Concepts → Electrode displacement](../concepts.md#electrode-displacement).
+
+## Volumes
+
+A tetrahedral volume is adapted in one pass by MMG3D rather than through a
+sequence of stages, so the panel asks for a size rather than for steps.
+
+- **target edge** — one uniform edge length, in mesh units. `auto` (0) leaves
+  the size to MMG, which keeps roughly what the mesh has and repairs quality.
+- **min edge** / **max edge** — an edge-length band instead of one target.
+  Mutually exclusive with the target: MMG refuses both, so setting either
+  disables the other.
+- **gradation** — the largest ratio allowed between the lengths of two
+  adjacent edges. It does not set the size; it limits how *fast* the size may
+  change. `auto` leaves MMG's own default of 1.3.
+- **boundary tol.** — the Hausdorff distance, how far an adapted boundary may
+  stray from the original. `auto` uses **a fifth of the element size**, which
+  is what the validated runs used.
+
+!!! warning "Do not tighten the boundary tolerance casually"
+
+    Cost rises steeply as it tightens. At a 1.5 mm target on the 290,000-element
+    example:
+
+    | Tolerance | Time | Elements |
+    |---:|---:|---:|
+    | 0.3 | 23 s | 334,000 |
+    | 0.1 | 27 s | 358,000 |
+    | 0.05 | 56 s | 613,000 |
+
+    `auto` deliberately does **not** fall back to MMG's own default of 0.01
+    mesh units. That is a sensible figure for unit-scale geometry and absurd
+    for a heart in millimetres — it asks for the surface to within 10 µm, is
+    five times tighter than the slowest row above, and does not finish in any
+    usable time. It simply looks as though the application has hung.
+
+Both of those only apply while the boundary is being adapted, and are disabled
+otherwise. The tolerance is obvious — a frozen boundary does not move.
+Gradation is less so: it constrains how a *varying* size may change, and the
+size only varies when MMG derives it from surface curvature, which it does
+only while adapting the boundary. Measured on a ventricle with the boundary
+frozen, changing gradation produced byte-identical meshes, so leaving the
+control live would offer something that does nothing.
+
+Where it does apply, it is the strongest knob in the panel:
+
+| Gradation | Tetrahedra | Mean edge |
+|---|---:|---:|
+| 1.05 | 148,866 | 1.92 |
+| auto (1.3) | 56,772 | 2.68 |
+| 3.0 | 41,031 | 3.06 |
+
+(Adapting boundary, 0.5–4.0 mm band, tolerance 0.5, on the 290,474-element
+example.) Smaller grades more gently and costs elements; larger lets the size
+jump and saves them.
+
+### Adapt the boundary too
+
+Left unticked — the default — the boundary is **frozen**. It comes back vertex
+for vertex identical: measured on a 66,819-vertex ventricle, all 38,823
+boundary vertices returned at distance 0.0 with the surface area unchanged.
+Only the interior changes, so the anatomy is untouched.
+
+Ticked, the surface is re-approximated within the tolerance. On the same mesh
+that moved the wall by up to 1.5 mm, half a millimetre on average, and left it
+with a third as many boundary vertices. That is sometimes exactly what you
+want; it is never what you want by accident, which is why it is off by
+default.
+
+### What happens to the fields
+
+MMG carries an integer reference per element through the adaptation, so the
+labels ride across exactly. Everything else it returns is bare geometry, so
+CCDAF carries those itself, by rules that differ because they are different
+kinds of quantity:
+
+| Field | Rule |
+|---|---|
+| point fields (`scar_probability`, …) | interpolated within the source tetrahedron the new vertex falls in |
+| labels (`elemTag`) | carried by MMG itself as an element *reference*, so they come back exact rather than re-derived by proximity |
+| directions (`fiber`) | averaged over the source elements the new element covers, as an **axis** |
+
+That last rule matters more than it looks. A fibre direction is *axial*: `f`
+and `−f` are the same direction, and which one a file happens to store is
+arbitrary. Averaging two elements whose stored vectors point opposite ways
+gives, as vectors, nothing at all — a direction pointing nowhere that renders
+and exports like real data. CCDAF averages the outer products `f·fᵀ` and takes
+the dominant eigenvector, which is sign-free and gives the right answer
+whichever way each contributor was written down.
+
+### A note on speed
+
+MMG is fast when it is told a size and slow when it is not. On the 290,474-tet
+ventricle, a frozen-boundary remesh at a 2 mm target takes about 10 seconds —
+7 in MMG and the rest carrying the fields.
+Asking MMG to optimise quality with no size at all is the pathological case —
+it invents a size map and multiplied the same mesh 23-fold over 8 minutes — so
+the panel always sends a size and never exposes that mode.

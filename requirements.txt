@@ -10,3 +10,6 @@ trimesh>=4.0
 # trimesh.fix_normals() needs networkx (an optional extra of trimesh);
 # decimate raises ModuleNotFoundError without it.
 networkx>=3.0
+# Tetrahedral remeshing (MMG3D) for the volumetric workflow. MIT wrapper
+# over an LGPL-3 library; see docs/installation.md.
+mmgpy>=0.17

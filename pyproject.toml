@@ -27,6 +27,12 @@ dependencies = [
     # trimesh.fix_normals() needs networkx, which trimesh only declares as an
     # optional extra — decimate raises ModuleNotFoundError without it.
     "networkx>=3.0",
+    # Tetrahedral remeshing (MMG3D), for the volumetric workflow. A hard
+    # dependency rather than an extra: without it a volume can only be
+    # looked at and saved, which is not a workflow. The wrapper is MIT and
+    # the MMG library it bundles is LGPL-3, which imposes nothing on this
+    # project — see docs/installation.md.
+    "mmgpy>=0.17",
 ]
 
 [project.scripts]

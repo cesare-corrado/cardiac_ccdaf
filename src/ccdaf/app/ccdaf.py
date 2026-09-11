@@ -63,7 +63,9 @@ import vtk
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from ccdaf.core.mesh_loader import MeshLoader, BODY_LABEL, UNASSIGNED
+from ccdaf.core.mesh_loader import (
+    MeshLoader, BODY_LABEL, INTERNAL_ARRAYS, UNASSIGNED,
+)
 from ccdaf.interaction.seed_selector import SeedSelector, Seed
 from ccdaf.core.seed_profiles import (
     SeedProfile, SEED_PROFILES, SEED_PROFILE_ORDER, DEFAULT_PROFILE,
@@ -72,6 +74,7 @@ from ccdaf.core.region_tagger import RegionTagger, LABELS
 from ccdaf.interaction.manual_editor import ManualEditor, ALLOWED_LABELS, EditState
 from ccdaf.interaction.clipping_tool import ClippingTool, ClipMode
 from ccdaf.gui.postprocessing_widget import PostprocessingWidget
+from ccdaf.gui.volume_postprocessing_widget import VolumePostprocessingWidget
 from ccdaf.gui import help_dialogs
 from ccdaf import __version__
 from ccdaf.gui.segmentation_widget import SegmentationWidget
@@ -102,6 +105,9 @@ from ccdaf.core.segmentation import (
     sync_sitk_from_array, voxelise_polydata,
 )
 from ccdaf.core.seed_io import load_point_set, save_seeds
+from ccdaf.core.volume_mesh import VOLUME
+from ccdaf.core.volume_postprocessor import remesh as remesh_volume
+from ccdaf.core.volume_from_segmentation import carve, growth_outside
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
@@ -114,6 +120,18 @@ LABEL_COLORS: Dict[int, str] = {
     17: "#984ea3",
     19: "#ff7f00",
 }
+
+
+# Colours for tags the atrial table above does not know — a ventricular
+# mesh labels the left ventricle 1 and the right ventricle 2, and a
+# four-chamber model will carry more still.
+# Assigned by position among the tags actually present, so two labels are
+# always two colours. Deliberately not the atrial hues: a mesh that is not
+# an atrium should not be coloured as though it were one.
+FALLBACK_TAG_COLORS: Tuple[str, ...] = (
+    "#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3",
+    "#937860", "#da8bc3", "#8c8c8c", "#ccb974", "#64b5cd",
+)
 
 
 # Colors for segmentation labels 0–8.
@@ -157,6 +175,24 @@ EAM_ABOVE_COLOR = "magenta"
 # EAM electrodes, drawn as Gaussian points.
 EAM_ELECTRODE_COLOR = (100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0)
 EAM_ELECTRODE_RADIUS_FRAC = 0.008     # of the mesh's bounding-box diagonal
+
+
+#: Below this share of what it started with, a morphological operation is
+#: confirmed before it is applied — per operation, because they promise
+#: different things.
+#:
+#: **Erode** is a request to shrink, so removing a lot is the point and
+#: only near-total loss is a surprise. **Opening** is a request to
+#: *smooth* — take off small protrusions — and one that deletes most of
+#: the object is not smoothing, whatever the arithmetic says. On a
+#: myocardial wall at 1 mm an opening at radius 2 leaves 13.5%: correct,
+#: and never what anyone meant by "smooth this".
+#:
+#: Dilation and closing can only grow a region, so neither can trip this.
+SEG_SHRINK_WARN_FRACTION: Dict[str, float] = {
+    "erode": 0.10,
+    "morph_open": 0.50,
+}
 
 
 # The three slice orientations of a segmentation volume. Where each one is
@@ -235,6 +271,12 @@ class CCDAF(QtWidgets.QMainWindow):
         # spacing used — what converting it back needs to carry the fields
         # and electrodes over. None ⇔ the segmentation came off disk.
         self._seg_source: Optional[dict] = None
+        #: Growth the user chose to discard on the last conversion, so the
+        #: closing message can say how much rather than staying silent
+        #: about a loss they agreed to.
+        self._growth_dropped = None
+        #: Whether the thin-wall warning has been shown this session.
+        self._perforation_warned = False
         self._transfer_note: Optional[str] = None
         self._seg_idx: Dict[str, int] = {"axial": 0, "sagittal": 0, "coronal": 0}
         self._slice_actors: Dict[str, object] = {}
@@ -417,6 +459,16 @@ class CCDAF(QtWidgets.QMainWindow):
         self.postproc.setTitle("")
         body = self._register_section(v, "postproc", "Mesh post-processing")
         body.addWidget(self.postproc)
+
+        # The volumetric panel shares the section. Which one is visible
+        # follows the mesh kind: the operations are different operations,
+        # so showing both at once would mean half of them always dead.
+        self.volume_postproc = VolumePostprocessingWidget()
+        self.volume_postproc.setTitle("")
+        self.volume_postproc.remesh_requested.connect(
+            self._action_remesh_volume)
+        self.volume_postproc.setVisible(False)
+        body.addWidget(self.volume_postproc)
 
         # --- Seeds ------------------------------------------------------
         self.seed_widget = SeedWidget()
@@ -1160,14 +1212,21 @@ class CCDAF(QtWidgets.QMainWindow):
             f"Loaded segmentation {Path(filename).name}"
             f"{self._seg_orientation_note()}")
 
-    def _adopt_mesh(self, mesh: pv.PolyData, source_name: str) -> None:
-        """Common setup once ``mesh`` is the working mesh, whatever its source.
+    def _adopt_mesh(self, source_name: str) -> None:
+        """Common setup once the loader holds the working mesh.
 
         The loader's ``mesh``/``path`` must already be set. Rebuilds the
         mesh-side tools against the current plotter, refreshes the panels,
         and renders — everything a fresh mesh needs and nothing EAM- or
         seed-specific, which the callers add.
+
+        The surface is read from the loader rather than passed in. Every
+        tool built here — the tagger, the editor, the clipper — takes a
+        ``PolyData``, and ``load`` returns the *volume* for a volumetric
+        file, so a caller passing on what it got would hand them a grid.
+        That is exactly what it did.
         """
+        mesh = self.loader.mesh
         self.tagger = RegionTagger(mesh)
         self.editor = None
         self.clipper = ClippingTool(
@@ -1182,10 +1241,15 @@ class CCDAF(QtWidgets.QMainWindow):
         # so the visualisation panel applies to it just as much as to a mapping.
         self._populate_fields()
         self._set_section_visible("visualisation", True)
-        self._render_mesh()
+        # Through _render_field, not _render_mesh: the panel has just chosen
+        # a field, and drawing something else would leave the two disagreeing.
+        self._render_field()
         self._focus_3d()
         self.plotter.reset_camera()
-        self.mesh_info.update_info(mesh)
+        self.mesh_info.update_info(mesh, volume=self.loader.grid)
+        # The mesh kind is a gate on the surface panels just as the seed
+        # type is, and it can only have changed here.
+        self._sync_profile_panels()
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
         self.statusBar().showMessage(f"Loaded {source_name}")
 
@@ -1206,13 +1270,13 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _load_mesh(self, filename: str) -> None:
         try:
-            mesh = self.loader.load(filename)
+            self.loader.load(filename)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
             return
         self.recent_folder = Path(filename).resolve().parent
         self._reset_eam_state()
-        self._adopt_mesh(mesh, Path(filename).name)
+        self._adopt_mesh(Path(filename).name)
         self._clear_dirty()
 
     def _load_bundle(self, filename: str) -> None:
@@ -1223,10 +1287,10 @@ class CCDAF(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
             return
         self.recent_folder = Path(filename).resolve().parent
-        self.loader.mesh = mesh
+        self.loader.set_surface(mesh)
         self.loader.path = filename
         self._reset_eam_state()
-        self._adopt_mesh(mesh, Path(filename).name)
+        self._adopt_mesh(Path(filename).name)
 
         # Electrodes, if the bundle carried them: restore the state EAM
         # export needs and draw them.
@@ -1377,7 +1441,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # Mesh state and the tools bound to it.
         self._teardown_mesh_tools(rebuild_clipper=False)
         self.tagger = None
-        self.loader.mesh = None
+        self.loader.set_surface(None)
         self.loader.path = None
         self._seg_source = None
         self._transfer_note = None
@@ -1404,11 +1468,18 @@ class CCDAF(QtWidgets.QMainWindow):
     def _action_save(self) -> None:
         if self.loader.mesh is None:
             return
-        mesh = self.loader.mesh
+        # The volume is what gets written when there is one, so its fields
+        # are the ones to offer — the boundary surface carries a copy of
+        # them, but saving the surface's copy would write the wrong mesh.
+        data = self.loader.dataset
+        is_volume = self.loader.kind == VOLUME
         dlg = SaveMeshDialog(
-            point_fields=list(mesh.point_data.keys()),
-            cell_fields=list(mesh.cell_data.keys()),
+            point_fields=[k for k in data.point_data.keys()
+                          if k not in INTERNAL_ARRAYS],
+            cell_fields=[k for k in data.cell_data.keys()
+                         if k not in INTERNAL_ARRAYS],
             start_dir=str(self.recent_folder), parent=self,
+            volume=is_volume,
         )
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -1572,7 +1643,7 @@ class CCDAF(QtWidgets.QMainWindow):
             and len(self._eam_electrode_points) > 0)
 
         # Adopt as the working mesh and (re)build the mesh-side tools.
-        self.loader.mesh = mesh
+        self.loader.set_surface(mesh)
         self.loader.path = None
         self.tagger = RegionTagger(mesh)
         self.clipper = ClippingTool(
@@ -1587,12 +1658,13 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.set_undo_enabled(False)
         self._sync_clipping_gate()
         self._sync_seed_panel()
+        self._sync_profile_panels()
         if self._current_profile().count:
             self.seed_widget.set_prompt(
                 "EAM mapping loaded. Click 'Start seed selection'.")
         self.act_save.setEnabled(True)
         self.act_seg_from_mesh.setEnabled(True)
-        self.mesh_info.update_info(mesh)
+        self.mesh_info.update_info(mesh, volume=self.loader.grid)
 
         # EAM display panel: populate fields and reveal it.
         self._populate_fields()
@@ -1741,11 +1813,26 @@ class CCDAF(QtWidgets.QMainWindow):
         if mesh is None:
             return
         previous = self.vis_widget.current_field() if keep_selection else None
+
+        def offered(attr):
+            # Scalars only. A vector — a per-element fibre direction, say —
+            # is a field of the mesh and is saved like any other, but there
+            # is no one number per cell to put on a colour ramp, so it is
+            # not something to colour by.
+            return [k for k in attr.keys()
+                    if k not in INTERNAL_ARRAYS
+                    and np.asarray(attr[k]).ndim == 1]
+
         self.vis_widget.set_fields(
-            point_fields=list(mesh.point_data.keys()),
-            cell_fields=[k for k in mesh.cell_data.keys() if k != "render_idx"],
+            point_fields=offered(mesh.point_data),
+            cell_fields=offered(mesh.cell_data),
             categorical=CATEGORICAL_FIELDS,
         )
+        # Start on the mesh's own labelling when it has one. Otherwise the
+        # panel names whichever field sorts first while the view draws the
+        # regions, and the two disagree from the moment the mesh opens.
+        if previous is None:
+            previous = "elemTag" if "elemTag" in mesh.cell_data else None
         if previous is not None:
             self.vis_widget.select_field(previous)
 
@@ -1903,6 +1990,21 @@ class CCDAF(QtWidgets.QMainWindow):
         return [(int(lbl), _label_name(int(lbl)))
                 for lbl in profile.label_values]
 
+    def _volume_mode(self) -> bool:
+        """Whether the working mesh is a tetrahedral volume.
+
+        Tagging, manual correction and clipping all act on a surface: they
+        pick triangles, walk geodesics and cut cuffs. A volume's boundary
+        is a view of it, so labelling that boundary would edit a copy the
+        volume never sees. They stay off until there is a volumetric
+        answer to what each of them means.
+        """
+        return self.loader is not None and self.loader.kind == VOLUME
+
+    #: Why the surface panels are switched off on a volume.
+    VOLUME_NOTE = ("This is a volumetric mesh. These tools act on a "
+                   "surface, so they are unavailable here.")
+
     def _sync_profile_panels(self) -> None:
         """Point Tagging, Manual correction and Clipping at the active type.
 
@@ -1911,19 +2013,33 @@ class CCDAF(QtWidgets.QMainWindow):
         switches itself off when that is nothing. Called on every seed-type
         change and once at start-up, so the panels can never be describing
         a set other than the one the seed panel shows.
+
+        A volume overrides all three. It is a second, independent gate:
+        the seed type says what the anatomy offers, the mesh kind says
+        whether these tools apply at all.
         """
         profile = self._current_profile()
-        self.tagging_widget.set_profile(profile)
+        volume = self._volume_mode()
+        reason = self.VOLUME_NOTE if volume else ""
+
+        # One post-processing panel or the other, never both.
+        self.postproc.setVisible(not volume)
+        self.volume_postproc.setVisible(volume)
+        self.tagging_widget.set_profile(
+            profile, reason=reason, enabled=not volume)
         self.manual_widget.set_label_entries(
-            self._label_entries(profile), follows=profile.label)
+            [] if volume else self._label_entries(profile),
+            follows=profile.label, reason=reason)
         self.clipping_widget.set_regions(
-            list(profile.clip_regions), follows=profile.label)
+            [] if volume else list(profile.clip_regions),
+            follows=profile.label, reason=reason)
 
         # A set already complete keeps tagging live across the switch; one
         # that is not (or a type that does not tag at all) must not.
         sel = self._selectors.get(profile.type_id)
         self.tagging_widget.set_seeds_complete(
-            bool(profile.tags and sel is not None and sel.is_complete))
+            bool(not volume and profile.tags
+                 and sel is not None and sel.is_complete))
 
         # The editor takes its label from the panel, so a switch that
         # changed the offered set must reach it too, or the next pick is
@@ -1973,6 +2089,22 @@ class CCDAF(QtWidgets.QMainWindow):
         mesh_ready = self.loader.mesh is not None
         done = len(sel.seeds) if sel is not None else 0
         total = profile.count
+
+        # A volume has no surface to pick on that means anything: its
+        # boundary is a derived view, and a seed placed there would name a
+        # vertex of a mesh that is rebuilt every time the volume changes.
+        if self._volume_mode():
+            self.seed_widget.set_progress("No seeds on a volume")
+            for setter in (self.seed_widget.set_start_enabled,
+                           self.seed_widget.set_undo_enabled,
+                           self.seed_widget.set_reset_enabled,
+                           self.seed_widget.set_save_enabled,
+                           self.seed_widget.set_load_enabled):
+                setter(False)
+            self.seed_widget.set_prompt(
+                "This is a <b>volumetric mesh</b>. Seed selection acts on a "
+                "surface, so it is unavailable here.")
+            return
 
         # A seed type with no points defined is a signpost: it says what the
         # mesh is and has nothing to pick, undo, reset, save or load. Every
@@ -2780,7 +2912,13 @@ class CCDAF(QtWidgets.QMainWindow):
     # Mesh rendering (3D quadrant)
     # ==================================================================
     def _replace_mesh(self, new_mesh: pv.PolyData) -> None:
-        self.loader.mesh = new_mesh
+        # Everything that lands here hands back a surface: post-processing,
+        # a clip, a segmentation converted back to polydata. Going through
+        # set_surface rather than assigning ``mesh`` is what drops a volume
+        # that is no longer the working mesh — leaving it would make
+        # ``kind`` say volume while the surface says otherwise, and saving
+        # would then write the stale tetrahedra.
+        self.loader.set_surface(new_mesh)
         self._mark_dirty()
         # Post-processing can add or drop arrays, so re-offer what the new
         # mesh actually has — keeping the user on their field if it survived.
@@ -2807,7 +2945,65 @@ class CCDAF(QtWidgets.QMainWindow):
                 on_status=self.statusBar().showMessage,
             )
             self.clipper.on_pose_changed = self._on_clip_pose_changed
-        self.mesh_info.update_info(new_mesh)
+        self.mesh_info.update_info(new_mesh, volume=self.loader.grid)
+
+    def _replace_volume(self, new_grid) -> None:
+        """Adopt ``new_grid`` as the working volume and rebuild around it.
+
+        The volume counterpart of :meth:`_replace_mesh`. The boundary
+        surface is re-derived by the loader, so every tool that reads
+        ``loader.mesh`` — the renderer, the picker, mesh info — follows
+        without knowing a remesh happened.
+        """
+        self.loader.set_volume(new_grid)
+        self._mark_dirty()
+        self._populate_fields(keep_selection=True)
+        # The tools take a surface, and the surface is a new object.
+        mesh = self.loader.mesh
+        self.tagger = RegionTagger(mesh)
+        self.editor = self._new_manual_editor(mesh)
+        self.manual_widget.set_undo_enabled(False)
+        self._render_field()
+        self.plotter.render()
+        self.mesh_info.update_info(mesh, volume=self.loader.grid)
+
+    def _action_remesh_volume(self) -> None:
+        """Adapt the working volume with MMG3D."""
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+        options = self.volume_postproc.options()
+        try:
+            options.validate()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid remesh options",
+                                          str(exc))
+            return
+
+        # A remesh on a real ventricle is tens of seconds, and MMG is a C
+        # library with no way to report progress, so the least the panel
+        # can do is stop looking idle.
+        self.volume_postproc.set_busy(True)
+        self.volume_postproc.set_status("Remeshing…")
+        self.statusBar().showMessage("Remeshing volume…")
+        QtWidgets.QApplication.processEvents()
+        before = self.loader.grid.n_cells
+        try:
+            new_grid = remesh_volume(
+                self.loader.grid, options,
+                on_status=self.statusBar().showMessage)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Remesh failed", str(exc))
+            self.volume_postproc.set_status("")
+            return
+        finally:
+            self.volume_postproc.set_busy(False)
+
+        self._replace_volume(new_grid)
+        note = (f"{before} → {new_grid.n_cells} tetrahedra"
+                + ("" if options.freeze_boundary
+                   else "; the boundary was adapted and has moved"))
+        self.volume_postproc.set_status(note)
+        self.statusBar().showMessage(f"Remesh complete — {note}.")
 
     def _action_export_eam(self) -> None:
         """Write the loaded mapping out as it currently stands — repairs,
@@ -2933,14 +3129,11 @@ class CCDAF(QtWidgets.QMainWindow):
                 pass
             self._mesh_actor = None
 
-        tags       = np.asarray(mesh.cell_data["elemTag"], dtype=int)
-        all_tags   = sorted(LABEL_COLORS.keys())
-        all_colors = [LABEL_COLORS[t] for t in all_tags]
+        tags = np.asarray(mesh.cell_data["elemTag"], dtype=int)
+        all_tags, all_colors, annotations = _region_legend(tags)
         tag_to_idx = {tag: i for i, tag in enumerate(all_tags)}
         indexed_tags = np.array([tag_to_idx.get(t, 0) for t in tags])
         mesh.cell_data["render_idx"] = indexed_tags
-
-        annotations = {j: _label_name(t) for j, t in enumerate(all_tags)}
         cmap = _discrete_cmap(all_colors)
 
         self._mesh_actor = self.plotter.add_mesh(
@@ -3012,13 +3205,34 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Loaded segmentation {Path(fn).name}{self._seg_orientation_note()}")
 
-    def _action_seg_save(self) -> None:
-        if self._seg_array is None:
-            return
+    #: Suffixes the segmentation writer can infer a format from, and the
+    #: one appended when the user types a name without any. SimpleITK
+    #: chooses its writer from the extension alone, so a bare name fails
+    #: deep inside ITK with "Unable to determine ImageIO writer" — a
+    #: message about a library the user never invoked.
+    SEG_SUFFIXES: Tuple[str, ...] = (".nii", ".nii.gz", ".nrrd", ".mha",
+                                     ".mhd", ".nhdr", ".img", ".hdr")
+    SEG_DEFAULT_SUFFIX: str = ".nii.gz"
+
+    @classmethod
+    def _with_segmentation_suffix(cls, filename: str) -> str:
+        """*filename* with a writable suffix, appending one if it has none."""
+        if filename.lower().endswith(cls.SEG_SUFFIXES):
+            return filename
+        return filename + cls.SEG_DEFAULT_SUFFIX
+
+    def _ask_segmentation_path(self) -> str:
+        """The save dialog, with a suffix guaranteed. ``""`` if cancelled."""
         fn, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save segmentation", str(self.recent_folder),
             "NIfTI (*.nii *.nii.gz);;All files (*)",
         )
+        return self._with_segmentation_suffix(fn) if fn else ""
+
+    def _action_seg_save(self) -> None:
+        if self._seg_array is None:
+            return
+        fn = self._ask_segmentation_path()
         if not fn:
             return
         self.recent_folder = Path(fn).resolve().parent
@@ -3075,6 +3289,13 @@ class CCDAF(QtWidgets.QMainWindow):
             "mesh": self.loader.mesh.copy(deep=True),
             "flip": bool(flip),
             "spacing": tuple(float(s) for s in spacing),
+            # The volume, when there was one, so converting back can
+            # return tetrahedra rather than demoting the mesh to its
+            # boundary; and the segmentation as it was at this moment, so
+            # the edits made to it can be measured against it.
+            "grid": (self.loader.grid.copy(deep=True)
+                     if self.loader.kind == VOLUME else None),
+            "image": img,
         }
         self.statusBar().showMessage(
             f"Voxelisation complete — {img.GetSize()} @ spacing {spacing} (flip={flip})."
@@ -3092,6 +3313,13 @@ class CCDAF(QtWidgets.QMainWindow):
         if not self._offer_save_segmentation(
                 "Save the segmentation as a NIfTI file before converting?"):
             return
+
+        # A segmentation made from a volume can go back to one, which is
+        # the whole reason the tetrahedra were kept. It is tried first and
+        # falls back to the surface when it cannot be done honestly.
+        if self._volume_conversion_available():
+            if self._convert_segmentation_to_volume(flip):
+                return
 
         # Convert segmentation to VTK polydata via marching cubes.
         self.statusBar().showMessage("Running marching cubes…")
@@ -3141,6 +3369,9 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.reset_camera()
         self.plotter.render()
         self._sync_seed_panel()
+        # The converted surface replaces whatever was loaded, so a volume
+        # session ends here and the panels it had closed re-open.
+        self._sync_profile_panels()
         if self._current_profile().count:
             self.seed_widget.set_prompt(
                 "Mesh loaded. Click 'Start seed selection'.")
@@ -3151,6 +3382,161 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             " ".join(["Segmentation converted and visualised."] + notes),
             20000 if notes else 0)
+
+    def _volume_conversion_available(self) -> bool:
+        """Whether this segmentation was made from a volume in this session.
+
+        One loaded from a NIfTI has no mesh behind it to cut, and one made
+        from a surface has no tetrahedra to keep.
+        """
+        src = self._seg_source
+        return bool(src and src.get("grid") is not None
+                    and src.get("image") is not None)
+
+    def _warn_perforation_risk(self) -> bool:
+        """Warn that a round trip can perforate a thin wall. False = abort.
+
+        Unconditional, and once per session. Not a judgement call dressed
+        up as one: two attempts at predicting *which* segmentations
+        perforate both failed — the minimum of the distance field is one
+        voxel for any shape, and the share eroded by one voxel tracks
+        surface-to-volume rather than thinness, scoring a solid sphere the
+        same as this ventricle. Whether a given mesh perforates is only
+        answerable after the fact, by comparing the genus.
+
+        So the warning states the risk rather than predicting it, and says
+        it once. Repeating it on every conversion would train the user to
+        dismiss it, which is worse than not saying it at all.
+        """
+        if self._perforation_warned:
+            return True
+        answer = QtWidgets.QMessageBox.question(
+            self, "A round trip through an image can perforate a thin wall",
+            "Voxelising drops tissue thinner than a voxel, which opens "
+            "holes through a thin wall. Finer voxels do not reliably "
+            "help: on a biventricular mesh whose source had no "
+            "perforations, the reconstruction came back with 28 handles "
+            "at 1 mm spacing, 12 at 0.5 mm and 15 at 0.25 mm.\n\n"
+            "To smooth or repair a mesh you already have, Mesh "
+            "post-processing → Remesh volume with 'Adapt the boundary "
+            "too' does it without going through an image and cannot "
+            "perforate anything.\n\n"
+            "This is said once per session. Continue?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes)
+        if answer != QtWidgets.QMessageBox.Yes:
+            return False
+        self._perforation_warned = True
+        return True
+
+    def _convert_segmentation_to_volume(self, flip: bool) -> bool:
+        """Rebuild the working volume from the corrected segmentation.
+
+        Returns True when it did, False to fall back to the surface path.
+
+        The fallback is not a failure mode to hide. The mesh being cut can
+        only lose elements, never gain them, so a correction that grew the
+        anatomy past the original boundary has nowhere to put the new
+        material and would be quietly clipped — the user asks for a
+        dilation and gets their original shape back with nothing to say
+        why. It is measured before anything is meshed, and said out loud.
+        """
+        src = self._seg_source
+        self._sync_sitk_from_array()
+        try:
+            growth = growth_outside(self._seg_sitk, src["image"])
+        except Exception:
+            return False               # different grids: not comparable
+
+        if growth.exceeds_tolerance:
+            # Three real answers, so three buttons rather than a yes/no
+            # that hides one of them. Keeping the volume and dropping the
+            # new material is a legitimate choice — a closing that bridges
+            # a cavity by a voxel is often not worth losing the mesh over —
+            # but it is only legitimate when the size of what is dropped is
+            # on screen, which is why it is never the default.
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("The correction grew the anatomy")
+            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setText(
+                f"{growth.volume:,.0f} mm³ of the corrected segmentation "
+                f"({100 * growth.fraction:.1f}%) lies outside the current "
+                f"mesh.")
+            box.setInformativeText(
+                "A volume can only be cut from the mesh you have: elements "
+                "can be dropped, never created. So material outside it "
+                "cannot be added.\n\n"
+                "• Convert to a surface — keeps the whole corrected shape, "
+                "with the labels and fibres carried onto the triangles. "
+                "Loses the tetrahedra.\n"
+                "• Carve anyway — keeps the tetrahedra, labels and fibres, "
+                "and drops everything outside the mesh. An edit that only "
+                "*adds* has nothing to cut, so this returns your current "
+                "mesh essentially unchanged.")
+            to_surface = box.addButton("Convert to a surface",
+                                       QtWidgets.QMessageBox.AcceptRole)
+            carve_anyway = box.addButton("Carve anyway",
+                                         QtWidgets.QMessageBox.DestructiveRole)
+            box.addButton(QtWidgets.QMessageBox.Cancel)
+            box.setDefaultButton(to_surface)
+            box.exec_()
+
+            clicked = box.clickedButton()
+            if clicked is to_surface:
+                return False           # fall through to the surface path
+            if clicked is not carve_anyway:
+                return True            # cancelled: nothing happens
+
+        # Whatever lies outside is dropped, whether the user was asked
+        # about it or not. Below the tolerance it is not worth stopping
+        # for, but it is always worth saying: silence is what would make
+        # it a surprise later.
+        self._growth_dropped = growth if growth.added else None
+
+        if flip != bool(src["flip"]):
+            # The mesh and the segmentation would be mirror images, and
+            # every element test would be made against the wrong side.
+            return False
+
+        # Voxelising a thin wall is lossy, and no spacing fixes it: on a
+        # mesh whose source had no perforations the round trip produced
+        # 28 handles at 1 mm, 12 at 0.5 mm and 15 at 0.25 mm, because the
+        # wall tapers to one voxel at every resolution. Said before the
+        # work rather than left to be discovered in the result.
+        if not self._warn_perforation_risk():
+            return True
+
+        self.statusBar().showMessage("Rebuilding the volume…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            grid = carve(
+                src["grid"], self._seg_sitk,
+                # The same smoothing the preview and the surface route
+                # use, so Update 3D predicts what comes out.
+                filt_stdev=list(self.seg_widget.gfilt_standard_deviation()),
+                filt_rfact=list(self.seg_widget.gfilt_radius_factor()),
+                on_status=self.statusBar().showMessage)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "Rebuilding the volume failed",
+                f"{exc}\n\nThe segmentation is unchanged.")
+            return True
+
+        before = src["grid"].n_cells
+        self._close_segmentation()
+        self._replace_volume(grid)
+        self.act_save.setEnabled(True)
+        self.plotter.reset_camera()
+        self.plotter.render()
+        self._sync_close_action()
+        dropped = getattr(self, "_growth_dropped", None)
+        self._growth_dropped = None
+        note = ("" if dropped is None else
+                f" {dropped.volume:,.0f} mm³ outside the mesh was dropped.")
+        self.statusBar().showMessage(
+            f"Volume rebuilt from the segmentation — "
+            f"{before} → {grid.n_cells} tetrahedra.{note}", 20000)
+        return True
 
     @staticmethod
     def _stray_shell_note(shells: StrayShells) -> str:
@@ -3350,10 +3736,7 @@ class CCDAF(QtWidgets.QMainWindow):
             return False
         if reply != QtWidgets.QMessageBox.Yes:
             return True
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save segmentation", str(self.recent_folder),
-            "NIfTI (*.nii *.nii.gz);;All files (*)",
-        )
+        fn = self._ask_segmentation_path()
         if not fn:
             return False
         self.recent_folder = Path(fn).resolve().parent
@@ -4042,6 +4425,43 @@ class CCDAF(QtWidgets.QMainWindow):
                 out = sitk.BinaryErode(sitk.BinaryDilate(mask, radius,kernelType=sitk.sitkBox), radius,kernelType=sitk.sitkBox)
             else:
                 raise Exception(f"{op} not known")
+
+            # Erosion — and the erode half of an opening — takes `radius`
+            # voxels off every side, so a structure thinner than twice the
+            # radius vanishes. That is arithmetic, not a fault, but losing
+            # a segmentation to it without being asked is not something to
+            # discover through the undo button.
+            before = int(np.count_nonzero(sitk.GetArrayFromImage(mask)))
+            after = int(np.count_nonzero(sitk.GetArrayFromImage(out)))
+            limit = SEG_SHRINK_WARN_FRACTION.get(op)
+            if limit is not None and before and after < limit * before:
+                left = ("nothing at all" if after == 0
+                        else f"{after:,} of {before:,} voxels "
+                             f"({100.0 * after / before:.1f}%)")
+                why = ("An opening erodes and then dilates, and anything "
+                       "thinner than twice the radius is gone before the "
+                       "dilation runs — so on a thin wall it removes the "
+                       "wall rather than smoothing it."
+                       if op == "morph_open" else
+                       "Erosion removes the radius from every side, so "
+                       "anything thinner than twice it disappears.")
+                answer = QtWidgets.QMessageBox.question(
+                    self, "This removes most of the segmentation",
+                    f"A {op.replace('morph_', '')} at radius "
+                    f"x={radius[0]}, y={radius[1]}, z={radius[2]} leaves "
+                    f"{left}.\n\n{why} A myocardial wall is often only "
+                    f"two or three voxels thick at 1 mm spacing.\n\n"
+                    f"Apply it anyway?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+                    QtWidgets.QMessageBox.Cancel)
+                if answer != QtWidgets.QMessageBox.Yes:
+                    self._seg_undo_stack.pop()
+                    self.seg_widget.set_undo_enabled(
+                        bool(self._seg_undo_stack))
+                    self.statusBar().showMessage(
+                        f"{op} cancelled — the segmentation is unchanged.")
+                    return
+
             self._seg_sitk = sitk.Cast(out, self._seg_sitk.GetPixelID())
 
         except Exception as exc:
@@ -4304,6 +4724,41 @@ def _eam_lookup_table(cmap_name: str, lo: float, hi: float,
         lut.SetTableValue(i, rgb[0], rgb[1], rgb[2], 1.0)
     lut.SetNanColor(*Color("lightgrey").float_rgb, 1.0)
     return lut
+
+
+def _region_legend(tags: np.ndarray):
+    """The colour table and names the Regions view should draw *tags* with.
+
+    Two cases, because one table cannot serve both.
+
+    An **atrial** tagging — every value a label the workflow defines —
+    gets the full six-entry legend in the anatomical colours, whether or
+    not each region has been tagged yet. That legend doubles as a key to
+    what tagging will produce, so it lists what is missing too.
+
+    **Anything else** — a mesh arriving with its own labelling, such as a
+    ventricular mesh whose 1 is the left ventricle and 2 the right — gets
+    a legend built from the values actually present, named by number and
+    coloured from
+    :data:`FALLBACK_TAG_COLORS`. Naming those after pulmonary veins would
+    be false, and folding them into the body colour (which is what a
+    fixed table does to a value it does not know) leaves the mesh a
+    single flat grey with no hint that it carries a labelling at all.
+
+    Returns ``(tags_in_order, colours, {index: name})``.
+    """
+    present = {int(t) for t in np.unique(tags)}
+    if present and present <= set(LABEL_COLORS):
+        ordered = sorted(LABEL_COLORS)
+        colours = [LABEL_COLORS[t] for t in ordered]
+        names = {j: _label_name(t) for j, t in enumerate(ordered)}
+        return ordered, colours, names
+
+    ordered = sorted(present) or [BODY_LABEL]
+    colours = [FALLBACK_TAG_COLORS[i % len(FALLBACK_TAG_COLORS)]
+               for i in range(len(ordered))]
+    names = {j: str(t) for j, t in enumerate(ordered)}
+    return ordered, colours, names
 
 
 def _label_name(tag: int) -> str:

@@ -36,6 +36,8 @@ import vtk
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist, pdist
 
+from ccdaf.core.mesh_loader import INTERNAL_ARRAYS
+
 
 # =====================================================================
 # data transfer
@@ -65,7 +67,7 @@ def _transfer_arrays(src: pv.PolyData, dst: pv.PolyData) -> None:
         tree = cKDTree(src_c)
         _, cid = tree.query(dst_c, k=1)
         for name in list(src.cell_data.keys()):
-            if name == "render_idx":
+            if name in INTERNAL_ARRAYS:
                 continue
             arr = np.asarray(src.cell_data[name])
             dst.cell_data[name] = arr[cid]
@@ -1159,7 +1161,7 @@ def smooth(mesh: pv.PolyData,
     for name in list(mesh.point_data.keys()):
         out.point_data[name] = np.asarray(mesh.point_data[name])
     for name in list(mesh.cell_data.keys()):
-        if name == "render_idx":
+        if name in INTERNAL_ARRAYS:
             continue
         out.cell_data[name] = np.asarray(mesh.cell_data[name])
     return out
@@ -1926,7 +1928,7 @@ def remesh(mesh: pv.PolyData,
         for name in list(mesh.point_data.keys()):
             out.point_data[name] = np.asarray(mesh.point_data[name])[pid]
     for name in list(mesh.cell_data.keys()):
-        if name == "render_idx":
+        if name in INTERNAL_ARRAYS:
             continue
         out.cell_data[name] = np.asarray(mesh.cell_data[name])[origin]
     return out
@@ -2107,7 +2109,7 @@ def _extract_cells(mesh: pv.PolyData, idx: np.ndarray) -> pv.PolyData:
     tri = _faces_to_tri(mesh)[idx]
     out = pv.PolyData(np.asarray(mesh.points), _tri_to_faces(tri))
     for name in list(mesh.cell_data.keys()):
-        if name == "render_idx":
+        if name in INTERNAL_ARRAYS:
             continue
         out.cell_data[name] = np.asarray(mesh.cell_data[name])[idx]
     for name in list(mesh.point_data.keys()):
@@ -2192,7 +2194,7 @@ def _restore_protected(cleaned: pv.PolyData,
 
     out = pv.PolyData(np.asarray(combined.points), _tri_to_faces(kept_tri))
     for name in list(combined.cell_data.keys()):
-        if name == "render_idx":
+        if name in INTERNAL_ARRAYS:
             continue
         arr = np.asarray(combined.cell_data[name])
         out.cell_data[name] = arr[first]
@@ -2222,7 +2224,7 @@ def _remove_non_manifold(mesh: pv.PolyData,
     keep = np.where(~bad)[0]
     out = pv.PolyData(np.asarray(mesh.points), _tri_to_faces(tri[keep]))
     for name in list(mesh.cell_data.keys()):
-        if name == "render_idx":
+        if name in INTERNAL_ARRAYS:
             continue
         out.cell_data[name] = np.asarray(mesh.cell_data[name])[keep]
     for name in list(mesh.point_data.keys()):
@@ -2247,7 +2249,7 @@ def _drop_degenerate(mesh: pv.PolyData,
         return mesh
     out = pv.PolyData(np.asarray(mesh.points), _tri_to_faces(tri[keep]))
     for name in list(mesh.cell_data.keys()):
-        if name == "render_idx":
+        if name in INTERNAL_ARRAYS:
             continue
         out.cell_data[name] = np.asarray(mesh.cell_data[name])[keep]
     for name in list(mesh.point_data.keys()):
@@ -2352,7 +2354,7 @@ def improve_quality(mesh: pv.PolyData,
     for name in list(mesh.point_data.keys()):
         out.point_data[name] = np.asarray(mesh.point_data[name])
     for name in list(mesh.cell_data.keys()):
-        if name != "render_idx":
+        if name not in INTERNAL_ARRAYS:
             out.cell_data[name] = np.asarray(mesh.cell_data[name])
     if tri.shape[0] == 0 or iterations < 1 or step <= 0.0:
         return out
