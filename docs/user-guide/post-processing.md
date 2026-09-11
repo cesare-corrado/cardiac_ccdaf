@@ -196,7 +196,25 @@ sequence of stages, so the panel asks for a size rather than for steps.
   adjacent edges. It does not set the size; it limits how *fast* the size may
   change. `auto` leaves MMG's own default of 1.3.
 - **boundary tol.** — the Hausdorff distance, how far an adapted boundary may
-  stray from the original.
+  stray from the original. `auto` uses **a fifth of the element size**, which
+  is what the validated runs used.
+
+!!! warning "Do not tighten the boundary tolerance casually"
+
+    Cost rises steeply as it tightens. At a 1.5 mm target on the 290,000-element
+    example:
+
+    | Tolerance | Time | Elements |
+    |---:|---:|---:|
+    | 0.3 | 23 s | 334,000 |
+    | 0.1 | 27 s | 358,000 |
+    | 0.05 | 56 s | 613,000 |
+
+    `auto` deliberately does **not** fall back to MMG's own default of 0.01
+    mesh units. That is a sensible figure for unit-scale geometry and absurd
+    for a heart in millimetres — it asks for the surface to within 10 µm, is
+    five times tighter than the slowest row above, and does not finish in any
+    usable time. It simply looks as though the application has hung.
 
 Both of those only apply while the boundary is being adapted, and are disabled
 otherwise. The tolerance is obvious — a frozen boundary does not move.

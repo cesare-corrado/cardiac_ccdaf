@@ -64,6 +64,22 @@ from ccdaf.core.volume_mesh import (
 #: The cell array carried across as MMG element references.
 TAG_FIELD = "elemTag"
 
+#: Boundary tolerance, as a fraction of the element size, used when the
+#: caller adapts the boundary without naming one.
+#:
+#: Not left to MMG. Its own default is 0.01 *mesh units* — a sensible
+#: figure for unit-scale geometry and absurd for a heart in millimetres,
+#: where it demands the surface be approximated to 10 um. Measured on a
+#: 290,000-element ventricle at a 1.5 mm target, the cost roughly doubles
+#: each time the tolerance halves: 23 s at 0.3, 27 s at 0.1, 56 s at
+#: 0.05. MMG's default is five times tighter again and does not finish in
+#: any usable time — it simply looks like the application has hung.
+#:
+#: A fifth of the element size keeps the surface well inside the
+#: discretisation it is being meshed at, and is what every validated run
+#: used.
+HAUSDORFF_FRACTION: float = 0.2
+
 
 @dataclass
 class RemeshOptions:
@@ -157,6 +173,19 @@ def decode_tags(refs: np.ndarray, values: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------
 # To and from MMG
 # ---------------------------------------------------------------------
+def _mean_edge(grid) -> float:
+    """Mean tetrahedron edge length of *grid*, in mesh units."""
+    tets = tetrahedra(grid)
+    if tets.size == 0:
+        return 0.0
+    points = np.asarray(grid.points, dtype=float)
+    pairs = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+    lengths = np.concatenate([
+        np.linalg.norm(points[tets[:, j]] - points[tets[:, i]], axis=1)
+        for i, j in pairs])
+    return float(lengths.mean())
+
+
 def _to_mmg(grid):
     """Build an ``MmgMesh3D`` from *grid*; return it and the tag values.
 
@@ -232,8 +261,18 @@ def remesh(grid,
         on_status(f"Remeshing {source.n_cells} tetrahedra…")
 
     mesh, values = _to_mmg(source)
+    sent = options.as_mmg_options()
+    if not options.freeze_boundary and "hausd" not in sent:
+        # Never left to MMG — see HAUSDORFF_FRACTION.
+        size = options.target_edge or options.max_edge or _mean_edge(source)
+        if size > 0.0:
+            sent["hausd"] = HAUSDORFF_FRACTION * size
+            if on_status is not None:
+                on_status(f"Boundary tolerance not set; using "
+                          f"{sent['hausd']:.3g} (a fifth of the element "
+                          f"size).")
     try:
-        report = mesh.remesh(**options.as_mmg_options())
+        report = mesh.remesh(**sent)
     except Exception as exc:
         raise RuntimeError(
             f"MMG3D could not remesh this volume: {exc}") from exc
@@ -260,4 +299,4 @@ def remesh(grid,
 
 
 __all__ = ["RemeshOptions", "remesh", "encode_tags", "decode_tags",
-           "TAG_FIELD"]
+           "TAG_FIELD", "HAUSDORFF_FRACTION"]

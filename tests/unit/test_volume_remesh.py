@@ -270,3 +270,54 @@ def test_transfer_leaves_the_destination_a_volume(source):
     assert dst.n_cells == cells and dst.n_points == points
     assert set(np.unique(dst.cell_data["elemTag"]).tolist()) <= {1, 2}
     assert np.isfinite(np.asarray(dst.point_data["scar_probability"])).all()
+
+
+# ------------------------------------------------- the boundary tolerance
+def test_an_adapting_boundary_is_never_left_to_mmgs_default(source):
+    """MMG's own default is 0.01 mesh units and does not finish here.
+
+    On a heart in millimetres it demands the surface to within 10 um. At
+    a 1.5 mm target the cost roughly doubles each time the tolerance
+    halves — 23 s at 0.3, 27 s at 0.1, 56 s at 0.05 — and the default is
+    five times tighter again, so leaving it unset reads as a hang.
+    """
+    from ccdaf.core.volume_postprocessor import (
+        HAUSDORFF_FRACTION, _to_mmg,
+    )
+
+    options = RemeshOptions(target_edge=1.5, freeze_boundary=False)
+    # The options alone carry no tolerance ...
+    assert "hausd" not in options.as_mmg_options()
+
+    # ... and remesh must supply one rather than pass that through.
+    seen = {}
+    real_remesh = type(_to_mmg(source)[0]).remesh
+
+    def spy(self, **kwargs):
+        seen.update(kwargs)
+        return real_remesh(self, **kwargs)
+
+    import mmgpy
+    original = mmgpy.MmgMesh3D.remesh
+    try:
+        mmgpy.MmgMesh3D.remesh = spy
+        remesh(source, options)
+    finally:
+        mmgpy.MmgMesh3D.remesh = original
+
+    assert "hausd" in seen, "an adapting boundary must be given a tolerance"
+    assert seen["hausd"] == pytest.approx(HAUSDORFF_FRACTION * 1.5)
+
+
+def test_an_explicit_tolerance_is_respected(source):
+    options = RemeshOptions(target_edge=1.5, freeze_boundary=False,
+                            hausdorff=0.05)
+    assert options.as_mmg_options()["hausd"] == pytest.approx(0.05)
+
+
+def test_a_frozen_boundary_gets_no_tolerance(source):
+    """It cannot move, so a tolerance would describe nothing."""
+    options = RemeshOptions(target_edge=1.5, freeze_boundary=True)
+    sent = options.as_mmg_options()
+    assert "hausd" not in sent
+    assert sent["nosurf"] is True

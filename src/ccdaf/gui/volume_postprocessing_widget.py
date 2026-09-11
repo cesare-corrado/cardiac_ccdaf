@@ -116,6 +116,13 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
         hausd_tip = _tip(
             "Hausdorff distance: how far the adapted boundary may stray "
             "from the original, in mesh units.",
+            "<b>auto</b> uses a fifth of the element size, which is what "
+            "the validated runs used. It does <i>not</i> fall back to "
+            "MMG's own default of 0.01 mesh units — on a heart in "
+            "millimetres that asks for the surface to within 10&nbsp;µm "
+            "and does not finish.",
+            "Cost rises steeply as it tightens: at a 1.5&nbsp;mm target, "
+            "23&nbsp;s at 0.3, 27&nbsp;s at 0.1, 56&nbsp;s at 0.05.",
             "Only applies while <i>Adapt the boundary too</i> is ticked — "
             "a frozen boundary does not move at all.",
         )
