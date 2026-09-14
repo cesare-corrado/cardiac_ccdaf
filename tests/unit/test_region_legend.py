@@ -93,3 +93,11 @@ def test_a_mixed_tagging_is_not_treated_as_atrial():
 def test_an_empty_tagging_still_yields_a_table():
     ordered, colours, names = _region_legend(np.asarray([], dtype=int))
     assert ordered and colours and names
+
+
+def test_a_material_labelling_is_never_named_after_veins():
+    """tissueTag values that happen to be atrial numbers are still materials."""
+    ordered, colours, names = _region_legend(np.asarray([1, 11, 19]), anatomical=False)
+    assert ordered == [1, 11, 19]
+    assert list(names.values()) == ["1", "11", "19"]
+    assert len(set(colours)) == 3

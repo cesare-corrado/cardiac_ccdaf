@@ -85,7 +85,16 @@ asking first when accepting would change tags — so a mesh reloaded from an
 earlier session can start at this step. An already-tagged mesh opens clipping
 as soon as it loads.
 
-## 6. Export
+## 6. Assign material regions (optional)
+
+For a simulation, **Actions → Assign tissue property** marks every element with
+a material region read off a scalar field (for example healthy tissue, border
+zone and scar from late-enhancement intensity) and writes it as `tissueTag`.
+Untick any tissue that should not be classified, such as a right ventricle with
+no LGE, and give it its own ID. See
+[Tissue properties](user-guide/tissue-properties.md).
+
+## 7. Export
 
 **File → Save data** writes the mesh (with tags, seeds, and — if a mapping is
 loaded — electrodes). If you close or quit with unsaved changes, CCDAF asks

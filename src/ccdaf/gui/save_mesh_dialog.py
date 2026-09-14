@@ -26,6 +26,7 @@ from typing import List, Optional, Sequence
 from PyQt5 import QtWidgets
 
 from ccdaf.core.mesh_loader import DEFAULT_SAVE_FIELDS
+from ccdaf.core.tissue_property import TISSUE_TAG
 from ccdaf.gui.field_select_dialog import FieldSelectDialog
 
 FORMAT_VTK = "vtk"
@@ -88,9 +89,12 @@ class SaveMeshDialog(QtWidgets.QFileDialog):
                 if f not in self._point_fields and f not in self._cell_fields
             ]
             self._cell_fields += self._derived
+            # tissueTag is ticked whenever the mesh has one: it exists only
+            # because someone assigned it, and dropping it on save would be
+            # the same silent loss this dialog exists to prevent.
             self._selected = [
                 f for f in self._cell_fields + self._point_fields
-                if f in DEFAULT_SAVE_FIELDS
+                if f in DEFAULT_SAVE_FIELDS or f == TISSUE_TAG
             ]
 
         self.cmb_format = QtWidgets.QComboBox()

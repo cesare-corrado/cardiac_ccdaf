@@ -158,6 +158,14 @@ def read_bundle(path: str
         tags = np.asarray(payload["elemTag"], dtype=np.int32).ravel()
         if tags.shape[0] == mesh.n_cells:
             mesh.cell_data["elemTag"] = tags
+    # Any other cell field the bundle was saved with (``tissueTag``, …).
+    # Optional: a bundle written before the key existed simply has none.
+    # ``elemTag`` keeps its own key and is never taken from here.
+    for name, values in (payload.get("cell_fields") or {}).items():
+        values = np.asarray(values)
+        if str(name) != "elemTag" and values.ndim >= 1 \
+                and values.shape[0] == mesh.n_cells:
+            mesh.cell_data[str(name)] = values
 
     point_sets: Dict[str, Dict[str, np.ndarray]] = {}
     for profile in SEED_PROFILE_ORDER:

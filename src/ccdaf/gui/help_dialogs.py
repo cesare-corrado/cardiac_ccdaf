@@ -109,6 +109,12 @@ commits the manual-correction selection batch.</p>
       the body or a neighbouring vein leaves those untouched.
       Ticking the box accepts the tagging for you if that step is still open,
       so a mesh reloaded from an earlier session can start here.</li>
+  <li><b>Assign material regions</b> (optional) — <i>Actions &rarr; Assign
+      tissue property</i> marks every element with a material region read off a
+      scalar field (for example healthy tissue, border zone and scar from LGE)
+      and writes <code>tissueTag</code>. Untick tissue that should not be
+      classified, such as a right ventricle with no LGE, and give it its own
+      ID.</li>
   <li><b>Export</b> — <i>File &rarr; Save data</i>, or <i>EAM &rarr; Export</i> for a
       Carto bundle / VTK. Closing or quitting with unsaved changes asks first.</li>
 </ol>

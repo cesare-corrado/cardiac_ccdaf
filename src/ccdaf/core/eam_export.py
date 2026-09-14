@@ -115,7 +115,7 @@ def electrodes_at(electrodes: Optional[dict],
 #: Payload keys ``export_binary`` writes itself. A point set may not
 #: claim one of them: the collision would silently replace the surface
 #: or the electrodes with a name → xyz mapping.
-_RESERVED_KEYS = frozenset(("surface", "electrodes", "elemTag"))
+_RESERVED_KEYS = frozenset(("surface", "electrodes", "elemTag", "cell_fields"))
 
 
 def _plain_seeds(seeds) -> dict:
@@ -133,8 +133,15 @@ def export_binary(path: str, mesh: pv.PolyData,
                   electrodes: Optional[dict] = None,
                   electrode_points: Optional[np.ndarray] = None,
                   point_sets: Optional[Mapping[str, dict]] = None,
-                  include_elem_tag: bool = False) -> None:
+                  include_elem_tag: bool = False,
+                  cell_fields: Optional[Mapping[str, np.ndarray]] = None) -> None:
     """Pickle ``{'surface': <reader dict>, 'electrodes': <record>}``.
+
+    ``cell_fields`` maps a cell field's name to its values — ``tissueTag``
+    and any other per-triangle array the Carto surface dict has no room
+    for — and is written under one ``"cell_fields"`` key only when non-empty.
+    ``elemTag`` is never taken from it: it keeps its own key, so a bundle
+    stays readable by a version that knows nothing of ``cell_fields``.
 
     ``point_sets`` and ``include_elem_tag`` extend the payload for the
     File → Save bundle. ``point_sets`` maps a seed profile's ``export_key``
@@ -162,6 +169,18 @@ def export_binary(path: str, mesh: pv.PolyData,
         payload[str(key)] = _plain_seeds(points)
     if include_elem_tag and "elemTag" in mesh.cell_data:
         payload["elemTag"] = np.asarray(mesh.cell_data["elemTag"]).astype(int)
+    extra = {}
+    for name, values in (cell_fields or {}).items():
+        if str(name) == "elemTag":
+            continue
+        values = np.asarray(values)
+        if values.ndim < 1 or values.shape[0] != mesh.n_cells:
+            raise ValueError(
+                f"cell field '{name}' has {values.shape[0] if values.ndim else 0} "
+                f"values for {mesh.n_cells} cells")
+        extra[str(name)] = values
+    if extra:
+        payload["cell_fields"] = extra
     with open(path, "wb") as fh:
         pickle.dump(payload, fh)
 
