@@ -112,6 +112,8 @@ from ccdaf.core.tissue_property import (
     TISSUE_TAG, availability as tissue_availability,
 )
 from ccdaf.gui.tissue_property_dialog import TissuePropertyDialog
+from ccdaf.core.carp_export import availability as carp_availability
+from ccdaf.gui.carp_export_dialog import CarpExportDialog
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
@@ -396,7 +398,16 @@ class CCDAF(QtWidgets.QMainWindow):
             "Mark elements with material regions (tissueTag) read off a scalar field.")
         self.act_assign_tissue.triggered.connect(self._action_assign_tissue_property)
         actions_menu.addAction(self.act_assign_tissue)
-        self._sync_tissue_action()
+
+        # --- Export menu: the working mesh in another tool's format -----
+        export_menu = menubar.addMenu("E&xport")
+        export_menu.setToolTipsVisible(True)
+        self.act_export_carp = QtWidgets.QAction("&Carp…", self)
+        self.act_export_carp.setStatusTip(
+            "Write the mesh as CARP .pts, .elem and .lon files for simulation.")
+        self.act_export_carp.triggered.connect(self._action_export_carp)
+        export_menu.addAction(self.act_export_carp)
+        self._sync_menu_actions()
 
         # Visualise menu — toggles the left-panel sections.
         self.visualise_menu = menubar.addMenu("&Visualise")
@@ -1477,7 +1488,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_save.setEnabled(False)
         self.act_seg_from_mesh.setEnabled(False)
         self._sync_close_action()
-        self._sync_tissue_action()
+        self._sync_menu_actions()
         self._clear_dirty()
         self.statusBar().showMessage("Closed.")
 
@@ -1858,7 +1869,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self.vis_widget.select_field(previous)
         # A mesh arriving or changing is what makes a field to read a
         # tissue property from appear or disappear.
-        self._sync_tissue_action()
+        self._sync_menu_actions()
 
     def _render_field(self, *_args) -> None:
         """Draw whichever field the visualisation widget has selected.
@@ -3032,7 +3043,7 @@ class CCDAF(QtWidgets.QMainWindow):
     # ==================================================================
     # Actions menu
     # ==================================================================
-    def _sync_tissue_action(self) -> None:
+    def _sync_menu_actions(self) -> None:
         """Actions → Assign tissue property applies to a loaded mesh with a
         scalar field to read, outside the segmentation view. Disabled, its
         tooltip says which of those is missing."""
@@ -3042,6 +3053,12 @@ class CCDAF(QtWidgets.QMainWindow):
             enabled, why = tissue_availability(self.loader.dataset)
         self.act_assign_tissue.setEnabled(enabled)
         self.act_assign_tissue.setToolTip(why)
+
+        # Exporting reads the mesh and changes nothing, so it needs only a
+        # mesh — not a field to read, and not the segmentation closed.
+        can_export, why_export = carp_availability(self.loader.dataset)
+        self.act_export_carp.setEnabled(can_export)
+        self.act_export_carp.setToolTip(why_export)
 
     def _action_assign_tissue_property(self) -> None:
         """Write ``tissueTag`` from the dialog's choices, then show it."""
@@ -3068,6 +3085,20 @@ class CCDAF(QtWidgets.QMainWindow):
         self.vis_widget.select_field(TISSUE_TAG)
         self._set_section_visible("visualisation", True)
         self._render_field()
+        self.statusBar().showMessage(result.summary(), 30000)
+
+    def _action_export_carp(self) -> None:
+        """Export → Carp: write the working mesh as CARP files."""
+        dataset = self.loader.dataset
+        if dataset is None:
+            return
+        stem = Path(self.loader.path).stem if self.loader.path else "mesh"
+        dlg = CarpExportDialog(dataset, start_dir=str(self.recent_folder),
+                               default_name=stem.replace(" ", "_"), parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted or dlg.result() is None:
+            return
+        result = dlg.result()
+        self.recent_folder = result.paths[0].resolve().parent
         self.statusBar().showMessage(result.summary(), 30000)
 
     def _action_export_eam(self) -> None:
@@ -3784,7 +3815,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_seg_to_vtk.setEnabled(True)
         self.act_seg_close.setEnabled(True)
         self.act_save.setEnabled(False)
-        self._sync_tissue_action()
+        self._sync_menu_actions()
         self._set_section_visible("segmentation", True)
         #close other sections to tyding up left panel
         for other_sec in ["meshinfo","postproc","seeds","tagging","manual","clipping"]:
@@ -3852,7 +3883,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_seg_to_vtk.setEnabled(False)
         self.act_seg_close.setEnabled(False)
         self.act_save.setEnabled(self.loader.mesh is not None)
-        self._sync_tissue_action()
+        self._sync_menu_actions()
         self._set_section_visible("segmentation", False)
         self._exit_segmentation_mode()
         for other_sec in ["meshinfo","postproc","seeds","tagging","manual","clipping"]:

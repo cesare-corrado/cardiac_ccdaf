@@ -112,6 +112,26 @@ def tetrahedra(dataset) -> np.ndarray:
     return np.asarray(cells, dtype=np.int64)
 
 
+def element_connectivity(dataset) -> np.ndarray:
+    """The ``(n, 3)`` triangles of a surface, or ``(n, 4)`` tetrahedra of a volume.
+
+    One array whichever kind the working mesh is, for everything written per
+    element: a value, a size, a neighbour across a shared facet, a row in an
+    exported element file. Anything else raises, because each of those rules
+    is written for one element shape.
+    """
+    if isinstance(dataset, pv.PolyData):
+        faces = np.asarray(dataset.faces)
+        if (faces.size == 0 or faces.size % 4 or np.any(faces[::4] != 3)
+                or faces.size // 4 != dataset.n_cells):
+            raise ValueError("the surface must contain triangles only")
+        return faces.reshape(-1, 4)[:, 1:].astype(np.int64)
+    tets = tetrahedra(dataset)
+    if len(tets) == 0 or len(tets) != dataset.n_cells:
+        raise ValueError("the volume must contain tetrahedra only")
+    return tets
+
+
 def signed_volumes(points: np.ndarray, tets: np.ndarray) -> np.ndarray:
     """Signed volume of every tetrahedron.
 
@@ -183,6 +203,7 @@ __all__ = [
     "SURFACE", "VOLUME", "TETRA",
     "distinct_cell_types", "cell_dimension", "solid_cell_types",
     "is_volume", "kind_of", "validate_tetrahedral",
-    "tetrahedra", "signed_volumes", "inverted_count", "orient_positive",
+    "tetrahedra", "element_connectivity",
+    "signed_volumes", "inverted_count", "orient_positive",
     "boundary_surface",
 ]

@@ -99,7 +99,9 @@ no LGE, and give it its own ID. See
 **File → Save data** writes the mesh (with tags, seeds, and — if a mapping is
 loaded — electrodes). If you close or quit with unsaved changes, CCDAF asks
 first — **Save**, **Discard** or **Cancel**. For EAM, **EAM → Export** writes a Carto binary bundle or
-a VTK. See [File formats](file-formats.md).
+a VTK. For a simulation, **Export → Carp** writes `.pts`, `.elem` and `.lon`
+files, with your material regions in the element tag column; see
+[Export](user-guide/export.md). See also [File formats](file-formats.md).
 
 ---
 
