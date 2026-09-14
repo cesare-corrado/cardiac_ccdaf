@@ -106,6 +106,34 @@ version of CCDAF opens a new bundle and simply leaves those fields out.
 - **VTK** (`EXPORT_VTK`) — the surface with every field, for ParaView.
   Electrodes are separate geometry and are **not** embedded in the VTK.
 
+## CARP — `.pts` / `.elem` / `.lon`
+
+**Export → Carp** writes the working mesh as three ASCII files sharing one
+prefix, for a simulator such as openCARP. See
+[Export](user-guide/export.md).
+
+| File | Contents |
+|---|---|
+| `.pts` | node count, then `x y z` per node, **in micrometres** |
+| `.elem` | element count, then `Tt` + four nodes (tetrahedron) or `Tr` + three (triangle), then an integer region tag |
+| `.lon` | `1` or `2` (fibre, or fibre and sheet), then one direction per element |
+
+CCDAF multiplies the point coordinates by a **scale factor** (1000 by default)
+because the mesh is normally in millimetres and CARP reads micrometres.
+
+The region tag is what a simulation assigns properties by: `tissueTag` written
+there carries the material regions into the simulation, and a tag no region
+lists falls into region 0. The format allows the column to be left out, but
+CCDAF always writes it — as 0 for every element when no array is chosen — so
+the file states each element's region rather than leaving it to convention. A
+reader written for files without the column has to skip the last field of each
+row. Tags must be whole and non-negative; above 255 CCDAF warns, because older
+CARP versions held the tag in an unsigned char.
+
+A mesh with no fibre field is written with the fibre-only form and `(1, 0, 0)`
+everywhere, which is valid only for isotropic conductivity. Vectors that are
+not unit length are normalised in the file, never in the mesh.
+
 ## Segmentation images — `.nii` / `.nii.gz`
 
 Label images are read/written with SimpleITK. Surfaces are reconstructed with

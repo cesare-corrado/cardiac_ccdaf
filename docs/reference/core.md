@@ -17,3 +17,4 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.volume_postprocessor
 ::: ccdaf.core.volume_from_segmentation
 ::: ccdaf.core.tissue_property
+::: ccdaf.core.carp_export

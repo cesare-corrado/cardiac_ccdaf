@@ -116,7 +116,10 @@ commits the manual-correction selection batch.</p>
       classified, such as a right ventricle with no LGE, and give it its own
       ID.</li>
   <li><b>Export</b> — <i>File &rarr; Save data</i>, or <i>EAM &rarr; Export</i> for a
-      Carto bundle / VTK. Closing or quitting with unsaved changes asks first.</li>
+      Carto bundle / VTK. For a simulation, <i>Export &rarr; Carp</i> writes
+      <code>.pts</code>, <code>.elem</code> and <code>.lon</code> files, in
+      micrometres, with the material regions in the element tag column.
+      Closing or quitting with unsaved changes asks first.</li>
 </ol>
 <p>See <b>Help &rarr; Documentation</b> for the full guide.</p>
 """

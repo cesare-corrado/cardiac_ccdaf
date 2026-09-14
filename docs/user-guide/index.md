@@ -2,7 +2,7 @@
 
 CCDAF is organised as a **3D viewport** with a column of collapsible **side
 panels**, one per stage of the workflow. The menubar carries **File**,
-**Segmentation**, **EAM**, **Actions** and **Visualise** menus.
+**Segmentation**, **EAM**, **Actions**, **Export** and **Visualise** menus.
 
 Most panels stay disabled until the step before them is done — you place seeds
 before tagging, tag before clipping, and so on.
@@ -32,6 +32,7 @@ before tagging, tag before clipping, and so on.
 | Menu item | Purpose | Page |
 |---|---|---|
 | Actions → Assign tissue property | Mark every element with a material region (`tissueTag`) read off a scalar field | [Tissue properties](tissue-properties.md) |
+| Export → Carp | Write the mesh as CARP `.pts`, `.elem` and `.lon` files for simulation | [Export](export.md) |
 
 ## Views
 

@@ -73,7 +73,7 @@ import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components, dijkstra
 
 from ccdaf.core.mesh_loader import INTERNAL_ARRAYS
-from ccdaf.core.volume_mesh import tetrahedra
+from ccdaf.core.volume_mesh import element_connectivity
 
 #: The cell array this module writes.
 TISSUE_TAG = "tissueTag"
@@ -115,25 +115,6 @@ HEALTHY_FRACTION_WARN = 0.5
 # ---------------------------------------------------------------------------
 # Mesh helpers
 # ---------------------------------------------------------------------------
-def element_connectivity(dataset) -> np.ndarray:
-    """The ``(n, 3)`` triangles of a surface or ``(n, 4)`` tetrahedra of a volume.
-
-    Raises when the dataset holds anything else, because every rule here —
-    a value per element, a size per element, a neighbour per shared facet —
-    is written for one element shape.
-    """
-    if isinstance(dataset, pv.PolyData):
-        faces = np.asarray(dataset.faces)
-        if (faces.size == 0 or faces.size % 4 or np.any(faces[::4] != 3)
-                or faces.size // 4 != dataset.n_cells):
-            raise ValueError("the surface must contain triangles only")
-        return faces.reshape(-1, 4)[:, 1:].astype(np.int64)
-    tets = tetrahedra(dataset)
-    if len(tets) == 0 or len(tets) != dataset.n_cells:
-        raise ValueError("the volume must contain tetrahedra only")
-    return tets
-
-
 def element_sizes(dataset) -> np.ndarray:
     """Area of every triangle, or volume of every tetrahedron."""
     sizes = dataset.compute_cell_sizes(length=False, area=True, volume=True)
