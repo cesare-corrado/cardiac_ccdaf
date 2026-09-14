@@ -23,7 +23,10 @@ The contract:
   two entry points interoperate;
 * the LA-UAC landmark set rides in the same bundle under its own
   ``"landmarks_LA_UAC"`` key, alongside the seeds, and round-trips
-  independently.
+  independently;
+* other cell fields (``tissueTag``, …) ride under one ``"cell_fields"`` key,
+  never override ``elemTag``, must have one value per cell, and a bundle
+  written before the key existed loads exactly as before.
 
 Synthetic mesh; no display, no Qt.
 """
@@ -209,3 +212,65 @@ def test_seed_loader_reads_a_bundle(tmp_path):
     seeds = load_seeds(path, key=LA)  # the seed panel's Load path
     assert set(seeds) == set(SEEDS)
     assert np.allclose(seeds["MV"], SEEDS["MV"])
+
+
+def test_cell_fields_round_trip(tmp_path):
+    path = tmp_path / "tissue.pkl"
+    mesh = _mesh()
+    tissue = (np.arange(mesh.n_cells) % 3).astype(np.int32)
+    export_binary(path, mesh, point_sets={LA: SEEDS}, include_elem_tag=True,
+                  cell_fields={"tissueTag": tissue})
+    back, point_sets, _ = read_bundle(path)
+    assert np.array_equal(np.asarray(back.cell_data["tissueTag"]), tissue)
+    assert np.array_equal(np.asarray(back.cell_data["elemTag"]),
+                          np.asarray(mesh.cell_data["elemTag"]))
+    assert set(point_sets[SEED_LA_PROFILE.type_id]) == set(SEEDS)
+
+
+def test_a_bundle_without_cell_fields_loads_as_before(tmp_path):
+    path = tmp_path / "old_format.pkl"
+    export_binary(path, _mesh(), include_elem_tag=True)
+    with open(path, "rb") as fh:
+        payload = pickle.load(fh)
+    assert "cell_fields" not in payload
+    back, _, _ = read_bundle(path)
+    assert set(back.cell_data.keys()) == {"elemTag"}
+
+
+def test_an_empty_cell_fields_mapping_writes_no_key(tmp_path):
+    path = tmp_path / "empty_cells.pkl"
+    export_binary(path, _mesh(), cell_fields={})
+    with open(path, "rb") as fh:
+        payload = pickle.load(fh)
+    assert set(payload) == {"surface", "electrodes"}
+
+
+def test_cell_fields_never_override_elem_tag(tmp_path):
+    path = tmp_path / "no_override.pkl"
+    mesh = _mesh()
+    export_binary(path, mesh, include_elem_tag=True,
+                  cell_fields={"elemTag": np.zeros(mesh.n_cells, dtype=np.int32),
+                               "tissueTag": np.ones(mesh.n_cells, dtype=np.int32)})
+    with open(path, "rb") as fh:
+        payload = pickle.load(fh)
+    assert set(payload["cell_fields"]) == {"tissueTag"}
+
+    # A file written by hand with elemTag inside cell_fields is read the same way.
+    payload["cell_fields"]["elemTag"] = np.zeros(mesh.n_cells, dtype=np.int32)
+    with open(path, "wb") as fh:
+        pickle.dump(payload, fh)
+    back, _, _ = read_bundle(path)
+    assert np.array_equal(np.asarray(back.cell_data["elemTag"]),
+                          np.asarray(mesh.cell_data["elemTag"]))
+
+
+def test_cell_fields_need_one_value_per_cell(tmp_path):
+    mesh = _mesh()
+    with pytest.raises(ValueError):
+        export_binary(tmp_path / "short.pkl", mesh,
+                      cell_fields={"tissueTag": np.zeros(mesh.n_cells - 1)})
+
+
+def test_the_cell_fields_key_is_reserved(tmp_path):
+    with pytest.raises(ValueError):
+        export_binary(tmp_path / "clash.pkl", _mesh(), point_sets={"cell_fields": SEEDS})

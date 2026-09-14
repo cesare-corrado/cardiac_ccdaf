@@ -108,6 +108,10 @@ from ccdaf.core.seed_io import load_point_set, save_seeds
 from ccdaf.core.volume_mesh import VOLUME
 from ccdaf.core.volume_postprocessor import remesh as remesh_volume
 from ccdaf.core.volume_from_segmentation import carve, growth_outside
+from ccdaf.core.tissue_property import (
+    TISSUE_TAG, availability as tissue_availability,
+)
+from ccdaf.gui.tissue_property_dialog import TissuePropertyDialog
 from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
@@ -158,7 +162,7 @@ _PV_LABELS = tuple(lbl for lbl in ALLOWED_LABELS if lbl != BODY_LABEL)
 # over these would be meaningless, so the visualisation widget hands them
 # to the region path (discrete colours + names) instead. Further label
 # fields belong here rather than in a paradigm of their own.
-CATEGORICAL_FIELDS = ("elemTag",)
+CATEGORICAL_FIELDS = ("elemTag", TISSUE_TAG)
 
 # EAM scalar bar: horizontal, along the bottom. Sizes are fractions of the
 # viewport, so the height giving a 20:1 bar on screen depends on the window's
@@ -382,6 +386,17 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_eam_export.setEnabled(False)
         self.act_eam_export.triggered.connect(self._action_export_eam)
         eam_menu.addAction(self.act_eam_export)
+
+        # --- Actions menu: data derived on the working mesh -------------
+        actions_menu = menubar.addMenu("&Actions")
+        # A disabled item says why through its tooltip.
+        actions_menu.setToolTipsVisible(True)
+        self.act_assign_tissue = QtWidgets.QAction("Assign tissue property…", self)
+        self.act_assign_tissue.setStatusTip(
+            "Mark elements with material regions (tissueTag) read off a scalar field.")
+        self.act_assign_tissue.triggered.connect(self._action_assign_tissue_property)
+        actions_menu.addAction(self.act_assign_tissue)
+        self._sync_tissue_action()
 
         # Visualise menu — toggles the left-panel sections.
         self.visualise_menu = menubar.addMenu("&Visualise")
@@ -1462,6 +1477,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_save.setEnabled(False)
         self.act_seg_from_mesh.setEnabled(False)
         self._sync_close_action()
+        self._sync_tissue_action()
         self._clear_dirty()
         self.statusBar().showMessage("Closed.")
 
@@ -1545,7 +1561,8 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _save_bundle(self, fn: str, fields: "list[str]") -> None:
         """Write the pickle bundle: surface (chosen point fields), seeds,
-        electrodes and elemTag, so the mesh reloads with all of them."""
+        electrodes, elemTag and the other chosen cell fields (tissueTag, …),
+        so the mesh reloads with all of them."""
         keep = set(fields)
         surface = self.loader.mesh.copy(deep=True)
         # polydata_to_carto_dict turns every 1-D point field into a colour
@@ -1563,6 +1580,10 @@ class CCDAF(QtWidgets.QMainWindow):
             electrode_points=self._eam_electrode_points,
             point_sets=point_sets,
             include_elem_tag=("elemTag" in keep),
+            cell_fields={name: np.asarray(surface.cell_data[name])
+                         for name in keep
+                         if name in surface.cell_data and name != "elemTag"
+                         and name not in INTERNAL_ARRAYS},
         )
         parts = [f"{len(points)} {key}" for key, points in point_sets.items()]
         if electrodes is not None:
@@ -1835,6 +1856,9 @@ class CCDAF(QtWidgets.QMainWindow):
             previous = "elemTag" if "elemTag" in mesh.cell_data else None
         if previous is not None:
             self.vis_widget.select_field(previous)
+        # A mesh arriving or changing is what makes a field to read a
+        # tissue property from appear or disappear.
+        self._sync_tissue_action()
 
     def _render_field(self, *_args) -> None:
         """Draw whichever field the visualisation widget has selected.
@@ -1849,7 +1873,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self._render_mesh()
             return
         if self.vis_widget.is_categorical():
-            self._render_mesh()
+            self._render_mesh(self.vis_widget.current_field())
         else:
             self._render_scalar_field()
 
@@ -3005,6 +3029,47 @@ class CCDAF(QtWidgets.QMainWindow):
         self.volume_postproc.set_status(note)
         self.statusBar().showMessage(f"Remesh complete — {note}.")
 
+    # ==================================================================
+    # Actions menu
+    # ==================================================================
+    def _sync_tissue_action(self) -> None:
+        """Actions → Assign tissue property applies to a loaded mesh with a
+        scalar field to read, outside the segmentation view. Disabled, its
+        tooltip says which of those is missing."""
+        if self._seg_array is not None:
+            enabled, why = False, "Close the segmentation first."
+        else:
+            enabled, why = tissue_availability(self.loader.dataset)
+        self.act_assign_tissue.setEnabled(enabled)
+        self.act_assign_tissue.setToolTip(why)
+
+    def _action_assign_tissue_property(self) -> None:
+        """Write ``tissueTag`` from the dialog's choices, then show it."""
+        dataset = self.loader.dataset
+        if dataset is None:
+            return
+        try:
+            dlg = TissuePropertyDialog(dataset, parent=self)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Assign tissue property", str(exc))
+            return
+        if dlg.exec_() != QtWidgets.QDialog.Accepted or dlg.result() is None:
+            return
+        result = dlg.result()
+        dataset.cell_data[TISSUE_TAG] = result.tags
+        if self.loader.kind == VOLUME:
+            # The boundary surface carries a copy of the volume's cell data,
+            # taken when it was derived, so it is derived again for the view
+            # to show the new array. The geometry is untouched.
+            self._replace_volume(dataset)
+        else:
+            self._mark_dirty()
+            self._populate_fields(keep_selection=True)
+        self.vis_widget.select_field(TISSUE_TAG)
+        self._set_section_visible("visualisation", True)
+        self._render_field()
+        self.statusBar().showMessage(result.summary(), 30000)
+
     def _action_export_eam(self) -> None:
         """Write the loaded mapping out as it currently stands — repairs,
         smoothing and the electrode displacement included."""
@@ -3115,10 +3180,19 @@ class CCDAF(QtWidgets.QMainWindow):
             )
         self._mesh_actor = None
 
-    def _render_mesh(self) -> None:
+    def _render_mesh(self, field: str = "elemTag") -> None:
+        """Draw the mesh coloured by a label field, as discrete regions.
+
+        ``elemTag`` unless told otherwise: every tool that edits the tagging
+        redraws through here. Any other label field (``tissueTag``) is named
+        by number, never by the atrial table, which would call material
+        region 11 a pulmonary vein.
+        """
         mesh = self.loader.mesh
         if mesh is None:
             return
+        if field not in mesh.cell_data:
+            field = "elemTag"
         self._focus_3d()
         # Same ordering as _render_scalar_field, and for the same reason.
         self._clear_scalar_bars()
@@ -3129,8 +3203,9 @@ class CCDAF(QtWidgets.QMainWindow):
                 pass
             self._mesh_actor = None
 
-        tags = np.asarray(mesh.cell_data["elemTag"], dtype=int)
-        all_tags, all_colors, annotations = _region_legend(tags)
+        tags = np.asarray(mesh.cell_data[field], dtype=int)
+        all_tags, all_colors, annotations = _region_legend(
+            tags, anatomical=(field == "elemTag"))
         tag_to_idx = {tag: i for i, tag in enumerate(all_tags)}
         indexed_tags = np.array([tag_to_idx.get(t, 0) for t in tags])
         mesh.cell_data["render_idx"] = indexed_tags
@@ -3150,7 +3225,9 @@ class CCDAF(QtWidgets.QMainWindow):
             name="atrium",
             reset_camera=False,
             scalar_bar_args={
-                "title": "Regions",
+                # Which labelling is on screen: the anatomical regions or a
+                # derived one such as tissueTag.
+                "title": "Regions" if field == "elemTag" else str(field),
                 "n_labels": 0,
                 "label_font_size": 18,
                 # No "fmt": this bar labels regions through `annotations` and
@@ -3177,7 +3254,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # built, so the widget and the actor disagreed about its geometry
         # and resize drags — the vertical ones visibly — were swallowed.
         # Same treatment as the field bar, keeping the default vertical slot.
-        self._enable_bar_interaction("Regions")
+        self._enable_bar_interaction("Regions" if field == "elemTag" else str(field))
 
         self.plotter.render()
 
@@ -3707,6 +3784,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_seg_to_vtk.setEnabled(True)
         self.act_seg_close.setEnabled(True)
         self.act_save.setEnabled(False)
+        self._sync_tissue_action()
         self._set_section_visible("segmentation", True)
         #close other sections to tyding up left panel
         for other_sec in ["meshinfo","postproc","seeds","tagging","manual","clipping"]:
@@ -3774,6 +3852,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_seg_to_vtk.setEnabled(False)
         self.act_seg_close.setEnabled(False)
         self.act_save.setEnabled(self.loader.mesh is not None)
+        self._sync_tissue_action()
         self._set_section_visible("segmentation", False)
         self._exit_segmentation_mode()
         for other_sec in ["meshinfo","postproc","seeds","tagging","manual","clipping"]:
@@ -4726,8 +4805,11 @@ def _eam_lookup_table(cmap_name: str, lo: float, hi: float,
     return lut
 
 
-def _region_legend(tags: np.ndarray):
+def _region_legend(tags: np.ndarray, anatomical: bool = True):
     """The colour table and names the Regions view should draw *tags* with.
+
+    ``anatomical=False`` skips the atrial table outright: a material region
+    that happens to be numbered 11 is not a vein.
 
     Two cases, because one table cannot serve both.
 
@@ -4748,7 +4830,7 @@ def _region_legend(tags: np.ndarray):
     Returns ``(tags_in_order, colours, {index: name})``.
     """
     present = {int(t) for t in np.unique(tags)}
-    if present and present <= set(LABEL_COLORS):
+    if anatomical and present and present <= set(LABEL_COLORS):
         ordered = sorted(LABEL_COLORS)
         colours = [LABEL_COLORS[t] for t in ordered]
         names = {j: _label_name(t) for j, t in enumerate(ordered)}

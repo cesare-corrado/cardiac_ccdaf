@@ -12,3 +12,8 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.eam_loader
 ::: ccdaf.core.eam_export
 ::: ccdaf.core.seed_io
+::: ccdaf.core.seed_profiles
+::: ccdaf.core.volume_mesh
+::: ccdaf.core.volume_postprocessor
+::: ccdaf.core.volume_from_segmentation
+::: ccdaf.core.tissue_property

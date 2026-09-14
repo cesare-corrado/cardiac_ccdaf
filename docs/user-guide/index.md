@@ -2,7 +2,7 @@
 
 CCDAF is organised as a **3D viewport** with a column of collapsible **side
 panels**, one per stage of the workflow. The menubar carries **File**,
-**Segmentation**, **EAM**, and **Visualise** menus.
+**Segmentation**, **EAM**, **Actions** and **Visualise** menus.
 
 Most panels stay disabled until the step before them is done — you place seeds
 before tagging, tag before clipping, and so on.
@@ -24,6 +24,14 @@ before tagging, tag before clipping, and so on.
 | Clipping | Clip PV ostia and the mitral valve | [Clipping](clipping.md) |
 | Segmentation | Build a surface from a `.nii` image | [Segmentation](segmentation.md) |
 | Visualisation | Choose the field, colour map, range, electrodes | [EAM & visualisation](eam-visualisation.md) |
+
+## Menu actions
+
+**Operations started from the menubar rather than a side panel**
+
+| Menu item | Purpose | Page |
+|---|---|---|
+| Actions → Assign tissue property | Mark every element with a material region (`tissueTag`) read off a scalar field | [Tissue properties](tissue-properties.md) |
 
 ## Views
 

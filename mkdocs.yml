@@ -77,6 +77,7 @@ nav:
       - Manual correction: user-guide/manual-correction.md
       - Clipping: user-guide/clipping.md
       - Post-processing: user-guide/post-processing.md
+      - Tissue properties: user-guide/tissue-properties.md
       - EAM & visualisation: user-guide/eam-visualisation.md
   - Keyboard & mouse: shortcuts.md
   - File formats: file-formats.md

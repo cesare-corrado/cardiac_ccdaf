@@ -16,6 +16,19 @@ Tags live in the mesh's `elemTag` **cell** array:
 | 1  | body (background) |
 | −1 | unassigned (internal; becomes body on *Accept tagging*) |
 
+## Material regions (`tissueTag`)
+
+**Actions → Assign tissue property** writes `tissueTag`, an integer **cell**
+array: one material ID per element, for a simulation to assign properties by.
+Every element carries an ID and none is negative. The IDs are whatever the
+dialog was given (by default 0 for healthy tissue, 1 to N for the region rows,
+and each excluded `elemTag` value its own number), so unlike `elemTag` they
+carry no fixed meaning. See [Tissue properties](user-guide/tissue-properties.md).
+
+As with `elemTag`, a surface VTK stores it as `float32` and a volume keeps it
+as an integer. CCDAF recognises it by name either way, so it is never offered
+as a field to classify by.
+
 ## Meshes — `.vtk`
 
 Triangular surfaces and tetrahedral volumes are read/written through
@@ -76,6 +89,13 @@ to mean absent. A ventricular mesh therefore carries no `seed_LA` key, and an
 atrial one carries no right-atrial key, rather than each carrying an empty one
 that a reader would take at face value. A seed type with no points defined
 (`seed_RA` today) is never written at all.
+
+**Other cell fields.** The Carto surface dictionary only has room for vertex
+values, so every other chosen cell field (`tissueTag`, and `Normals` if ticked)
+is stored under one `cell_fields` key: a dictionary from name to one value per
+triangle. `elemTag` keeps its own key and is never read from `cell_fields`.
+Bundles written before the key existed load exactly as before, and an older
+version of CCDAF opens a new bundle and simply leaves those fields out.
 
 ## EAM export
 
