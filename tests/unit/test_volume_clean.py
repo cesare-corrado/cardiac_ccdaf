@@ -304,6 +304,32 @@ def test_a_non_tetrahedral_volume_is_refused():
         clean(grid)
 
 
+def test_a_volume_carrying_surface_triangles_is_refused():
+    """Mixed meshes are refused at the door, not half-handled.
+
+    Checking only the *solid* cell types let a file holding tetrahedra and
+    its own boundary triangles through, because triangles are 2-D. It
+    loaded as a volume whose cell count included the triangles, so every
+    per-element array was misaligned, and this very function then reported
+    "nothing to clean" while dropping those triangles without a word.
+    """
+    block = _block(n=4, size=3.0)
+    tets = vm.tetrahedra(block)
+    surface = block.extract_surface(algorithm="dataset_surface").triangulate()
+    tri = np.asarray(surface.faces).reshape(-1, 4)[:, 1:]
+    origin = np.asarray(surface.point_data["vtkOriginalPointIds"],
+                        dtype=np.int64)
+    mixed = pv.UnstructuredGrid(
+        {vm.TETRA: tets, int(pv.CellType.TRIANGLE): origin[tri]},
+        np.asarray(block.points))
+    assert mixed.n_cells > len(tets)
+
+    with pytest.raises(ValueError, match="only tetrahedral volumes"):
+        vm.validate_tetrahedral(mixed)
+    with pytest.raises(ValueError, match="only tetrahedral volumes"):
+        clean(mixed)
+
+
 # ------------------------------------------------------------- the panel
 @pytest.fixture(scope="module")
 def qapp():

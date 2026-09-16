@@ -106,6 +106,14 @@ from ccdaf.core.segmentation import (
 )
 from ccdaf.core.seed_io import load_point_set, save_seeds
 from ccdaf.core.volume_mesh import VOLUME
+from ccdaf.core.surface_labels import (
+    BASE as SURFACE_BASE, LABEL_FIELD, LABEL_MASK_FIELD,
+    Plane as SurfaceLabelPlane,
+    face_labels_from_mask as surface_faces_from_mask,
+    face_labels_from_nodes as surface_face_labels,
+    node_label_mask as surface_node_mask,
+)
+from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
 from ccdaf.core.volume_clean import clean as clean_volume
 from ccdaf.core.volume_postprocessor import remesh as remesh_volume
 from ccdaf.core.volume_from_segmentation import carve, growth_outside
@@ -165,7 +173,17 @@ _PV_LABELS = tuple(lbl for lbl in ALLOWED_LABELS if lbl != BODY_LABEL)
 # over these would be meaningless, so the visualisation widget hands them
 # to the region path (discrete colours + names) instead. Further label
 # fields belong here rather than in a paradigm of their own.
-CATEGORICAL_FIELDS = ("elemTag", TISSUE_TAG)
+CATEGORICAL_FIELDS = ("elemTag", TISSUE_TAG, LABEL_FIELD, LABEL_MASK_FIELD)
+
+# Fields that are real data — saved, exported, read back — but not worth
+# offering as something to colour by. The surface-label mask is the whole
+# record of the labelling, yet every picture it can draw is drawn better
+# by ``surfaceLabel``, which is derived from it. Offering both put two
+# entries in the list that produced the same image.
+#
+# Deliberately not INTERNAL_ARRAYS: those are bookkeeping and are dropped
+# on save, which for the mask would throw the labelling away.
+HIDDEN_COLOUR_FIELDS = (LABEL_MASK_FIELD,)
 
 # EAM scalar bar: horizontal, along the bottom. Sizes are fractions of the
 # viewport, so the height giving a 20:1 bar on screen depends on the window's
@@ -271,6 +289,8 @@ class CCDAF(QtWidgets.QMainWindow):
         # that way; the view itself always works on the LPS re-indexing.
         self._seg_orientation: str = LPS
         self._seg_undo_stack: list = []  # up to 2 snapshots of _seg_array
+        self._labels_dialog = None                          # surface labelling, non-modal
+        self._labels_plane_widget = None                    # its draggable plane
         self._seg_plane_widget = None                       # plane-relabel gizmo
         self._seg_plane_normal: Optional[tuple] = None
         self._seg_plane_point: Optional[tuple] = None
@@ -399,6 +419,14 @@ class CCDAF(QtWidgets.QMainWindow):
             "Mark elements with material regions (tissueTag) read off a scalar field.")
         self.act_assign_tissue.triggered.connect(self._action_assign_tissue_property)
         actions_menu.addAction(self.act_assign_tissue)
+
+        self.act_label_surfaces = QtWidgets.QAction(
+            "Label ventricular surfaces…", self)
+        self.act_label_surfaces.setStatusTip(
+            "Split a truncated volume's boundary into base, epicardium, LV "
+            "endocardium and RV endocardium.")
+        self.act_label_surfaces.triggered.connect(self._action_label_surfaces)
+        actions_menu.addAction(self.act_label_surfaces)
 
         # --- Export menu: the working mesh in another tool's format -----
         export_menu = menubar.addMenu("E&xport")
@@ -1256,6 +1284,12 @@ class CCDAF(QtWidgets.QMainWindow):
         That is exactly what it did.
         """
         mesh = self.loader.mesh
+        # Before anything asks what fields the mesh has: a labelling read
+        # back from a file arrives as the node mask alone, and the faces
+        # are rebuilt from it here. Done later — next to the editor setup,
+        # where it first went — the field list and the first render have
+        # already been decided, so the labelling is in memory and invisible.
+        self._sync_surface_labels()
         self.tagger = RegionTagger(mesh)
         self.editor = None
         self.clipper = ClippingTool(
@@ -1856,6 +1890,7 @@ class CCDAF(QtWidgets.QMainWindow):
             # not something to colour by.
             return [k for k in attr.keys()
                     if k not in INTERNAL_ARRAYS
+                    and k not in HIDDEN_COLOUR_FIELDS
                     and np.asarray(attr[k]).ndim == 1]
 
         self.vis_widget.set_fields(
@@ -2993,7 +3028,12 @@ class CCDAF(QtWidgets.QMainWindow):
         ``loader.mesh`` — the renderer, the picker, mesh info — follows
         without knowing a remesh happened.
         """
+        # A labelling window open over the old volume measured a mesh that
+        # is about to stop existing, so it goes rather than being left to
+        # write face labels against a boundary of a different length.
+        self._close_labels_dialog()
         self.loader.set_volume(new_grid)
+        self._sync_surface_labels()
         self._mark_dirty()
         self._populate_fields(keep_selection=True)
         # The tools take a surface, and the surface is a new object.
@@ -3098,6 +3138,16 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_assign_tissue.setEnabled(enabled)
         self.act_assign_tissue.setToolTip(why)
 
+        # Labelling splits a boundary, so it needs a volume to have one.
+        if self._seg_array is not None:
+            can_label, label_why = False, "Close the segmentation first."
+        elif self.loader.kind != VOLUME or self.loader.grid is None:
+            can_label, label_why = False, "Load a tetrahedral volume first."
+        else:
+            can_label, label_why = True, ""
+        self.act_label_surfaces.setEnabled(can_label)
+        self.act_label_surfaces.setToolTip(label_why)
+
         # Exporting reads the mesh and changes nothing, so it needs only a
         # mesh — not a field to read, and not the segmentation closed.
         can_export, why_export = carp_availability(self.loader.dataset)
@@ -3130,6 +3180,177 @@ class CCDAF(QtWidgets.QMainWindow):
         self._set_section_visible("visualisation", True)
         self._render_field()
         self.statusBar().showMessage(result.summary(), 30000)
+
+    def _sync_surface_labels(self) -> None:
+        """Rebuild the boundary's per-face labels from a stored mask.
+
+        Only the mask is written to a file: it is the complete record, and
+        the per-face form belongs to a boundary that is rebuilt whenever
+        the volume changes. So whenever a mesh arrives or is replaced, the
+        faces are derived again here, which is what makes a reopened
+        labelling look exactly as it did when it was made.
+        """
+        mesh = self.loader.mesh
+        if mesh is None or LABEL_FIELD in mesh.cell_data:
+            return
+        if LABEL_MASK_FIELD not in mesh.point_data:
+            return
+        faces = surface_faces_from_mask(mesh, mesh.point_data[LABEL_MASK_FIELD])
+        if len(faces) == mesh.n_cells:
+            mesh.cell_data[LABEL_FIELD] = faces
+
+    def _action_label_surfaces(self) -> None:
+        """Open the labelling window, non-modally so the plane can be dragged."""
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+        if self._labels_dialog is not None:
+            self._labels_dialog.raise_()
+            self._labels_dialog.activateWindow()
+            return
+
+        dlg = SurfaceLabelsDialog(self.loader.grid, parent=self)
+        self._labels_dialog = dlg
+        dlg.plane_edit_requested.connect(self._action_label_plane_edit)
+        dlg.preview_requested.connect(self._action_label_preview)
+        dlg.finished.connect(self._action_label_finished)
+        dlg.show()
+
+    def _action_label_plane_edit(self, on: bool) -> None:
+        """Show or remove the draggable plane for the labelling window.
+
+        The same gizmo the segmentation view uses for its half-space
+        relabel, and white for the same reason: pyvista would otherwise
+        colour it from the theme's black font, invisible on a black
+        viewport. Its callback writes straight into the window's boxes, so
+        what is dragged and what will be checked cannot disagree.
+        """
+        if self._labels_plane_widget is not None:
+            try:
+                self.plotter.clear_plane_widgets()
+            except Exception:
+                pass
+            self._labels_plane_widget = None
+        if not on or self._labels_dialog is None or self.loader.grid is None:
+            self.plotter.render()
+            return
+
+        dialog = self._labels_dialog
+        plane = dialog.plane()
+        bounds = self.loader.grid.bounds
+
+        def _on_plane(normal, origin):
+            try:
+                dialog.set_plane(SurfaceLabelPlane(origin=origin, normal=normal))
+            except ValueError:
+                pass                      # a degenerate drag: keep the last pose
+
+        self._focus_3d()
+        try:
+            self._labels_plane_widget = self.plotter.add_plane_widget(
+                _on_plane,
+                normal=tuple(plane.normal) if plane else (0.0, 0.0, 1.0),
+                origin=tuple(plane.origin) if plane else None,
+                bounds=bounds, factor=1.1, implicit=True,
+                outline_translation=False, tubing=False, color="white",
+            )
+        except Exception as exc:
+            dialog.btn_modify.setChecked(False)
+            QtWidgets.QMessageBox.warning(
+                self, "Label ventricular surfaces",
+                f"Could not create the plane widget in this view:\n{exc}")
+            return
+        self.plotter.render()
+        self.statusBar().showMessage(
+            "Drag the plane, then press 'Modify plane' again and "
+            "'Check this plane'.")
+
+    def _action_label_preview(self, labels) -> None:
+        """Draw the proposed base, or clear it when there is nothing to show."""
+        for name in ("label_base", "label_plane"):
+            try:
+                self.plotter.remove_actor(name, reset_camera=False)
+            except Exception:
+                pass
+        if labels is None or self.loader.mesh is None:
+            self.plotter.render()
+            return
+
+        mesh = self.loader.mesh
+        faces = np.where(labels.face_labels == SURFACE_BASE)[0]
+        if len(faces) and len(labels.face_labels) == mesh.n_cells:
+            self.plotter.add_mesh(
+                mesh.extract_cells(faces), color="#e41a1c", show_edges=False,
+                name="label_base", reset_camera=False, pickable=False)
+        size = float(np.linalg.norm(np.asarray(mesh.bounds)[1::2]
+                                    - np.asarray(mesh.bounds)[0::2]))
+        self.plotter.add_mesh(
+            pv.Plane(center=tuple(labels.plane.origin),
+                     direction=tuple(labels.plane.normal),
+                     i_size=size, j_size=size),
+            color="white", opacity=0.18, name="label_plane",
+            reset_camera=False, pickable=False)
+        self.plotter.render()
+
+    def _action_label_finished(self, result: int) -> None:
+        """Apply the labelling if it was accepted, and clean up either way."""
+        dlg = self._labels_dialog
+        self._labels_dialog = None
+        self._action_label_plane_edit(False)
+        self._action_label_preview(None)
+        if dlg is None:
+            return
+        dlg.deleteLater()
+        if result != QtWidgets.QDialog.Accepted or dlg.result() is None:
+            return
+        labels = dlg.result()
+        self._write_surface_labels(labels)
+
+    def _close_labels_dialog(self) -> None:
+        """Shut the labelling window: whatever it measured no longer exists."""
+        dlg = self._labels_dialog
+        if dlg is None:
+            return
+        self._labels_dialog = None
+        self._action_label_plane_edit(False)
+        self._action_label_preview(None)
+        dlg.reject()
+        dlg.deleteLater()
+
+    def _write_surface_labels(self, labels) -> None:
+        """Write an accepted labelling onto the mesh, then show it."""
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+
+        # Node labels ride on the volume: they are what a Laplace solve
+        # reads, and they survive saving and every re-derivation of the
+        # boundary. The per-face labels go onto the boundary itself, which
+        # is the honest form (a node can sit on two surfaces) but is
+        # rebuilt whenever the volume changes.
+        grid = self.loader.grid
+        # The mask alone. A plain label per node is exactly its lowest set
+        # bit — measured on the example ventricle, all 35,856 nodes agree —
+        # so storing both would be storing the same thing twice, and the
+        # mask is the half that can describe a node on a seam.
+        grid.point_data[LABEL_MASK_FIELD] = surface_node_mask(grid, labels)
+        if LABEL_FIELD in grid.point_data:
+            del grid.point_data[LABEL_FIELD]      # written by older builds
+        self._replace_volume(grid)
+        if self.loader.mesh is not None:
+            # Taking the boundary copies the volume's point arrays onto it,
+            # so the node labels arrive here too. Left in place they would
+            # list the field twice, once per association, and the wrong one
+            # would draw a label as a smooth ramp between nodes.
+            for name in (LABEL_FIELD, LABEL_MASK_FIELD):
+                if name in self.loader.mesh.point_data:
+                    del self.loader.mesh.point_data[name]
+            if len(labels.face_labels) == self.loader.mesh.n_cells:
+                self.loader.mesh.cell_data[LABEL_FIELD] = labels.face_labels
+            self._populate_fields(keep_selection=True)
+
+        self.vis_widget.select_field(LABEL_FIELD)
+        self._set_section_visible("visualisation", True)
+        self._render_field()
+        self.statusBar().showMessage(labels.summary(), 30000)
 
     def _action_export_carp(self) -> None:
         """Export → Carp: write the working mesh as CARP files."""
@@ -3266,7 +3487,13 @@ class CCDAF(QtWidgets.QMainWindow):
         mesh = self.loader.mesh
         if mesh is None:
             return
-        if field not in mesh.cell_data:
+        # A label field may live on the points rather than the cells: a
+        # volume stores its surface labels per node, because the boundary
+        # they describe is rebuilt every time the volume changes. Falling
+        # back to elemTag here would quietly draw the wrong field — on a
+        # ventricular mesh that is the LV and RV walls, which looks like a
+        # plausible answer and is not the one that was asked for.
+        if field not in mesh.cell_data and field not in mesh.point_data:
             field = "elemTag"
         self._focus_3d()
         # Same ordering as _render_scalar_field, and for the same reason.
@@ -3278,7 +3505,14 @@ class CCDAF(QtWidgets.QMainWindow):
                 pass
             self._mesh_actor = None
 
-        tags = np.asarray(mesh.cell_data[field], dtype=int)
+        tags = _label_values(mesh, field)
+        if tags is None:
+            # Not there on either association. Retry once with the tagging,
+            # and stop: recursing on a mesh with no elemTag either would
+            # never end.
+            if field != "elemTag":
+                self._render_mesh()
+            return
         all_tags, all_colors, annotations = _region_legend(
             tags, anatomical=(field == "elemTag"))
         tag_to_idx = {tag: i for i, tag in enumerate(all_tags)}
@@ -4916,6 +5150,35 @@ def _region_legend(tags: np.ndarray, anatomical: bool = True):
                for i in range(len(ordered))]
     names = {j: str(t) for j, t in enumerate(ordered)}
     return ordered, colours, names
+
+
+def _label_values(mesh, field: str):
+    """Per-cell values of a label *field*, whichever association it is on.
+
+    A label field is not always cell data. A volume stores its surface
+    labels per **node**, because the boundary they describe is rebuilt
+    every time the volume changes, so a labelling read back from a file
+    arrives on the points. Each face then takes the label its three nodes
+    agree on; a face whose nodes disagree is unlabelled rather than an
+    average, since the average of two labels is a value that means
+    nothing.
+
+    ``None`` when the mesh does not carry the field at all.
+    """
+    if field in mesh.cell_data:
+        return np.asarray(mesh.cell_data[field], dtype=int)
+    # The membership mask is preferred over the plain labels, because it
+    # rebuilds every face exactly: a node on a seam belongs to both
+    # surfaces there, where a single label has to pick one and leaves the
+    # faces around it disagreeing, and so unlabelled.
+    if (field in (LABEL_FIELD, LABEL_MASK_FIELD)
+            and LABEL_MASK_FIELD in mesh.point_data):
+        return surface_faces_from_mask(
+            mesh, mesh.point_data[LABEL_MASK_FIELD]).astype(int)
+    if field in mesh.point_data:
+        return surface_face_labels(
+            mesh, mesh.point_data[field]).astype(int)
+    return None
 
 
 def _label_name(tag: int) -> str:
