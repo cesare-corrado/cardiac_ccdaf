@@ -25,6 +25,7 @@ from typing import Optional
 
 from PyQt5 import QtCore, QtWidgets
 
+from ccdaf.core.volume_clean import CleanOptions
 from ccdaf.core.volume_postprocessor import RemeshOptions
 
 
@@ -47,6 +48,7 @@ def _size_box(maximum: float = 1.0e6) -> QtWidgets.QDoubleSpinBox:
 class VolumePostprocessingWidget(QtWidgets.QGroupBox):
 
     remesh_requested = QtCore.pyqtSignal()
+    clean_requested = QtCore.pyqtSignal()
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -153,6 +155,78 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
         self.btn_apply.clicked.connect(self.remesh_requested.emit)
         layout.addWidget(self.btn_apply)
 
+        # -- clean: connectivity, not geometry -------------------------
+        rule = QtWidgets.QFrame()
+        rule.setFrameShape(QtWidgets.QFrame.HLine)
+        rule.setFrameShadow(QtWidgets.QFrame.Sunken)
+        layout.addWidget(rule)
+        layout.addWidget(QtWidgets.QLabel(
+            "<i>Removes stray elements and reports the mesh's topology. "
+            "Moves no vertex.</i>"))
+
+        clean_grid = QtWidgets.QGridLayout()
+        clean_grid.setHorizontalSpacing(6)
+
+        weld_tip = _tip(
+            "Absolute distance within which two points are welded into "
+            "one, in mesh units.",
+            "<b>exact</b> (0) merges only points that are already "
+            "identical, so no vertex moves. A positive value welds "
+            "near-duplicates; the first point of each group is the one "
+            "that stays, so the result is still a point the mesh had.",
+        )
+        lbl_weld = QtWidgets.QLabel("merge points")
+        lbl_weld.setToolTip(weld_tip)
+        clean_grid.addWidget(lbl_weld, 0, 0)
+        self.spn_merge_tol = _size_box(maximum=1.0e3)
+        self.spn_merge_tol.setDecimals(4)
+        self.spn_merge_tol.setSingleStep(0.001)
+        self.spn_merge_tol.setSpecialValueText("exact")
+        self.spn_merge_tol.setToolTip(weld_tip)
+        clean_grid.addWidget(self.spn_merge_tol, 0, 1)
+
+        frac_tip = _tip(
+            "The smallest share of the elements a detached piece may hold "
+            "and still be kept.",
+            "A stray element is not cosmetic: a piece carrying no boundary "
+            "condition makes a Laplace solve singular. The example "
+            "ventricle has three, each a single tetrahedron held to the "
+            "body by nodes alone.",
+            "The largest piece is always kept, so this cannot empty the "
+            "mesh — a separately meshed second body is safe.",
+        )
+        lbl_frac = QtWidgets.QLabel("min. piece")
+        lbl_frac.setToolTip(frac_tip)
+        clean_grid.addWidget(lbl_frac, 1, 0)
+        self.spn_min_component = QtWidgets.QDoubleSpinBox()
+        self.spn_min_component.setDecimals(4)
+        self.spn_min_component.setRange(0.0, 1.0)
+        self.spn_min_component.setSingleStep(0.01)
+        self.spn_min_component.setValue(CleanOptions().min_component_fraction)
+        self.spn_min_component.setKeyboardTracking(False)
+        self.spn_min_component.setMinimumWidth(80)
+        self.spn_min_component.setToolTip(frac_tip)
+        clean_grid.addWidget(self.spn_min_component, 1, 1)
+        layout.addLayout(clean_grid)
+
+        self.chk_fix_inverted = QtWidgets.QCheckBox("Reorient inverted elements")
+        self.chk_fix_inverted.setChecked(CleanOptions().fix_inverted)
+        self.chk_fix_inverted.setToolTip(_tip(
+            "Swap two nodes of any tetrahedron whose signed volume is "
+            "negative.",
+            "The same four points and the same shape, so no geometry "
+            "changes; the remesher refuses a mesh that still has them.",
+        ))
+        layout.addWidget(self.chk_fix_inverted)
+
+        self.btn_clean = QtWidgets.QPushButton("Clean volume")
+        self.btn_clean.setToolTip(
+            "Drop stray and degenerate elements, then report the topology. "
+            "Tunnels and pinch points are reported, never repaired: "
+            "closing one would invent material that was never imaged.")
+        self.btn_clean.clicked.connect(self.clean_requested.emit)
+        layout.addWidget(self.btn_clean)
+
         self.lbl_status = QtWidgets.QLabel()
         self.lbl_status.setWordWrap(True)
         layout.addWidget(self.lbl_status)
@@ -206,13 +280,29 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
             freeze_boundary=not adapting,
         )
 
+    def clean_options(self) -> CleanOptions:
+        return CleanOptions(
+            merge_tol=float(self.spn_merge_tol.value()),
+            min_component_fraction=float(self.spn_min_component.value()),
+            fix_inverted=self.chk_fix_inverted.isChecked(),
+        )
+
     def set_status(self, text: str) -> None:
         self.lbl_status.setText(text)
 
-    def set_busy(self, busy: bool) -> None:
-        """Disable Apply while a remesh runs — it is not re-entrant."""
+    def set_busy(self, busy: bool, *, cleaning: bool = False) -> None:
+        """Disable both actions while one runs — neither is re-entrant.
+
+        Both buttons go, not just the one pressed: they act on the same
+        working volume, so starting the other mid-run would operate on a
+        mesh that is about to be replaced.
+        """
         self.btn_apply.setEnabled(not busy)
-        self.btn_apply.setText("Remeshing…" if busy else "Remesh volume")
+        self.btn_clean.setEnabled(not busy)
+        self.btn_apply.setText(
+            "Remeshing…" if busy and not cleaning else "Remesh volume")
+        self.btn_clean.setText(
+            "Cleaning…" if busy and cleaning else "Clean volume")
 
 
 __all__ = ["VolumePostprocessingWidget"]
