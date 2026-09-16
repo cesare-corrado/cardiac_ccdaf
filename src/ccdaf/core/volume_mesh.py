@@ -88,14 +88,24 @@ def kind_of(dataset) -> str:
 
 
 def validate_tetrahedral(dataset) -> None:
-    """Raise unless every 3-D cell of *dataset* is a tetrahedron.
+    """Raise unless **every** cell of *dataset* is a tetrahedron.
 
     A volume of hexahedra or a mixed volume is refused rather than
     partly handled: the remesher takes tetrahedra, and a fibre or a
     label per element means one element shape.
+
+    Every cell, not merely every 3-D cell. Checking only the solid ones
+    let a file holding tetrahedra *and* its boundary triangles through
+    unexamined, because triangles are 2-D: it loaded as a volume whose
+    ``n_cells`` counted 193,293 against 148,155 tetrahedra, so every
+    per-element array was misaligned. The tools that ask for one value
+    per element raised, which was the good case; the volume cleaner
+    instead reported "nothing to clean" and returned a mesh with the
+    45,138 triangles quietly dropped. A mixed mesh has no honest
+    interpretation here, so it is refused at the door.
     """
-    solid = solid_cell_types(dataset)
-    bad = solid[solid != TETRA]
+    present = distinct_cell_types(dataset)
+    bad = present[present != TETRA]
     if bad.size:
         names = ", ".join(str(int(b)) for b in bad)
         raise ValueError(
