@@ -106,6 +106,7 @@ from ccdaf.core.segmentation import (
 )
 from ccdaf.core.seed_io import load_point_set, save_seeds
 from ccdaf.core.volume_mesh import VOLUME
+from ccdaf.core.volume_clean import clean as clean_volume
 from ccdaf.core.volume_postprocessor import remesh as remesh_volume
 from ccdaf.core.volume_from_segmentation import carve, growth_outside
 from ccdaf.core.tissue_property import (
@@ -493,6 +494,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self.volume_postproc.setTitle("")
         self.volume_postproc.remesh_requested.connect(
             self._action_remesh_volume)
+        self.volume_postproc.clean_requested.connect(
+            self._action_clean_volume)
         self.volume_postproc.setVisible(False)
         body.addWidget(self.volume_postproc)
 
@@ -3039,6 +3042,47 @@ class CCDAF(QtWidgets.QMainWindow):
                    else "; the boundary was adapted and has moved"))
         self.volume_postproc.set_status(note)
         self.statusBar().showMessage(f"Remesh complete — {note}.")
+
+    def _action_clean_volume(self) -> None:
+        """Repair the working volume's connectivity, and report its shape."""
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+        options = self.volume_postproc.clean_options()
+        try:
+            options.validate()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid clean options",
+                                          str(exc))
+            return
+
+        self.volume_postproc.set_busy(True, cleaning=True)
+        self.volume_postproc.set_status("Cleaning…")
+        self.statusBar().showMessage("Cleaning volume…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            new_grid, report = clean_volume(
+                self.loader.grid, options,
+                on_status=self.statusBar().showMessage)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Clean failed", str(exc))
+            self.volume_postproc.set_status("")
+            return
+        finally:
+            self.volume_postproc.set_busy(False)
+
+        # A clean that changed nothing must not mark the session dirty:
+        # looking at a sound mesh is not an edit.
+        if report.changed:
+            self._replace_volume(new_grid)
+        self.volume_postproc.set_status(report.summary())
+        self.statusBar().showMessage(report.summary())
+
+        # The dialog is the report, so it appears when there is something
+        # to report: work done, or a defect this pass cannot repair.
+        if report.changed or not report.after.boundary_is_manifold \
+                or bool(report.after.tunnels):
+            QtWidgets.QMessageBox.information(self, "Clean volume",
+                                              report.details())
 
     # ==================================================================
     # Actions menu

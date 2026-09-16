@@ -270,6 +270,57 @@ and exports like real data. CCDAF averages the outer products `f·fᵀ` and take
 the dominant eigenvector, which is sign-free and gives the right answer
 whichever way each contributor was written down.
 
+### Clean volume
+
+A second button on the same panel, for a different kind of problem. The remesh
+changes element *sizes*; the clean repairs the mesh's *connectivity* and
+reports its shape. It moves no vertex.
+
+It runs five passes, in this order:
+
+1. **merge points** — weld coincident points. `exact` (0) merges only points
+   that are already identical, so no vertex moves. A positive tolerance welds
+   near-duplicates, and the survivor is the first point of each group rather
+   than a centroid.
+2. **degenerate elements** — drop any tetrahedron with a repeated node or no
+   volume. Welding is what turns a sliver into one of these, which is why it
+   runs first.
+3. **duplicate elements** — drop a second copy of the same four nodes.
+4. **detached pieces** — drop any face-connected piece holding less than
+   **min. piece** of the elements. The largest piece is always kept, so this
+   cannot empty a mesh, and a separately meshed second body is safe.
+5. **reorient inverted elements** — swap two nodes of any tetrahedron with a
+   negative signed volume. Same points, same shape, and the remesher refuses a
+   mesh that still has them.
+
+A detached element is not cosmetic. Any solve that puts conditions on named
+surfaces builds one system over the whole mesh, and a piece carrying no
+condition makes that system singular. The 290,474-element example ventricle
+has exactly three: single tetrahedra held to the body by two or three nodes
+and by no face at all, lying outside the body rather than plugging a void, so
+removing them leaves no hole.
+
+!!! note "What it reports but will not repair"
+
+    **Tunnels** (holes through the material) and **pinch points** (where the
+    wall thins to nothing and the boundary touches itself) are counted, never
+    closed. A tunnel is either anatomy or a segmentation artefact, and nothing
+    local tells those apart, so filling one would invent material that was
+    never imaged. At a pinch the tetrahedra still form one connected fan, so
+    splitting the node would tear apart material that is genuinely joined.
+
+    The counts matter anyway: a pinch is exactly where a surface label can leak
+    from epicardium to endocardium, so anything that labels surfaces needs to
+    know how many there are.
+
+The report gives the Euler characteristic χ = V − E + F − T, which is exact for
+any mesh, and the number of tunnels and cavities **only when the boundary is
+manifold**. Deriving those needs a count of boundary sheets, and that count is
+wrong on a boundary that pinches, so they are reported as *not determined*
+rather than guessed. On the example ventricle the clean drops the three stray
+elements and reports χ = 0 with 14 non-manifold edges and 17 pinch points, so
+the tunnel count is withheld.
+
 ### A note on speed
 
 MMG is fast when it is told a size and slow when it is not. On the 290,474-tet
