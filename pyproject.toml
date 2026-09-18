@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccdaf"
-version = "2.0.0b1"
+version = "2.1.0b1"
 description = "Cardiac Clinical Data Analysis Framework"
 readme = "README.md"
 license = {file = "LICENSE"}
