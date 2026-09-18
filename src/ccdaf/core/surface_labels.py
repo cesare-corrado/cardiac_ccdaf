@@ -4,16 +4,19 @@ surface_labels
 Name the surfaces of a truncated ventricular volume: base, epicardium, LV
 endocardium, RV endocardium.
 
-Why this is not a geometry problem
-----------------------------------
+Why a truncated mesh is handled here
+------------------------------------
 On a mesh that still has its valve orifices, the epicardium and both
 endocardia are **one connected surface**, joined around each orifice. Six
-independent attempts to split it by geometry alone all failed on the
-example ventricle: normals against an axis, flat-patch growing, global
-plane binning, crease splitting at 30/45/60 degrees, clipping at a guessed
-base, and morphological sealing of the orifices. They failed for the same
-reason each time, and the last of them explains the rest: an orifice is as
-wide as the chamber it opens, so no local rule separates the two sides.
+local rules failed to split it on the example ventricle: normals against
+an axis, flat-patch growing, global plane binning, crease splitting at
+30/45/60 degrees, clipping at a guessed base, and sealing the orifices.
+An orifice is as wide as the chamber it opens, so no local rule separates
+the two sides. Sealing alone fills the whole base as one region; it takes
+a second step, opening the filled region, to find each opening. That
+method lives in :mod:`ccdaf.core.orifice_labels`, which
+:func:`~ccdaf.core.orifice_labels.label_ventricles` falls back to when
+this module's flat cut fails.
 
 What works is removing the orifice region first. Once the mesh is
 truncated, the boundary falls apart into exactly three pieces, and on the
@@ -57,8 +60,8 @@ than guessed, and the caller is expected to ask.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pyvista as pv
@@ -196,8 +199,9 @@ class SurfaceLabels:
     face_labels: np.ndarray
     #: Node ids (into the volume, or the surface when given one) per label.
     node_sets: Dict[int, np.ndarray]
-    #: The plane the base came from.
-    plane: Plane
+    #: The plane the base came from. ``None`` when the base was found at
+    #: the valve openings instead, which have no single plane.
+    plane: Optional[Plane]
     #: Area held by each label.
     areas: Dict[int, float]
     #: False when the tags could not tell the two cavities apart, in which
@@ -207,6 +211,12 @@ class SurfaceLabels:
     note: str = ""
     #: Faces dropped as small stray patches by ``min_patch_fraction``.
     dropped_patches: int = 0
+    #: How the base was found: ``"plane"`` (a truncated mesh's flat cut)
+    #: or ``"openings"`` (rings at the valve openings).
+    method: str = "plane"
+    #: The openings the rings were built at, for the ``"openings"`` method.
+    #: Items are :class:`ccdaf.core.orifice_labels.Opening`.
+    openings: List[Any] = field(default_factory=list)
 
     def summary(self) -> str:
         total = sum(self.areas.values()) or 1.0
@@ -218,7 +228,13 @@ class SurfaceLabels:
         return text
 
     def details(self) -> str:
-        lines = [f"Plane: {self.plane.describe()}", ""]
+        if self.plane is not None:
+            lines = [f"Plane: {self.plane.describe()}", ""]
+        else:
+            lines = [f"Base: rings at {len(self.openings)} valve opening(s)", ""]
+            for i, opening in enumerate(self.openings, 1):
+                lines.append(f"  opening {i}: {opening.describe()}")
+            lines.append("")
         total = sum(self.areas.values()) or 1.0
         for key in (BASE, EPI, LV_ENDO, RV_ENDO):
             faces = int((self.face_labels == key).sum())
@@ -516,10 +532,36 @@ def label_boundary(dataset,
     named, confident, note = _name_pieces(surface, tri, pieces, options)
 
     face_labels = np.full(len(tri), UNLABELLED, dtype=np.int32)
-    face_labels[base_mask] = BASE
     for key, faces in named.items():
         face_labels[faces] = key
+    face_labels[_close_ring(tri, base_mask)] = BASE
 
+    return _assemble(surface, tri, face_labels, area, plane=plane,
+                     naming_confident=confident, note=note,
+                     dropped_patches=dropped)
+
+
+def _close_ring(tri: np.ndarray, base: np.ndarray) -> np.ndarray:
+    """*base* plus every face whose three nodes all lie on it.
+
+    Such a face sits inside the base, and the saved form cannot tell it
+    apart anyway: labels are stored as per-node membership, and a face
+    whose nodes are all base members reads back as base. Measured before
+    this rule, with the valve-opening method: 48 of 77,720 faces (open
+    example) and 246 of 193,210 (a reference mesh) changed on a save and
+    reload, every one of them this kind. A flat cut rarely makes such a
+    face: the truncated example has none that would change, so there the
+    rule is a guarantee rather than a repair. It adds no base node, so one
+    pass is enough.
+    """
+    on_base = np.zeros(int(tri.max()) + 1, dtype=bool)
+    on_base[tri[base].ravel()] = True
+    return base | on_base[tri].all(1)
+
+
+def _assemble(surface: pv.PolyData, tri: np.ndarray, face_labels: np.ndarray,
+              area: np.ndarray, **extra) -> SurfaceLabels:
+    """Node sets and areas from per-face labels, packed as the result."""
     # Node sets are returned in the caller's own numbering, so a volume's
     # sets index the volume and not its derived boundary.
     origin = _origin_ids(surface)
@@ -531,11 +573,8 @@ def label_boundary(dataset,
             0, dtype=np.int64)
         node_sets[key] = origin[nodes] if origin is not None else nodes
         areas[key] = float(area[owned].sum())
-
     return SurfaceLabels(face_labels=face_labels, node_sets=node_sets,
-                         plane=plane, areas=areas,
-                         naming_confident=confident, note=note,
-                         dropped_patches=dropped)
+                         areas=areas, **extra)
 
 
 def snap_to_cut(dataset,

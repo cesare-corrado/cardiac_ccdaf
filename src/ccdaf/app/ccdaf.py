@@ -3331,7 +3331,7 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _action_label_preview(self, labels) -> None:
         """Draw the proposed base, or clear it when there is nothing to show."""
-        for name in ("label_base", "label_plane"):
+        for name in ("label_base", "label_plane", "label_openings"):
             try:
                 self.plotter.remove_actor(name, reset_camera=False)
             except Exception:
@@ -3346,14 +3346,23 @@ class CCDAF(QtWidgets.QMainWindow):
             self.plotter.add_mesh(
                 mesh.extract_cells(faces), color="#e41a1c", show_edges=False,
                 name="label_base", reset_camera=False, pickable=False)
-        size = float(np.linalg.norm(np.asarray(mesh.bounds)[1::2]
-                                    - np.asarray(mesh.bounds)[0::2]))
-        self.plotter.add_mesh(
-            pv.Plane(center=tuple(labels.plane.origin),
-                     direction=tuple(labels.plane.normal),
-                     i_size=size, j_size=size),
-            color="white", opacity=0.18, name="label_plane",
-            reset_camera=False, pickable=False)
+        if labels.plane is not None:
+            size = float(np.linalg.norm(np.asarray(mesh.bounds)[1::2]
+                                        - np.asarray(mesh.bounds)[0::2]))
+            self.plotter.add_mesh(
+                pv.Plane(center=tuple(labels.plane.origin),
+                         direction=tuple(labels.plane.normal),
+                         i_size=size, j_size=size),
+                color="white", opacity=0.18, name="label_plane",
+                reset_camera=False, pickable=False)
+        elif labels.openings:
+            # One marker per opening, at its centre: the rings are already
+            # drawn in red, the markers say which opening each belongs to.
+            centres = np.array([o.centre for o in labels.openings], dtype=float)
+            self.plotter.add_points(
+                centres, color="yellow", point_size=14,
+                render_points_as_spheres=True, name="label_openings",
+                reset_camera=False, pickable=False)
         self.plotter.render()
 
     def _action_label_finished(self, result: int) -> None:
