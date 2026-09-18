@@ -261,6 +261,7 @@ kinds of quantity:
 | point fields (`scar_probability`, …) | interpolated within the source tetrahedron the new vertex falls in |
 | labels (`elemTag`) | carried by MMG itself as an element *reference*, so they come back exact rather than re-derived by proximity |
 | directions (`fiber`) | averaged over the source elements the new element covers, as an **axis** |
+| surface labels (`surfaceLabelMask`) | copied between nodes that coincide, never interpolated; every new interior node is on no surface. If the boundary was adapted, the labels are dropped and the status bar asks you to label the surfaces again |
 
 That last rule matters more than it looks. A fibre direction is *axial*: `f`
 and `−f` are the same direction, and which one a file happens to store is
@@ -269,6 +270,13 @@ gives, as vectors, nothing at all — a direction pointing nowhere that renders
 and exports like real data. CCDAF averages the outer products `f·fᵀ` and takes
 the dominant eigenvector, which is sign-free and gives the right answer
 whichever way each contributor was written down.
+
+The surface labels need their own rule because they are bit flags, not
+measurements. Interpolated, a new interior node between an epicardial node (2)
+and an interior one (0) reads 1, "base", and a Laplace solve would hold it there.
+With a frozen boundary every boundary node survives unchanged, so copying by
+coincident node is exact: on the example ventricle all 45,138 boundary faces
+keep their label.
 
 ### Clean volume
 
