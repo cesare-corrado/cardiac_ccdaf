@@ -32,7 +32,7 @@ before tagging, tag before clipping, and so on.
 | Menu item | Purpose | Page |
 |---|---|---|
 | Actions → Assign tissue property | Mark every element with a material region (`tissueTag`) read off a scalar field | [Tissue properties](tissue-properties.md) |
-| Actions → Label ventricular surfaces | Split a truncated ventricle's boundary into base, epicardium, LV and RV endocardium | [Surface labels](surface-labels.md) |
+| Actions → Label ventricular surfaces | Split a ventricle's boundary, truncated or with its valves open, into base, epicardium, LV and RV endocardium | [Surface labels](surface-labels.md) |
 | Actions → Generate fibres | Set fibre and sheet directions in a labelled ventricle (`fiber`, `sheet`) | [Fibres](fibres.md) |
 | Export → Carp | Write the mesh as CARP `.pts`, `.elem` and `.lon` files for simulation | [Export](export.md) |
 
