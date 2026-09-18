@@ -321,3 +321,54 @@ def test_a_frozen_boundary_gets_no_tolerance(source):
     sent = options.as_mmg_options()
     assert "hausd" not in sent
     assert sent["nosurf"] is True
+
+
+# ---------------------------------------------- surface labels on a remesh
+def _labelled_block(n: int = 6, size: float = 6.0) -> pv.UnstructuredGrid:
+    """The block with a surface-label mask: top face base (1), every
+    other boundary node epicardium (2), the interior 0, and the rim 3."""
+    grid = _block(n, size)
+    surface = vm.boundary_surface(grid)
+    outer = np.asarray(surface.point_data["vtkOriginalPointIds"], dtype=np.int64)
+    mask = np.zeros(grid.n_points, dtype=np.int32)
+    mask[outer] = 2
+    top = outer[np.isclose(np.asarray(grid.points)[outer, 2], size)]
+    mask[top] |= 1
+    grid.point_data["surfaceLabelMask"] = mask
+    return grid
+
+
+def test_a_frozen_remesh_keeps_the_surface_labels_exact():
+    """The labels are bit flags, and interpolating them invents surfaces:
+    before the fix, interior nodes came back labelled as base or
+    epicardium, and a Laplace solve would hold them there."""
+    source = _labelled_block()
+    out = remesh(source, RemeshOptions(target_edge=0.6))
+    mask = np.asarray(out.point_data["surfaceLabelMask"])
+    assert mask.dtype == np.int32
+    assert set(np.unique(mask).tolist()) <= {0, 1, 2, 3}
+
+    outer = np.asarray(vm.boundary_surface(out).point_data["vtkOriginalPointIds"])
+    interior = np.setdiff1d(np.arange(out.n_points), outer)
+    assert len(interior) and not mask[interior].any()
+
+    # Every boundary node keeps exactly the label it had.
+    src_mask = np.asarray(source.point_data["surfaceLabelMask"])
+    from scipy.spatial import cKDTree
+    _, near = cKDTree(np.asarray(source.points)).query(np.asarray(out.points)[outer])
+    assert np.array_equal(mask[outer], src_mask[near])
+
+
+def test_an_adapted_boundary_drops_the_labels_and_says_so():
+    """A moved boundary has nodes that were never labelled; a partial
+    labelling would pass for a whole one, so none is kept."""
+    source = _labelled_block()
+    dst = _block(n=5, size=6.0)                 # a different boundary
+    for name in list(dst.point_data.keys()):
+        dst.point_data.remove(name)
+    said = []
+    transfer_volume_fields(source, dst, on_status=said.append)
+    assert "surfaceLabelMask" not in dst.point_data
+    assert any("label the surfaces again" in m for m in said)
+    # The measurements still come across.
+    assert "scar_probability" in dst.point_data

@@ -76,7 +76,7 @@ from scipy.spatial import cKDTree
 # cells of a mesh the destination is not. mesh_postprocessor skips the
 # same set for the same reason; it is defined once, in mesh_loader.
 from ccdaf.core.mesh_loader import INTERNAL_ARRAYS as _INTERNAL_ARRAYS
-from ccdaf.core.volume_mesh import tetrahedra
+from ccdaf.core.volume_mesh import boundary_surface, tetrahedra
 
 #: Cell fields whose vectors are *axial* — a direction with no sign, such
 #: as a fibre orientation. Named rather than guessed from the component
@@ -84,6 +84,49 @@ from ccdaf.core.volume_mesh import tetrahedra
 #: it as an axis would be just as wrong the other way.
 AXIAL_CELL_FIELDS: frozenset = frozenset({"fiber", "fibre", "sheet",
                                           "sheet_normal"})
+
+#: Point fields that say which boundary surface a node lies on, as bit
+#: flags (``surfaceLabelMask``). They are neither measurements nor
+#: something a nearest value can stand in for: interpolated, a new interior
+#: node between an epicardial node (2) and an interior one (0) reads 1,
+#: "base", and a solve would hold it there. Measured on a remeshed
+#: ventricle, 3,974 of 9,391 interior nodes came back labelled that way.
+#: So they are carried only between nodes that coincide; every other node
+#: is on no surface. If a destination boundary node matches no source node
+#: (the boundary was adapted), the field is dropped: the surfaces have to
+#: be labelled again, and a partial labelling would pass for a whole one.
+BOUNDARY_POINT_FIELDS: frozenset = frozenset({"surfaceLabelMask"})
+
+#: Two nodes coincide when closer than this share of the source's
+#: bounding-box diagonal. A frozen boundary comes back at machine zero, so
+#: the value only has to sit far below an edge length.
+_COINCIDENT_SHARE: float = 1e-9
+
+
+def _transfer_boundary_fields(src, dst, names) -> list:
+    """Carry :data:`BOUNDARY_POINT_FIELDS` by coincident nodes; see there.
+
+    Returns the names dropped because the boundary moved.
+    """
+    if not names:
+        return []
+    src_points = np.asarray(src.points, dtype=float)
+    dst_points = np.asarray(dst.points, dtype=float)
+    lo, hi = src_points.min(axis=0), src_points.max(axis=0)
+    tol = _COINCIDENT_SHARE * max(float(np.linalg.norm(hi - lo)), 1e-300)
+    distance, near = cKDTree(src_points).query(dst_points, k=1, workers=-1)
+    same = distance <= tol
+
+    surface = boundary_surface(dst)
+    outer = np.asarray(surface.point_data["vtkOriginalPointIds"], dtype=np.int64)
+    if not same[outer].all():
+        return list(names)
+    for name in names:
+        values = np.asarray(src.point_data[name])
+        out = np.zeros(dst.n_points, dtype=values.dtype)
+        out[same] = values[near[same]]
+        dst.point_data[name] = out
+    return []
 
 
 def _median_edge_length(mesh: pv.PolyData) -> float:
@@ -403,6 +446,9 @@ def transfer_volume_fields(src, dst,
     * **axial cell fields** (see :data:`AXIAL_CELL_FIELDS`) are averaged
       over the source cells the destination cell covers, by
       :func:`average_axial`, and renormalised.
+    * **boundary point fields** (see :data:`BOUNDARY_POINT_FIELDS`) are
+      copied between coincident nodes only, and are 0 everywhere else;
+      they are dropped if the boundary itself moved.
 
     ``exclude`` names fields the caller has already carried across by a
     better route — the remesher brings ``elemTag`` through as an MMG
@@ -418,7 +464,10 @@ def transfer_volume_fields(src, dst,
     skip = _INTERNAL_ARRAYS | frozenset(
         () if exclude is None else {str(e) for e in exclude})
 
-    point_names = [n for n in src.point_data.keys() if n not in skip]
+    point_names = [n for n in src.point_data.keys()
+                   if n not in skip and n not in BOUNDARY_POINT_FIELDS]
+    boundary_names = [n for n in src.point_data.keys()
+                      if n not in skip and n in BOUNDARY_POINT_FIELDS]
     cell_names = [n for n in src.cell_data.keys() if n not in skip]
 
     # -- point fields: VTK's probe does the containing-cell interpolation.
@@ -463,9 +512,16 @@ def transfer_volume_fields(src, dst,
             else:
                 dst.cell_data[name] = arr[containing]   # dtype, labels intact
 
+    dropped = _transfer_boundary_fields(src, dst, boundary_names)
+
     if on_status is not None:
         note = (f"; {outside} of {dst.n_points} vertices fell outside the "
                 f"previous mesh and took their nearest value"
                 if outside else "")
-        on_status(f"Transferred {len(point_names)} point and "
+        carried = len(point_names) + len(boundary_names) - len(dropped)
+        on_status(f"Transferred {carried} point and "
                   f"{len(cell_names)} cell fields{note}.")
+        if dropped:
+            on_status(f"The boundary moved, so {', '.join(dropped)} could not "
+                      f"be carried across and was dropped: label the surfaces "
+                      f"again.")
