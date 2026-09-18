@@ -15,6 +15,9 @@ an EAM mapping's Carto fields, or just the ``elemTag`` a plain mesh carries.
                    flagged rather than clamped.
 * **Iso lines**  — how many discrete colour bands the map is quantised into
                    (minimum 2); the band boundaries are the isolines.
+* **Show fibres** — short line segments along a volume's ``fiber`` (or
+                   ``sheet``) directions at a sample of elements, over a
+                   see-through surface. Greyed until the volume has fibres.
 
 Some fields are *categorical*: their values are labels, not measurements, so a
 continuous colour ramp over them would be meaningless. Those are drawn by the
@@ -41,6 +44,7 @@ DEFAULT_CMAP     = "viridis"
 DEFAULT_ISOLINES = 256      # a continuous-looking map; lower it to band
 MIN_ISOLINES     = 2
 MAX_ISOLINES     = 256
+DEFAULT_SEGMENTS = 20_000   # fibre segments drawn: enough to read, quick to draw
 
 POINT_FIELD = "point"
 CELL_FIELD = "cell"
@@ -52,6 +56,9 @@ class VisualisationWidget(QtWidgets.QGroupBox):
     # Emitted by the electrode checkbox alone: toggling visibility only needs
     # the electrode actor redrawn, not the whole field re-rendered.
     electrodes_toggled = QtCore.pyqtSignal(bool)
+    # Emitted by the fibre controls alone: the glyphs are their own actor,
+    # so changing them needs no re-render of the field underneath.
+    fibres_changed = QtCore.pyqtSignal()
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -120,6 +127,33 @@ class VisualisationWidget(QtWidgets.QGroupBox):
             "Greyed until a mapping with electrodes is loaded."
         )
         grid.addWidget(self.chk_electrodes, row, 0, 1, 2)
+        row += 1
+
+        self.chk_fibres = QtWidgets.QCheckBox("Show fibres")
+        self.chk_fibres.setEnabled(False)       # grey until a volume has fibres
+        self.chk_fibres.setToolTip(
+            "Draw short line segments along the volume's directions at a "
+            "sample of elements, and make the surface see-through so the "
+            "wall shows. Greyed until the volume carries 'fiber'.")
+        grid.addWidget(self.chk_fibres, row, 0, 1, 2)
+        row += 1
+
+        grid.addWidget(QtWidgets.QLabel("Direction:"), row, 0)
+        self.cmb_direction = QtWidgets.QComboBox()
+        self.cmb_direction.setToolTip("Which direction the segments follow.")
+        grid.addWidget(self.cmb_direction, row, 1)
+        row += 1
+
+        grid.addWidget(QtWidgets.QLabel("Segments:"), row, 0)
+        self.spn_segments = QtWidgets.QSpinBox()
+        self.spn_segments.setRange(1_000, 200_000)
+        self.spn_segments.setSingleStep(5_000)
+        self.spn_segments.setValue(DEFAULT_SEGMENTS)
+        self.spn_segments.setKeyboardTracking(False)
+        self.spn_segments.setToolTip(
+            "How many elements get a segment. More shows more detail and "
+            "draws more slowly.")
+        grid.addWidget(self.spn_segments, row, 1)
 
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
@@ -131,7 +165,11 @@ class VisualisationWidget(QtWidgets.QGroupBox):
         self.spn_max.valueChanged.connect(self._emit)
         self.spn_iso.valueChanged.connect(self._emit)
         self.chk_electrodes.toggled.connect(self.electrodes_toggled.emit)
+        self.chk_fibres.toggled.connect(self._on_fibres_toggled)
+        self.cmb_direction.currentIndexChanged.connect(self._emit_fibres)
+        self.spn_segments.valueChanged.connect(self._emit_fibres)
         self._sync_enabled()
+        self._sync_fibre_enabled()
 
     @staticmethod
     def _make_range_spin() -> QtWidgets.QDoubleSpinBox:
@@ -215,7 +253,48 @@ class VisualisationWidget(QtWidgets.QGroupBox):
         greying follows the data. Does not emit."""
         self.chk_electrodes.setEnabled(bool(available))
 
+    def set_fibre_directions(self, names: Sequence[str]) -> None:
+        """Offer these direction arrays; none greys the fibre controls.
+
+        The tick survives, as the electrode one does: a mesh arriving
+        without fibres greys it, and the next one with fibres shows them
+        again. Does not emit."""
+        current = self.fibre_direction()
+        self.cmb_direction.blockSignals(True)
+        self.cmb_direction.clear()
+        for name in names:
+            self.cmb_direction.addItem(str(name), str(name))
+        if current is not None:
+            i = self.cmb_direction.findData(current)
+            if i >= 0:
+                self.cmb_direction.setCurrentIndex(i)
+        self.cmb_direction.blockSignals(False)
+        self.chk_fibres.setEnabled(bool(names))
+        self._sync_fibre_enabled()
+
+    def show_fibres(self) -> bool:
+        return bool(self.chk_fibres.isChecked() and self.chk_fibres.isEnabled())
+
+    def fibre_direction(self) -> Optional[str]:
+        data = self.cmb_direction.currentData()
+        return None if data is None else str(data)
+
+    def fibre_segments(self) -> int:
+        return int(self.spn_segments.value())
+
     # -- internals ------------------------------------------------------
+    def _sync_fibre_enabled(self) -> None:
+        on = self.show_fibres()
+        self.cmb_direction.setEnabled(on)
+        self.spn_segments.setEnabled(on)
+
+    def _on_fibres_toggled(self, *_args) -> None:
+        self._sync_fibre_enabled()
+        self._emit_fibres()
+
+    def _emit_fibres(self, *_args) -> None:
+        self.fibres_changed.emit()
+
     def _sync_enabled(self) -> None:
         """Scale controls mean nothing for a label field, so switch them off
         rather than let them imply an effect they cannot have."""
@@ -240,5 +319,5 @@ class VisualisationWidget(QtWidgets.QGroupBox):
 
 __all__ = [
     "VisualisationWidget", "CMAPS", "DEFAULT_CMAP", "DEFAULT_ISOLINES",
-    "MIN_ISOLINES", "POINT_FIELD", "CELL_FIELD",
+    "MIN_ISOLINES", "POINT_FIELD", "CELL_FIELD", "DEFAULT_SEGMENTS",
 ]

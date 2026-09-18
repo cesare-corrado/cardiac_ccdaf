@@ -114,6 +114,8 @@ from ccdaf.core.surface_labels import (
     node_label_mask as surface_node_mask,
 )
 from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
+from ccdaf.core import ventricular_fibres as vfibres
+from ccdaf.gui.fibre_dialog import FibreDialog, FibreWorker
 from ccdaf.core.volume_clean import clean as clean_volume
 from ccdaf.core.volume_postprocessor import remesh as remesh_volume
 from ccdaf.core.volume_from_segmentation import carve, growth_outside
@@ -127,6 +129,10 @@ from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 
 
 # ---------------------------------------------------------------------------
+#: Surface opacity while fibre segments are drawn: low enough to see the
+#: segments inside the wall, high enough to keep the shape readable.
+FIBRE_SURFACE_OPACITY: float = 0.25
+
 LABEL_COLORS: Dict[int, str] = {
     BODY_LABEL: "#d9d9d9",
     11: "#e41a1c",
@@ -291,6 +297,9 @@ class CCDAF(QtWidgets.QMainWindow):
         self._seg_undo_stack: list = []  # up to 2 snapshots of _seg_array
         self._labels_dialog = None                          # surface labelling, non-modal
         self._labels_plane_widget = None                    # its draggable plane
+        self._fibre_dialog = None                           # fibre generation, non-modal
+        self._fibre_worker = None                           # its run, on a thread
+        self._apex_picking = False                          # the dialog holds the picker
         self._seg_plane_widget = None                       # plane-relabel gizmo
         self._seg_plane_normal: Optional[tuple] = None
         self._seg_plane_point: Optional[tuple] = None
@@ -427,6 +436,13 @@ class CCDAF(QtWidgets.QMainWindow):
             "endocardium and RV endocardium.")
         self.act_label_surfaces.triggered.connect(self._action_label_surfaces)
         actions_menu.addAction(self.act_label_surfaces)
+
+        self.act_generate_fibres = QtWidgets.QAction("Generate fibres…", self)
+        self.act_generate_fibres.setStatusTip(
+            "Set fibre and sheet directions in a labelled ventricular volume "
+            "(rule-based, Bayer et al. 2012).")
+        self.act_generate_fibres.triggered.connect(self._action_generate_fibres)
+        actions_menu.addAction(self.act_generate_fibres)
 
         # --- Export menu: the working mesh in another tool's format -----
         export_menu = menubar.addMenu("E&xport")
@@ -602,6 +618,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.vis_widget = VisualisationWidget()
         self.vis_widget.settings_changed.connect(self._render_field)
         self.vis_widget.electrodes_toggled.connect(self._on_electrodes_toggled)
+        self.vis_widget.fibres_changed.connect(self._render_fibres)
         body = self._register_section(v, "visualisation", "Visualisation")
         body.addWidget(self.vis_widget)
         self._set_section_visible("visualisation", False)
@@ -1085,7 +1102,7 @@ class CCDAF(QtWidgets.QMainWindow):
     #: Tools that drive the surface picker, by the name ``_release_picker``
     #: knows them under. PyVista keeps **one** picker per render window, so
     #: only one of these may hold it at a time.
-    PICKER_TOOLS = ("seeds", "selection", "snake", "clip")
+    PICKER_TOOLS = ("seeds", "selection", "snake", "clip", "apex")
 
     def _release_picker(self, *, keep: Optional[str] = None) -> list:
         """Take the shared picker off whichever tool holds it.
@@ -1139,6 +1156,12 @@ class CCDAF(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 stopped.append("selection mode")
+
+        if keep != "apex" and self._apex_picking:
+            self._apex_picking = False
+            if self._fibre_dialog is not None:
+                self._fibre_dialog.uncheck_pick()
+            stopped.append("apex picking")
 
         if (keep != "clip" and self.clipper is not None
                 and self.clipper.mode is not ClipMode.NONE):
@@ -1284,6 +1307,8 @@ class CCDAF(QtWidgets.QMainWindow):
         That is exactly what it did.
         """
         mesh = self.loader.mesh
+        # A fibre window measured the mesh that was here before.
+        self._close_fibre_dialog()
         # Before anything asks what fields the mesh has: a labelling read
         # back from a file arrives as the node mask alone, and the faces
         # are rebuilt from it here. Done later — next to the editor setup,
@@ -1487,6 +1512,7 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         if self._seg_array is not None:
             self._close_segmentation()
+        self._close_fibre_dialog()
 
         # EAM state.
         self._eam_directory = None
@@ -1908,6 +1934,12 @@ class CCDAF(QtWidgets.QMainWindow):
         # A mesh arriving or changing is what makes a field to read a
         # tissue property from appear or disappear.
         self._sync_menu_actions()
+        grid = self.loader.grid if self.loader.kind == VOLUME else None
+        self.vis_widget.set_fibre_directions(
+            [] if grid is None else
+            [n for n in (vfibres.FIBRE_FIELD, vfibres.SHEET_FIELD)
+             if n in grid.cell_data and np.asarray(grid.cell_data[n]).ndim == 2])
+        self._render_fibres()
 
     def _render_field(self, *_args) -> None:
         """Draw whichever field the visualisation widget has selected.
@@ -1925,6 +1957,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self._render_mesh(self.vis_widget.current_field())
         else:
             self._render_scalar_field()
+        self._apply_fibre_see_through()
 
     def _render_scalar_field(self, *_args) -> None:
         """Colour the working mesh by the selected measured field and (re)draw
@@ -3020,7 +3053,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self.clipper.on_pose_changed = self._on_clip_pose_changed
         self.mesh_info.update_info(new_mesh, volume=self.loader.grid)
 
-    def _replace_volume(self, new_grid) -> None:
+    def _replace_volume(self, new_grid, *, fibre_note: bool = True) -> None:
         """Adopt ``new_grid`` as the working volume and rebuild around it.
 
         The volume counterpart of :meth:`_replace_mesh`. The boundary
@@ -3032,6 +3065,18 @@ class CCDAF(QtWidgets.QMainWindow):
         # is about to stop existing, so it goes rather than being left to
         # write face labels against a boundary of a different length.
         self._close_labels_dialog()
+        # Fibres describe one mesh with one labelling: see
+        # ventricular_fibres.reconcile for what each change does to them.
+        # The old grid's stamp is passed because a remesh or a clean builds
+        # a new grid that keeps the arrays but not the field data saying
+        # whose they are.
+        previous = (vfibres.stamp(self.loader.grid)
+                    if self.loader.grid is not None else None)
+        outcome = vfibres.reconcile(new_grid, previous)
+        if self._fibre_dialog is not None and not self._fibre_dialog.matches(new_grid):
+            self._close_fibre_dialog()
+        if outcome is not None and fibre_note:
+            self._report_fibres(outcome)
         self.loader.set_volume(new_grid)
         self._sync_surface_labels()
         self._mark_dirty()
@@ -3065,6 +3110,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Remeshing volume…")
         QtWidgets.QApplication.processEvents()
         before = self.loader.grid.n_cells
+        had_labels = LABEL_MASK_FIELD in self.loader.grid.point_data
         try:
             new_grid = remesh_volume(
                 self.loader.grid, options,
@@ -3080,6 +3126,13 @@ class CCDAF(QtWidgets.QMainWindow):
         note = (f"{before} → {new_grid.n_cells} tetrahedra"
                 + ("" if options.freeze_boundary
                    else "; the boundary was adapted and has moved"))
+        # A moved boundary cannot keep its surface labels (see
+        # field_transfer.BOUNDARY_POINT_FIELDS). The transfer says so, but
+        # its line is overwritten by the remesh's own a moment later, and a
+        # labelling that vanishes unannounced looks like a bug.
+        if had_labels and LABEL_MASK_FIELD not in new_grid.point_data:
+            note += ("; the surface labels could not follow the moved "
+                     "boundary and were dropped: label the surfaces again")
         self.volume_postproc.set_status(note)
         self.statusBar().showMessage(f"Remesh complete — {note}.")
 
@@ -3147,6 +3200,18 @@ class CCDAF(QtWidgets.QMainWindow):
             can_label, label_why = True, ""
         self.act_label_surfaces.setEnabled(can_label)
         self.act_label_surfaces.setToolTip(label_why)
+
+        # Fibres need the labels as well as the volume.
+        if self._seg_array is not None:
+            can_fibre, fibre_why = False, "Close the segmentation first."
+        elif self._fibre_worker is not None:
+            can_fibre, fibre_why = False, "Fibres are being generated."
+        elif self.loader.kind != VOLUME:
+            can_fibre, fibre_why = False, "Load a tetrahedral volume first."
+        else:
+            can_fibre, fibre_why = vfibres.availability(self.loader.grid)
+        self.act_generate_fibres.setEnabled(can_fibre)
+        self.act_generate_fibres.setToolTip(fibre_why)
 
         # Exporting reads the mesh and changes nothing, so it needs only a
         # mesh — not a field to read, and not the segmentation closed.
@@ -3351,6 +3416,214 @@ class CCDAF(QtWidgets.QMainWindow):
         self._set_section_visible("visualisation", True)
         self._render_field()
         self.statusBar().showMessage(labels.summary(), 30000)
+
+    # ==================================================================
+    # Actions → Generate fibres
+    # ==================================================================
+    def _action_generate_fibres(self) -> None:
+        """Open the fibre window, non-modally so the apex can be clicked."""
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+        if self._fibre_dialog is not None:
+            self._fibre_dialog.raise_()
+            self._fibre_dialog.activateWindow()
+            return
+        ok, why = vfibres.availability(self.loader.grid)
+        if not ok:
+            QtWidgets.QMessageBox.warning(self, "Generate fibres", why)
+            return
+        dlg = FibreDialog(self.loader.grid, parent=self)
+        self._fibre_dialog = dlg
+        dlg.apex_changed.connect(self._show_apex)
+        dlg.pick_requested.connect(self._fibre_pick_apex)
+        dlg.run_requested.connect(self._fibre_run)
+        dlg.finished.connect(self._fibre_dialog_finished)
+        if self._fibre_worker is not None:
+            dlg.set_running(True)
+            dlg.set_status("A run is still in progress…")
+        dlg.show()
+
+    def _show_apex(self, apex) -> None:
+        """Mark the apex nodes, or clear the marker for ``None``."""
+        try:
+            self.plotter.remove_actor("fibre_apex", reset_camera=False)
+        except Exception:
+            pass
+        grid = self.loader.grid
+        if apex is None or grid is None:
+            self.plotter.render()
+            return
+        self.plotter.add_points(
+            np.asarray(grid.points)[apex.nodes], color="#ffd700",
+            point_size=14, render_points_as_spheres=True, name="fibre_apex",
+            pickable=False, reset_camera=False)
+        self.plotter.render()
+
+    def _fibre_pick_apex(self, on: bool) -> None:
+        """Hand the surface picker to the fibre window, or take it back."""
+        if not on:
+            if self._apex_picking:
+                self._apex_picking = False
+                try:
+                    self.plotter.disable_picking()
+                except Exception:
+                    pass
+            return
+        self._focus_3d()
+        self._take_picker("apex")
+        try:
+            self.plotter.enable_point_picking(
+                callback=self._on_apex_pick, picker="hardware",
+                use_picker=True, show_message=False, show_point=False,
+                pickable_window=False, left_clicking=True)
+        except Exception as exc:
+            if self._fibre_dialog is not None:
+                self._fibre_dialog.uncheck_pick()
+            QtWidgets.QMessageBox.warning(
+                self, "Generate fibres", f"Could not start picking:\n{exc}")
+            return
+        self._apex_picking = True
+        self.statusBar().showMessage(
+            "Click the epicardium where the apex is; the nearest epicardial "
+            "node is taken.")
+
+    def _on_apex_pick(self, point, *_args, **_kwargs) -> None:
+        if not self._apex_picking or self._fibre_dialog is None or point is None:
+            return
+        self._fibre_dialog.set_apex_at(point)
+
+    def _fibre_run(self, apex, angles) -> None:
+        """Start a run on a worker thread."""
+        dlg = self._fibre_dialog
+        grid = self.loader.grid
+        if self._fibre_worker is not None or dlg is None or grid is None:
+            return
+        points, tets, mask = dlg.inputs()
+        worker = FibreWorker(points, tets, mask, apex, angles,
+                             vfibres.cached_fields(grid, apex), parent=self)
+        worker.status.connect(self._fibre_status)
+        worker.done.connect(self._fibre_done)
+        worker.failed.connect(self._fibre_failed)
+        worker.finished.connect(self._fibre_worker_finished)
+        self._fibre_worker = worker
+        dlg.set_running(True)
+        dlg.set_status("Starting…")
+        self._sync_menu_actions()
+        worker.start()
+
+    def _fibre_status(self, text: str) -> None:
+        if self._fibre_dialog is not None:
+            self._fibre_dialog.set_status(text)
+        self.statusBar().showMessage(text)
+
+    def _fibre_done(self, run) -> None:
+        """Write a finished run, unless the mesh changed under it."""
+        grid = self.loader.grid
+        current = (vfibres.digest(*vfibres.inputs(grid))
+                   if self.loader.kind == VOLUME and grid is not None
+                   and LABEL_MASK_FIELD in grid.point_data else None)
+        if current is None or not np.array_equal(current, run.digest):
+            text = ("The mesh or its labels changed while the fibres were "
+                    "being generated, so the result was discarded.")
+            self._fibre_status(text)
+            return
+        vfibres.write(grid, run)
+        # Re-derive the boundary so the view lists the Laplace fields; the
+        # digest still matches, so nothing is dropped and the window stays.
+        self._replace_volume(grid, fibre_note=False)
+        self.vis_widget.chk_fibres.setChecked(True)
+        if self._fibre_dialog is not None:
+            self._fibre_dialog.set_status(run.details())
+            self._fibre_dialog.refresh_provenance(grid)
+        self.statusBar().showMessage(run.summary(), 30000)
+
+    def _fibre_failed(self, text: str) -> None:
+        self._fibre_status(f"Fibre generation failed:\n{text}")
+        QtWidgets.QMessageBox.warning(self, "Generate fibres", text)
+
+    def _fibre_worker_finished(self) -> None:
+        worker = self._fibre_worker
+        self._fibre_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if self._fibre_dialog is not None:
+            self._fibre_dialog.set_running(False)
+        self._sync_menu_actions()
+
+    def _fibre_dialog_finished(self, _result: int) -> None:
+        dlg = self._fibre_dialog
+        self._fibre_dialog = None
+        self._fibre_pick_apex(False)
+        self._show_apex(None)
+        if dlg is not None:
+            dlg.deleteLater()
+
+    def _close_fibre_dialog(self) -> None:
+        """Shut the fibre window: the mesh it measured is going away.
+
+        A run in flight carries on; its result is checked against the mesh
+        when it arrives, and discarded if the mesh is not the one it used.
+        """
+        if self._fibre_dialog is not None:
+            self._fibre_dialog.reject()           # finished → the tidy-up above
+
+    #: What each outcome of a mesh change did to the fibres, in words.
+    FIBRE_NOTES = {
+        vfibres.KEPT: "Mesh and labels unchanged: fibres kept.",
+        vfibres.CARRIED: "The mesh changed: the fibres were carried across "
+                         "by interpolation. Generate again for fibres solved "
+                         "on this mesh.",
+        vfibres.REMOVED: "The surface labels changed, so the fibres built on "
+                         "the old labels were removed.",
+    }
+
+    def _report_fibres(self, outcome: str) -> None:
+        """Say what a mesh change did to the fibres, after the change's own
+        message rather than instead of it."""
+        note = self.FIBRE_NOTES.get(outcome)
+        if not note:
+            return
+        if self._fibre_dialog is not None:
+            self._fibre_dialog.set_note(note)
+
+        def _show():
+            current = self.statusBar().currentMessage()
+            text = note if not current or note in current else f"{current}  {note}"
+            self.statusBar().showMessage(text, 20000)
+        # Queued, because the operation that replaced the volume reports
+        # its own result right after this returns.
+        QtCore.QTimer.singleShot(0, _show)
+
+    def _render_fibres(self, *_args) -> None:
+        """Draw (or clear) the fibre segments over a see-through surface."""
+        try:
+            self.plotter.remove_actor("fibre_glyphs", reset_camera=False)
+        except Exception:
+            pass
+        grid = self.loader.grid if self.loader.kind == VOLUME else None
+        name = self.vis_widget.fibre_direction()
+        if (grid is not None and self.vis_widget.show_fibres()
+                and name is not None and name in grid.cell_data):
+            try:
+                lines = vfibres.segments(grid, name, self.vis_widget.fibre_segments())
+                self.plotter.add_mesh(lines, color="white", line_width=2,
+                                      name="fibre_glyphs", pickable=False,
+                                      reset_camera=False)
+            except Exception as exc:
+                self.statusBar().showMessage(f"Could not draw the fibres: {exc}")
+        self._apply_fibre_see_through()
+        self.plotter.render()
+
+    def _apply_fibre_see_through(self) -> None:
+        """Fade the surface while fibres are shown, so the wall is visible."""
+        actor = self._mesh_actor
+        if actor is None:
+            return
+        shown = (self.loader.kind == VOLUME and self.vis_widget.show_fibres())
+        try:
+            actor.GetProperty().SetOpacity(FIBRE_SURFACE_OPACITY if shown else 1.0)
+        except Exception:
+            pass
 
     def _action_export_carp(self) -> None:
         """Export → Carp: write the working mesh as CARP files."""

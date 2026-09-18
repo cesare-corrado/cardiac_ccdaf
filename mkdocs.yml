@@ -79,6 +79,7 @@ nav:
       - Post-processing: user-guide/post-processing.md
       - Tissue properties: user-guide/tissue-properties.md
       - Surface labels: user-guide/surface-labels.md
+      - Fibres: user-guide/fibres.md
       - Export: user-guide/export.md
       - EAM & visualisation: user-guide/eam-visualisation.md
   - Keyboard & mouse: shortcuts.md
