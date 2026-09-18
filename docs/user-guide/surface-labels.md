@@ -5,7 +5,8 @@
 Splits a truncated tetrahedral volume's boundary into four named surfaces:
 the **base**, the **epicardium**, the **LV endocardium** and the
 **RV endocardium**. Those four are what a rule-based fibre generator needs, and
-they are the input a Laplace–Dirichlet method puts its boundary conditions on.
+they are the input a Laplace–Dirichlet method puts its boundary conditions on:
+see [Fibres](fibres.md).
 
 ## Why a plane is needed at all
 

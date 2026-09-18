@@ -40,6 +40,9 @@ Controls how the mesh is coloured:
 - **Iso lines** — number of discrete colour bands.
 - **Show electrodes** — draw the mapping's electrode positions (greyed until a
   mapping with electrodes is loaded).
+- **Show fibres**, **Direction**, **Segments**: draw a volume's `fiber` or
+  `sheet` directions as line segments over a see-through surface (greyed until
+  the volume carries `fiber`). See [Fibres](fibres.md#showing-the-fibres).
 
 The **Visualise** menu and the **Display** options control which overlays
 (points, projected points, slices) are shown.

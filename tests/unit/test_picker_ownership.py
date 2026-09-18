@@ -114,7 +114,7 @@ def test_every_ordered_pairing_survives(mesh, plotter):
 # ------------------------------------------------------------- the arbiter
 
 
-def _host(*, snake=False, selecting=False, clip=False, seeds=False):
+def _host(*, snake=False, selecting=False, clip=False, seeds=False, apex=False):
     """Stand-in carrying just what ``_release_picker`` touches."""
     host = MagicMock()
     host.editor.snake_active = snake
@@ -124,6 +124,7 @@ def _host(*, snake=False, selecting=False, clip=False, seeds=False):
     sel.is_active = seeds
     host._selectors = {"pv": sel}
     host._seed_sel = sel
+    host._apex_picking = apex
     return host
 
 
@@ -207,6 +208,7 @@ def test_release_without_tools_does_not_crash():
     host._selectors = {}
     host.editor = None
     host.clipper = None
+    host._apex_picking = False
     assert CCDAF._release_picker(host) == []
 
 
@@ -321,3 +323,19 @@ def test_take_picker_does_not_stop_its_own_tool():
     CCDAF._take_picker(host, "snake")
     host.editor.stop_snake.assert_not_called()   # the caller
     host._seed_sel.stop.assert_called_once()     # the holder
+
+
+def test_apex_picking_is_stopped_and_its_button_put_back():
+    """The fibre window's apex pick is one more holder of the picker."""
+    from ccdaf.app.ccdaf import CCDAF
+    host = _host(apex=True)
+    assert CCDAF._release_picker(host) == ["apex picking"]
+    assert host._apex_picking is False
+    host._fibre_dialog.uncheck_pick.assert_called_once()
+
+
+def test_apex_picking_survives_taking_the_picker_for_itself():
+    from ccdaf.app.ccdaf import CCDAF
+    host = _host(apex=True)
+    assert CCDAF._release_picker(host, keep="apex") == []
+    assert host._apex_picking is True
