@@ -233,12 +233,33 @@ ORIENTATIONS = ("axial", "sagittal", "coronal")
 
 
 # ---------------------------------------------------------------------------
+#: The window title with nothing open.
+APP_TITLE = "CCDAF — Cardiac Clinical Data Analysis Framework"
+
+
+def display_name(filename: str) -> str:
+    """*filename* without its folder or extension, as the title shows it.
+
+    ``.nii.gz`` counts as one extension: a segmentation would otherwise
+    show as ``name.nii``.
+    """
+    name = Path(filename).name
+    if name.lower().endswith(".nii.gz"):
+        return name[:-len(".nii.gz")]
+    return Path(name).stem
+
+
+def window_title(name: Optional[str] = None) -> str:
+    """The main window's title, naming the open file when there is one."""
+    return f"{APP_TITLE} — {name}" if name else APP_TITLE
+
+
 class CCDAF(QtWidgets.QMainWindow):
     """Qt main window hosting the PyVista view and the full workflow."""
 
     def __init__(self, initial_data: Optional[str] = None) -> None:
         super().__init__()
-        self.setWindowTitle("CCDAF — Cardiac Clinical Data Analysis Framework")
+        self.setWindowTitle(window_title())
         screen = QtWidgets.QApplication.primaryScreen()
         avail = screen.availableGeometry() if screen is not None else None
         if avail is not None:
@@ -1288,6 +1309,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.recent_folder = Path(filename).resolve().parent
         self._set_segmentation(img)
         self._clear_seg_dirty()
+        self.setWindowTitle(window_title(display_name(filename)))
         self.statusBar().showMessage(
             f"Loaded segmentation {Path(filename).name}"
             f"{self._seg_orientation_note()}")
@@ -1307,6 +1329,7 @@ class CCDAF(QtWidgets.QMainWindow):
         That is exactly what it did.
         """
         mesh = self.loader.mesh
+        self.setWindowTitle(window_title(display_name(source_name)))
         # A fibre window measured the mesh that was here before.
         self._close_fibre_dialog()
         # Before anything asks what fields the mesh has: a labelling read
@@ -1532,6 +1555,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.tagger = None
         self.loader.set_surface(None)
         self.loader.path = None
+        self.setWindowTitle(window_title())
         self._seg_source = None
         self._transfer_note = None
 
@@ -1740,6 +1764,9 @@ class CCDAF(QtWidgets.QMainWindow):
         # Adopt as the working mesh and (re)build the mesh-side tools.
         self.loader.set_surface(mesh)
         self.loader.path = None
+        # An EAM comes from a study folder, not one file: the map is what
+        # was chosen, so the map is what the title names.
+        self.setWindowTitle(window_title(map_name))
         self.tagger = RegionTagger(mesh)
         self.clipper = ClippingTool(
             mesh_getter=lambda: self.loader.mesh,
