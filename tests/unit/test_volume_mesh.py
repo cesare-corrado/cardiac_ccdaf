@@ -269,3 +269,71 @@ def test_the_surface_is_what_the_mesh_tools_get(tmp_path, volumetric):
             RegionTagger(returned)
     else:
         assert returned is loader.mesh
+
+
+# ------------------------------------------------- packed-key uniques
+def test_a_packed_key_unique_is_the_one_it_replaces():
+    """The face table's sort, done as one key instead of three columns.
+
+    ``np.unique(axis=0)`` lexsorts column by column and is the single
+    most expensive step in a clean; packing each row into one opaque key
+    is three times faster. It is only allowed to be faster if it is
+    otherwise indistinguishable, so it is compared against the call it
+    replaced, for every row width the mesh code uses.
+    """
+    rng = np.random.default_rng(1)
+    for width in (2, 3, 4):
+        rows = rng.integers(0, 50, size=(2000, width), dtype=np.int64)
+        expected = np.unique(rows, axis=0, return_inverse=True,
+                             return_counts=True)
+        got = vm.unique_rows(rows)
+        assert np.array_equal(expected[0], got[0])
+        assert np.array_equal(expected[1].ravel(), got[1].ravel())
+        assert np.array_equal(expected[2], got[2])
+
+        expected = np.unique(np.sort(rows, axis=1), axis=0,
+                             return_inverse=True, return_counts=True)
+        got = vm.sorted_unique_rows(rows)
+        assert np.array_equal(expected[0], got[0])
+        assert np.array_equal(expected[2], got[2])
+
+
+def test_packed_rows_come_back_ordered_by_their_first_column():
+    """The property the vertex-fan split depends on.
+
+    It walks the unique ``(node, fan)`` pairs assuming every pair for one
+    node is adjacent. Little-endian keys compare least significant byte
+    first and break exactly that, while returning the same set of rows —
+    a bug that would show up as a mangled split and nothing else.
+    """
+    rng = np.random.default_rng(2)
+    rows = rng.integers(0, 30, size=(500, 2), dtype=np.int64)
+    first = vm.unique_rows(rows)[0][:, 0]
+    assert (np.diff(first) >= 0).all()
+
+
+def test_ids_too_large_to_pack_fall_back_rather_than_lie():
+    rows = np.array([[0, 2 ** 32], [1, 2], [0, 2 ** 32]], dtype=np.int64)
+    got = vm.unique_rows(rows)
+    assert np.array_equal(got[0], np.unique(rows, axis=0))
+    assert np.array_equal(got[2], np.array([2, 1]))   # the first row twice
+
+
+def test_an_empty_table_is_empty_and_keeps_its_shape():
+    rows, inverse, counts = vm.unique_rows(np.zeros((0, 3), dtype=np.int64))
+    assert rows.shape == (0, 3)
+    assert inverse.shape == (0,) and counts.shape == (0,)
+
+
+def test_a_shared_face_table_is_the_one_that_was_passed_in():
+    """What makes the sharing safe: it is returned, never recomputed."""
+    tets = np.array([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=np.int64)
+    table = vm.face_table(tets)
+    assert vm.face_table(tets, table) is table
+    assert np.array_equal(vm.boundary_faces(tets, table),
+                          vm.boundary_faces(tets))
+    faces, owners, apexes = vm.boundary_table(tets, table)
+    again = vm.boundary_table(tets)
+    assert np.array_equal(faces, again[0])
+    assert np.array_equal(owners, again[1])
+    assert np.array_equal(apexes, again[2])

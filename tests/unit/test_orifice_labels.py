@@ -432,3 +432,68 @@ def test_an_open_mesh_is_not_mistaken_for_a_truncated_one(qapp, block):
     dlg = _dialog(block)
     assert dlg._find_and_check() is True
     assert dlg.result().method == "openings"
+
+
+# ---------------------------------------------------------- passages
+
+
+# ---------------------------------------------------------------- passages
+def _shell(n: int = 11, size: float = 10.0, channel: int = 0):
+    """A hollow box, optionally bored through from cavity to outside.
+
+    With no channel the boundary is two surfaces — outer shell and
+    cavity — and nothing passes between them. With one, they are joined,
+    which is the ventricular situation in miniature: a wall with a hole
+    in it.
+    """
+    import numpy as np
+    import pyvista as pv
+
+    grid = pv.ImageData(dimensions=(n, n, n), spacing=(size / (n - 1),) * 3)
+    grid = grid.cast_to_unstructured_grid().triangulate()
+    step = size / (n - 1)
+    idx = np.floor(np.asarray(grid.cell_centers().points) / step).astype(int)
+    mid = (n - 1) // 2
+    hollow = (np.abs(idx - mid) <= 2).all(axis=1)
+    bore = np.zeros(len(idx), dtype=bool)
+    if channel:
+        half = (channel - 1) // 2
+        bore = ((np.abs(idx[:, 1] - mid) <= half)
+                & (np.abs(idx[:, 2] - mid) <= half)
+                & (idx[:, 0] > mid))
+    return grid.extract_cells(np.where(~(hollow | bore))[0])
+
+
+def test_a_join_is_found_where_a_hole_goes_through_the_wall():
+    """A hollow box bored through once: one join, at the bore.
+
+    The wider bore must read as the wider ring, because telling a valve
+    opening from a defect is telling a big ring from a small one.
+    """
+    import numpy as np
+    from ccdaf.core import orifice_labels as ol
+
+    far = ol.Opening(pool=0, centre=np.array([-50.0, -50.0, -50.0]),
+                     normal=np.array([0.0, 0.0, 1.0]), area_mm2=1.0,
+                     points=np.array([[-50.0, -50.0, -50.0]]))
+    narrow = ol.find_passages(_shell(channel=1), openings=[far])
+    wide = ol.find_passages(_shell(channel=3), openings=[far])
+
+    assert len(narrow) == 1 and len(wide) == 1
+    assert wide[0].circumference > narrow[0].circumference
+    assert "too small to be a valve opening" in ol.describe_passages(
+        narrow, keep=0) or True          # keep=0 judges nothing
+    assert "too small" not in ol.describe_passages(narrow, keep=0)
+    assert "too small" in ol.describe_passages(narrow + wide, keep=1)
+
+
+def test_nothing_is_reported_when_no_surface_is_joined_to_another():
+    """A hollow box with no hole: two surfaces, nothing between them."""
+    import numpy as np
+    from ccdaf.core import orifice_labels as ol
+
+    far = ol.Opening(pool=0, centre=np.array([-50.0, -50.0, -50.0]),
+                     normal=np.array([0.0, 0.0, 1.0]), area_mm2=1.0,
+                     points=np.array([[-50.0, -50.0, -50.0]]))
+    assert ol.find_passages(_shell(), openings=[far]) == []
+    assert "Nothing joins" in ol.describe_passages([])

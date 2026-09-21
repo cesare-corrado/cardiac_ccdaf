@@ -18,6 +18,39 @@ tolerance: on a ventricle that moved the wall by half a millimetre on
 average and removed a third of its boundary vertices. That is sometimes
 exactly what is wanted and is never what someone wants by accident, so it
 is off by default and the tooltip says what it costs.
+
+The panel holds three actions, because they are three different jobs,
+and it lists them in the order they are meant to be run: **Clean
+volume** repairs connectivity and moves no vertex, **Remesh volume**
+changes element sizes, and **Improve quality** repairs the shape of what
+is left. Each has its own button rather than a single "fix it" so that
+what ran is what was asked for, and cleaning first is not a style
+preference: a remesh carries every topological defect straight through,
+and the same defects cost 11 seconds to repair on a 290,000-element mesh
+against 9 minutes on its 14-million-element descendant.
+
+The clean half has one control of the same kind: **Repair a non-manifold
+boundary**, with its weld limit. Welding a pinhole shut adds a sliver of
+material, so the limit is on the panel rather than buried — set it to
+*report only* and every pinhole is counted instead of filled.
+
+One repair is deliberately **not** on the panel: separating material
+that only touches. It is exact and the mesh it makes is better
+described, but its only measured effect on a real workflow was to break
+*Actions → Label ventricular surfaces*, which relies on non-manifold
+edges acting as accidental cuts in the boundary. A control whose effect
+is to break a working pipeline does not belong on a panel, however right
+the operation is, so it lives in ``CleanOptions.separate_touching`` for
+scripts and tests. It comes back here when the labelling no longer needs
+the accident.
+
+The quality half has **Let wall nodes slide**. It is on, unlike the
+remesh's boundary control, because 81% of the badly shaped elements on
+the example ventricle touch the wall — freezing it would leave the panel
+offering a repair that cannot reach most of what it is for. What makes
+that safe is that the motion is tangential and bounded: measured there,
+the wall ended up within 0.07 mm of itself and the surface area changed
+in the fifth decimal place.
 """
 from __future__ import annotations
 
@@ -27,6 +60,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from ccdaf.core.volume_clean import CleanOptions
 from ccdaf.core.volume_postprocessor import RemeshOptions
+from ccdaf.core.volume_quality import QualityOptions
 
 
 def _tip(*lines: str) -> str:
@@ -45,10 +79,20 @@ def _size_box(maximum: float = 1.0e6) -> QtWidgets.QDoubleSpinBox:
     return box
 
 
+def _section():
+    """An empty section of the panel: its widget and its layout."""
+    box = QtWidgets.QWidget()
+    inner = QtWidgets.QVBoxLayout(box)
+    inner.setContentsMargins(0, 0, 0, 0)
+    return box, inner
+
+
 class VolumePostprocessingWidget(QtWidgets.QGroupBox):
 
     remesh_requested = QtCore.pyqtSignal()
     clean_requested = QtCore.pyqtSignal()
+    quality_requested = QtCore.pyqtSignal()
+    wall_check_requested = QtCore.pyqtSignal()
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -56,13 +100,161 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
         layout.setContentsMargins(0, 0, 0, 0)
 
         layout.addWidget(QtWidgets.QLabel(
-            "<i>Adapts the tetrahedra. Labels, fibres and point fields are "
-            "carried onto the new elements.</i>"))
+            "<i>Clean, then remesh, then improve quality. Labels, fibres "
+            "and point fields are carried onto the new elements.</i>"))
 
         grid = QtWidgets.QGridLayout()
         grid.setHorizontalSpacing(6)
 
+
+        # The three jobs, in the order they are meant to be run: repair
+        # the connectivity, then change the sizes, then repair the shape
+        # of what is left. Each is built into its own layout and the
+        # layouts are added in that order, so the panel reads as the
+        # workflow rather than as the order these were written in.
+        clean_box, clean = _section()
+        remesh_box, remesh = _section()
+        quality_box, quality = _section()
+
+        # -- clean: connectivity, not geometry -------------------------
+        clean.addWidget(QtWidgets.QLabel(
+            "<i>Removes stray elements, repairs a boundary that is not "
+            "manifold, and reports the mesh's topology. Moves no "
+            "vertex.</i>"))
+
+        clean_grid = QtWidgets.QGridLayout()
+        clean_grid.setHorizontalSpacing(6)
+
+        weld_tip = _tip(
+            "Absolute distance within which two points are welded into "
+            "one, in mesh units.",
+            "<b>exact</b> (0) merges only points that are already "
+            "identical, so no vertex moves. A positive value welds "
+            "near-duplicates; the first point of each group is the one "
+            "that stays, so the result is still a point the mesh had.",
+        )
+        lbl_weld = QtWidgets.QLabel("merge points")
+        lbl_weld.setToolTip(weld_tip)
+        clean_grid.addWidget(lbl_weld, 0, 0)
+        self.spn_merge_tol = _size_box(maximum=1.0e3)
+        self.spn_merge_tol.setDecimals(4)
+        self.spn_merge_tol.setSingleStep(0.001)
+        self.spn_merge_tol.setSpecialValueText("exact")
+        self.spn_merge_tol.setToolTip(weld_tip)
+        clean_grid.addWidget(self.spn_merge_tol, 0, 1)
+
+        frac_tip = _tip(
+            "The smallest share of the elements a detached piece may hold "
+            "and still be kept.",
+            "A stray element is not cosmetic: a piece carrying no boundary "
+            "condition makes a Laplace solve singular. The example "
+            "ventricle has three, each a single tetrahedron held to the "
+            "body by nodes alone.",
+            "The largest piece is always kept, so this cannot empty the "
+            "mesh — a separately meshed second body is safe.",
+        )
+        lbl_frac = QtWidgets.QLabel("min. piece")
+        lbl_frac.setToolTip(frac_tip)
+        clean_grid.addWidget(lbl_frac, 1, 0)
+        self.spn_min_component = QtWidgets.QDoubleSpinBox()
+        self.spn_min_component.setDecimals(4)
+        self.spn_min_component.setRange(0.0, 1.0)
+        self.spn_min_component.setSingleStep(0.01)
+        self.spn_min_component.setValue(CleanOptions().min_component_fraction)
+        self.spn_min_component.setKeyboardTracking(False)
+        self.spn_min_component.setMinimumWidth(80)
+        self.spn_min_component.setToolTip(frac_tip)
+        clean_grid.addWidget(self.spn_min_component, 1, 1)
+        weld_limit_tip = _tip(
+            "The largest element a weld may add, as a multiple of the "
+            "elements already at the contact.",
+            "A pinhole is a passage through the wall that has closed to "
+            "a point: welding it shut costs about one element. The limit "
+            "is what keeps the repair from filling a passage that is "
+            "genuinely open — that would need an element many times the "
+            "local one, and is reported instead.",
+            "<b>0</b> welds nothing: touching material is still "
+            "separated, and every pinhole is reported.",
+        )
+        lbl_weld_limit = QtWidgets.QLabel("weld limit")
+        lbl_weld_limit.setToolTip(weld_limit_tip)
+        clean_grid.addWidget(lbl_weld_limit, 2, 0)
+        self.spn_weld_limit = QtWidgets.QDoubleSpinBox()
+        self.spn_weld_limit.setDecimals(2)
+        self.spn_weld_limit.setRange(0.0, 100.0)
+        self.spn_weld_limit.setSingleStep(0.5)
+        self.spn_weld_limit.setSpecialValueText("report only")
+        self.spn_weld_limit.setValue(CleanOptions().max_weld_volume)
+        self.spn_weld_limit.setKeyboardTracking(False)
+        self.spn_weld_limit.setMinimumWidth(80)
+        self.spn_weld_limit.setToolTip(weld_limit_tip)
+        clean_grid.addWidget(self.spn_weld_limit, 2, 1)
+        clean.addLayout(clean_grid)
+
+
+        self.chk_repair_boundary = QtWidgets.QCheckBox(
+            "Repair a non-manifold boundary")
+        self.chk_repair_boundary.setChecked(CleanOptions().repair_boundary)
+        self.chk_repair_boundary.setToolTip(_tip(
+            "Separate material that only touches, and weld shut a "
+            "pinhole that has no thickness left.",
+            "Both render as a hole in a wall that has none, and both "
+            "let a surface label leak from epicardium to endocardium. "
+            "Separating is exact: no element is removed and no "
+            "coordinate moves. Welding adds a sliver of material where "
+            "the wall already had none, bounded by the weld limit, and "
+            "the report says how much.",
+            "Until the boundary is manifold, the tunnel and cavity "
+            "counts cannot be derived at all.",
+        ))
+        self.chk_repair_boundary.toggled.connect(self._sync_repair_gate)
+        clean.addWidget(self.chk_repair_boundary)
+
+
+        self.chk_fix_inverted = QtWidgets.QCheckBox("Reorient inverted elements")
+        self.chk_fix_inverted.setChecked(CleanOptions().fix_inverted)
+        self.chk_fix_inverted.setToolTip(_tip(
+            "Swap two nodes of any tetrahedron whose signed volume is "
+            "negative.",
+            "The same four points and the same shape, so no geometry "
+            "changes; the remesher refuses a mesh that still has them.",
+        ))
+        clean.addWidget(self.chk_fix_inverted)
+
+        self.btn_clean = QtWidgets.QPushButton("Clean volume")
+        self.btn_clean.setToolTip(
+            "Drop stray and degenerate elements, make the boundary "
+            "manifold, then report the topology. A tunnel that is still "
+            "open is reported, never filled: closing one would invent "
+            "material that was never imaged.")
+        self.btn_clean.clicked.connect(self.clean_requested.emit)
+        clean.addWidget(self.btn_clean)
+
+        self.btn_wall = QtWidgets.QPushButton("Check the wall")
+        self.btn_wall.setToolTip(_tip(
+            "Measure the wall and report what is wrong with it. Changes "
+            "nothing.",
+            "It counts the <b>handles</b> of the boundary — the ways "
+            "through the wall — and compares them with what the valve "
+            "openings imply: a cavity opened twice must have one, "
+            "because you can go in through one opening and out through "
+            "the other. Anything beyond that is a hole.",
+            "Measured on a <i>fully repaired copy</i>, because neither "
+            "count is defined on a boundary that is not manifold, and "
+            "the clean leaves one deliberately. Your mesh is untouched.",
+        ))
+        self.btn_wall.clicked.connect(self.wall_check_requested.emit)
+        clean.addWidget(self.btn_wall)
+
         # -- size: one target, or a band -------------------------------
+        rule = QtWidgets.QFrame()
+        rule.setFrameShape(QtWidgets.QFrame.HLine)
+        rule.setFrameShadow(QtWidgets.QFrame.Sunken)
+        remesh.addWidget(rule)
+        remesh.addWidget(QtWidgets.QLabel(
+            "<i>Changes element sizes. Adapts the tetrahedra to the "
+            "sizes below.</i>"))
+
         target_tip = _tip(
             "One uniform target edge length, in mesh units.",
             "<b>auto</b> (0) leaves the size to MMG, which keeps roughly "
@@ -132,7 +324,7 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
         self.spn_hausdorff.setToolTip(hausd_tip)
         grid.addWidget(self.lbl_hausd, 4, 0)
         grid.addWidget(self.spn_hausdorff, 4, 1)
-        layout.addLayout(grid)
+        remesh.addLayout(grid)
 
         # -- the boundary ----------------------------------------------
         self.chk_adapt_boundary = QtWidgets.QCheckBox("Adapt the boundary too")
@@ -146,86 +338,81 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
             "Anything anchored to the old surface moves with it.",
         ))
         self.chk_adapt_boundary.toggled.connect(self._sync_boundary_gate)
-        layout.addWidget(self.chk_adapt_boundary)
+        remesh.addWidget(self.chk_adapt_boundary)
 
         self.btn_apply = QtWidgets.QPushButton("Remesh volume")
         self.btn_apply.setToolTip(
             "Adapt the tetrahedra to the sizes above. The mesh is replaced; "
             "File → Save data writes the result.")
         self.btn_apply.clicked.connect(self.remesh_requested.emit)
-        layout.addWidget(self.btn_apply)
+        remesh.addWidget(self.btn_apply)
 
-        # -- clean: connectivity, not geometry -------------------------
-        rule = QtWidgets.QFrame()
-        rule.setFrameShape(QtWidgets.QFrame.HLine)
-        rule.setFrameShadow(QtWidgets.QFrame.Sunken)
-        layout.addWidget(rule)
-        layout.addWidget(QtWidgets.QLabel(
-            "<i>Removes stray elements and reports the mesh's topology. "
-            "Moves no vertex.</i>"))
+        # -- quality: shape, not size and not connectivity -------------
+        rule2 = QtWidgets.QFrame()
+        rule2.setFrameShape(QtWidgets.QFrame.HLine)
+        rule2.setFrameShadow(QtWidgets.QFrame.Sunken)
+        quality.addWidget(rule2)
+        quality.addWidget(QtWidgets.QLabel(
+            "<i>Repairs the shape of the worst elements only. Moves "
+            "nodes; keeps the wall.</i>"))
 
-        clean_grid = QtWidgets.QGridLayout()
-        clean_grid.setHorizontalSpacing(6)
-
-        weld_tip = _tip(
-            "Absolute distance within which two points are welded into "
-            "one, in mesh units.",
-            "<b>exact</b> (0) merges only points that are already "
-            "identical, so no vertex moves. A positive value welds "
-            "near-duplicates; the first point of each group is the one "
-            "that stays, so the result is still a point the mesh had.",
+        quality_grid = QtWidgets.QGridLayout()
+        quality_grid.setHorizontalSpacing(6)
+        thr_tip = _tip(
+            "Elements whose shape measure is <b>above</b> this are the "
+            "ones repaired. Lower is better in this measure: 0 is a "
+            "regular tetrahedron, 1 is flat.",
+            "0.8 is 'the bad ones': 889 of 290,508 on the example "
+            "ventricle. Do not read 0.2 as strict — it marks 48% of an "
+            "ordinary mesh, and a repair turned loose on a whole mesh "
+            "shrinks it.",
         )
-        lbl_weld = QtWidgets.QLabel("merge points")
-        lbl_weld.setToolTip(weld_tip)
-        clean_grid.addWidget(lbl_weld, 0, 0)
-        self.spn_merge_tol = _size_box(maximum=1.0e3)
-        self.spn_merge_tol.setDecimals(4)
-        self.spn_merge_tol.setSingleStep(0.001)
-        self.spn_merge_tol.setSpecialValueText("exact")
-        self.spn_merge_tol.setToolTip(weld_tip)
-        clean_grid.addWidget(self.spn_merge_tol, 0, 1)
+        lbl_thr = QtWidgets.QLabel("repair above")
+        lbl_thr.setToolTip(thr_tip)
+        quality_grid.addWidget(lbl_thr, 0, 0)
+        self.spn_quality = QtWidgets.QDoubleSpinBox()
+        self.spn_quality.setDecimals(2)
+        self.spn_quality.setRange(0.05, 1.99)
+        self.spn_quality.setSingleStep(0.05)
+        self.spn_quality.setValue(QualityOptions().threshold)
+        self.spn_quality.setKeyboardTracking(False)
+        self.spn_quality.setMinimumWidth(80)
+        self.spn_quality.setToolTip(thr_tip)
+        quality_grid.addWidget(self.spn_quality, 0, 1)
+        quality.addLayout(quality_grid)
 
-        frac_tip = _tip(
-            "The smallest share of the elements a detached piece may hold "
-            "and still be kept.",
-            "A stray element is not cosmetic: a piece carrying no boundary "
-            "condition makes a Laplace solve singular. The example "
-            "ventricle has three, each a single tetrahedron held to the "
-            "body by nodes alone.",
-            "The largest piece is always kept, so this cannot empty the "
-            "mesh — a separately meshed second body is safe.",
-        )
-        lbl_frac = QtWidgets.QLabel("min. piece")
-        lbl_frac.setToolTip(frac_tip)
-        clean_grid.addWidget(lbl_frac, 1, 0)
-        self.spn_min_component = QtWidgets.QDoubleSpinBox()
-        self.spn_min_component.setDecimals(4)
-        self.spn_min_component.setRange(0.0, 1.0)
-        self.spn_min_component.setSingleStep(0.01)
-        self.spn_min_component.setValue(CleanOptions().min_component_fraction)
-        self.spn_min_component.setKeyboardTracking(False)
-        self.spn_min_component.setMinimumWidth(80)
-        self.spn_min_component.setToolTip(frac_tip)
-        clean_grid.addWidget(self.spn_min_component, 1, 1)
-        layout.addLayout(clean_grid)
-
-        self.chk_fix_inverted = QtWidgets.QCheckBox("Reorient inverted elements")
-        self.chk_fix_inverted.setChecked(CleanOptions().fix_inverted)
-        self.chk_fix_inverted.setToolTip(_tip(
-            "Swap two nodes of any tetrahedron whose signed volume is "
-            "negative.",
-            "The same four points and the same shape, so no geometry "
-            "changes; the remesher refuses a mesh that still has them.",
+        self.chk_slide_boundary = QtWidgets.QCheckBox(
+            "Let wall nodes slide")
+        self.chk_slide_boundary.setChecked(QualityOptions().slide_boundary)
+        self.chk_slide_boundary.setToolTip(_tip(
+            "A node on the wall may move, but only in its own tangent "
+            "plane: the part of each step along the surface normal is "
+            "removed.",
+            "Needed because 81% of the badly shaped elements on the "
+            "example ventricle touch the wall and 17% have all four "
+            "nodes on it. Measured there, the wall ended up within "
+            "0.07&nbsp;mm of where it was, 1.3&nbsp;µm at the 99th "
+            "percentile, and the surface area changed by 0.00007%.",
+            "Nodes on a sharp edge, such as the rim of a valve opening, "
+            "never move whatever this is set to.",
+            "Unticked, the wall is frozen vertex for vertex and only "
+            "flips and interior nodes can help an element that touches "
+            "it.",
         ))
-        layout.addWidget(self.chk_fix_inverted)
+        quality.addWidget(self.chk_slide_boundary)
 
-        self.btn_clean = QtWidgets.QPushButton("Clean volume")
-        self.btn_clean.setToolTip(
-            "Drop stray and degenerate elements, then report the topology. "
-            "Tunnels and pinch points are reported, never repaired: "
-            "closing one would invent material that was never imaged.")
-        self.btn_clean.clicked.connect(self.clean_requested.emit)
-        layout.addWidget(self.btn_clean)
+        self.btn_quality = QtWidgets.QPushButton("Improve quality")
+        self.btn_quality.setToolTip(
+            "Flip, smooth and shift only where elements are worse than "
+            "the threshold. The rest of the mesh is left alone, and a "
+            "round that does not reduce the count is undone.")
+        self.btn_quality.clicked.connect(self.quality_requested.emit)
+        quality.addWidget(self.btn_quality)
+
+
+        layout.addWidget(clean_box)
+        layout.addWidget(remesh_box)
+        layout.addWidget(quality_box)
 
         self.lbl_status = QtWidgets.QLabel()
         self.lbl_status.setWordWrap(True)
@@ -233,6 +420,7 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
 
         self._sync_size_gate()
         self._sync_boundary_gate()
+        self._sync_repair_gate()
 
     # -----------------------------------------------------------------
     def _sync_size_gate(self, *_args) -> None:
@@ -266,6 +454,11 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
             widget.setEnabled(adapting)
 
     # -----------------------------------------------------------------
+    def _sync_repair_gate(self, *_args) -> None:
+        """How much a weld may add is moot while nothing is being welded."""
+        self.spn_weld_limit.setEnabled(
+            self.chk_repair_boundary.isChecked())
+
     def options(self) -> RemeshOptions:
         # The boundary knobs are not sent while the boundary is frozen:
         # MMG ignores them there, and a value in the file that had no
@@ -281,10 +474,24 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
         )
 
     def clean_options(self) -> CleanOptions:
+        # The weld limit is not sent while the repair is off: a value in
+        # the file that had no effect on the result is a lie about what
+        # produced it, which is the same reason the boundary knobs above
+        # are dropped while the boundary is frozen.
+        repairing = self.chk_repair_boundary.isChecked()
         return CleanOptions(
             merge_tol=float(self.spn_merge_tol.value()),
             min_component_fraction=float(self.spn_min_component.value()),
             fix_inverted=self.chk_fix_inverted.isChecked(),
+            repair_boundary=repairing,
+            max_weld_volume=(float(self.spn_weld_limit.value())
+                             if repairing else 0.0),
+        )
+
+    def quality_options(self) -> QualityOptions:
+        return QualityOptions(
+            threshold=float(self.spn_quality.value()),
+            slide_boundary=self.chk_slide_boundary.isChecked(),
         )
 
     def set_status(self, text: str) -> None:
@@ -299,6 +506,8 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
         """
         self.btn_apply.setEnabled(not busy)
         self.btn_clean.setEnabled(not busy)
+        self.btn_quality.setEnabled(not busy)
+        self.btn_wall.setEnabled(not busy)
         self.btn_apply.setText(
             "Remeshing…" if busy and not cleaning else "Remesh volume")
         self.btn_clean.setText(

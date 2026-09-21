@@ -284,7 +284,7 @@ A second button on the same panel, for a different kind of problem. The remesh
 changes element *sizes*; the clean repairs the mesh's *connectivity* and
 reports its shape. It moves no vertex.
 
-It runs five passes, in this order:
+It runs these passes, in this order:
 
 1. **merge points** — weld coincident points. `exact` (0) merges only points
    that are already identical, so no vertex moves. A positive tolerance welds
@@ -294,10 +294,12 @@ It runs five passes, in this order:
    volume. Welding is what turns a sliver into one of these, which is why it
    runs first.
 3. **duplicate elements** — drop a second copy of the same four nodes.
-4. **detached pieces** — drop any face-connected piece holding less than
+4. **repair the boundary** — make the boundary manifold, where it is not. See
+   below.
+5. **detached pieces** — drop any face-connected piece holding less than
    **min. piece** of the elements. The largest piece is always kept, so this
    cannot empty a mesh, and a separately meshed second body is safe.
-5. **reorient inverted elements** — swap two nodes of any tetrahedron with a
+6. **reorient inverted elements** — swap two nodes of any tetrahedron with a
    negative signed volume. Same points, same shape, and the remesher refuses a
    mesh that still has them.
 
@@ -308,26 +310,217 @@ has exactly three: single tetrahedra held to the body by two or three nodes
 and by no face at all, lying outside the body rather than plugging a void, so
 removing them leaves no hole.
 
+#### Repairing a non-manifold boundary
+
+A boundary that is not manifold renders as a hole in a wall that has none, and
+it is where a surface label leaks from epicardium to endocardium. Until it is
+repaired the tunnel and cavity counts cannot be derived at all. There are two
+kinds of defect and they are repaired differently.
+
+**Material that only touches** — two pieces meeting at a single node or along a
+single edge, sharing no face — can be **separated**: each piece gets its own copy
+of the node. That is exact. No element is removed, no coordinate moves, and the
+copies sit on top of the original, so the only thing that changes is which
+element refers to which node. It can leave a piece attached by nothing at all,
+which is the right answer: the detached-pieces pass then sees it for the stray
+it is.
+
+!!! warning "Separating is off, and is not on the panel"
+
+    It is the one repair here that does not run, and not because it is wrong.
+    A non-manifold edge is skipped by anything that walks faces across shared
+    edges, so before the split those edges act as *accidental cuts* in the
+    boundary. **Actions → Label ventricular surfaces depends on exactly that**:
+    measured on the example ventricle, with the split it finds two surface
+    pieces where it needs three, and the labelling fails.
+
+    That is not a one-off. The conditions that create touching material — a
+    wall pinching to nothing at the basal rim, where the epicardium and the
+    endocardium run into each other — are the same conditions where those
+    edges are what separates the two surfaces. So it is not offered as a
+    control at all: it lives in `CleanOptions.separate_touching` for scripts
+    and tests, and the contacts it would have separated are still reported.
+
+    Welding is unaffected. It also closes *more* pinholes without the split
+    than with it — 43 against 25 — because a contact the split would have
+    separated stays in the shape a weld can close.
+
+    The assumption the labelling makes was never sound, and the honest fix is
+    there rather than here. When it lands, this comes back.
+
+**A pinhole** — a passage through the wall that has closed to a point, so the
+surface passes through the same node twice while the material runs continuously
+around it — cannot be separated: the tetrahedra there form one connected fan,
+and splitting the node would tear apart material that is genuinely joined. It
+is **welded** shut instead, by filling the empty wedge at the contact with one
+tetrahedron at an edge, or by capping the opening and coning it back to the node
+at a vertex.
+
+Welding adds material, so it is bounded. **weld limit** is the largest element a
+weld may add, as a multiple of the elements already at that contact; at the
+default of 2 a pinhole costs about one element, while a passage that is
+genuinely open would need an element many times the local one and is reported
+instead. Set the limit to *report only* and the repair still separates touching
+material, but every pinhole is counted rather than filled. Untick **Repair a
+non-manifold boundary** and both are reported and nothing is changed.
+
+On the example ventricle, at the default settings, the clean welds 43 pinholes
+shut with 56 elements and leaves one contact alone: 290,474 → 290,530
+tetrahedra, with the volume up by 0.013% (14.7 mm³ of 109,203). With `separate_touching=True` it separates 15 contacts and welds 25, and the 18
+non-manifold edges and 17 pinch points both go to none — at the cost described
+in the warning above. The added elements are
+ordinary in shape, not slivers — their median shape distortion matches the mesh
+mean, and the mesh's worst element is unchanged.
+
 !!! note "What it reports but will not repair"
 
-    **Tunnels** (holes through the material) and **pinch points** (where the
-    wall thins to nothing and the boundary touches itself) are counted, never
-    closed. A tunnel is either anatomy or a segmentation artefact, and nothing
-    local tells those apart, so filling one would invent material that was
-    never imaged. At a pinch the tetrahedra still form one connected fan, so
-    splitting the node would tear apart material that is genuinely joined.
+    **An open tunnel** — a hole you could see through — is counted, never
+    filled. It is either anatomy or a segmentation artefact, nothing local
+    tells those apart, and filling one would invent material that was never
+    imaged. With the boundary repaired, the example ventricle reports 2.
 
-    The counts matter anyway: a pinch is exactly where a surface label can leak
-    from epicardium to endocardium, so anything that labels surfaces needs to
-    know how many there are.
+    A contact the repair could not resolve is counted too, never silently
+    left.
 
 The report gives the Euler characteristic χ = V − E + F − T, which is exact for
 any mesh, and the number of tunnels and cavities **only when the boundary is
 manifold**. Deriving those needs a count of boundary sheets, and that count is
-wrong on a boundary that pinches, so they are reported as *not determined*
-rather than guessed. On the example ventricle the clean drops the three stray
-elements and reports χ = 0 with 14 non-manifold edges and 17 pinch points, so
-the tunnel count is withheld.
+wrong on a boundary that pinches, so before the repair they are reported as
+*not determined* rather than guessed.
+
+### Check the wall
+
+A fourth button, beside **Clean volume**, that measures and changes nothing.
+
+It counts the **handles** of the boundary — the ways through the wall, a handle
+being a loop you cannot shrink to a point — and compares that with what the
+valve openings imply. The target is not zero: a shell around *p* cavities opened
+by *o* valve openings has **o − p** handles when every cavity opens at least
+once. A cavity opened twice must have one, because you can travel in through the
+mitral opening, along the cavity, and out through the aortic one. Anything beyond
+that count is a hole in the wall.
+
+Both measurements are undefined on a boundary that is not manifold, and the
+clean deliberately leaves one that is (see the warning above), so the check
+**repairs a copy**, measures that, and reports. Your mesh is untouched, and what
+it tells you is a property of the anatomy rather than of which repairs happen to
+be switched on.
+
+On the example ventricle it takes about 16 seconds and says:
+
+```
+The wall has 1 hole in it: 2 handles measured against the 1 that
+3 openings into 2 cavities imply.
+
+Cavities: 150.7 mL, 141.2 mL
+Openings: 1226 mm², 177 mm², 606 mm²
+
+4 join(s) between the epicardium and a cavity, largest first:
+  232.2 around, centre (10.2, -3.34, -6.11)
+  179.3 around, centre (42.6, 25.4, 12.9)
+  91.3 around, centre (31.7, -11.4, 38.8)
+  11.7 around, centre (56.4, -9.97, 24)   <- too small to be a valve opening
+```
+
+The three large rings are the valve rims; the fourth is a perforation, in a wall
+that thins to 0.39 mm beside it. The order-of-magnitude gap between the third
+and the fourth is what makes "the largest *n* are the valves" a sound rule
+rather than a guess.
+
+!!! tip "Run it on the mesh as loaded, before cleaning"
+
+    A cleaned mesh can be *harder* to measure than the one it came from. Welding
+    is on by default and separating is not, so a clean fuses the contacts the
+    check's own full repair would otherwise have separated — and a contact the
+    weld refused stays refused. The copy then cannot be made manifold and the
+    counts have no value.
+
+    When that happens the report says so and names the places left, so it still
+    tells you where to look:
+
+    ```
+    The wall could not be measured: the boundary is not manifold even
+    after a full repair, at 1 place.
+
+    Still not manifold at:
+      (56.1, -9.68, 23.9)
+    ```
+
+    On the example ventricle that coordinate is the perforation itself.
+
+!!! note "It finds joins, not every hole"
+
+    The ring finder reports where the epicardium and a cavity are **joined**. A
+    hole that does not join two surfaces is counted in the handle total but has
+    no ring listed. Locating every one of them needs a homology basis rather
+    than a minimum cut, which is not built.
+
+### Improve quality
+
+A third button, for a third kind of problem. The remesh changes element
+*sizes*; the clean repairs *connectivity*; this repairs element *shape*, and
+only where it is bad. Everything else is left exactly as it was.
+
+Shape is measured as `q = 1 − √2·6V / rms_edge³`, where `rms_edge` is the root
+mean square of the six edge lengths. **Lower is better**: 0 is a regular
+tetrahedron, 1 is flat, and an element turned inside out is reported as 2. So
+**repair above** is an upper bound, and its default of 0.8 means "the bad
+ones": on the example ventricle that is 889 elements out of 290,508, or 0.31%.
+
+!!! warning "0.2 is not a strict threshold, it is nearly every element"
+
+    In this measure the example ventricle has a *mean* of 0.22, and 48% of its
+    elements sit above 0.2. A repair pass given 0.2 is not repairing the bad
+    elements, it is smoothing the whole mesh. Measured on a 14-million-element
+    mesh, that moved all 2.7 million vertices, by 0.125 mm on average, and cost
+    **15% of the myocardial volume**.
+
+Three passes run per round, and the round is undone whole if it did not reduce
+the count of bad elements:
+
+1. **flips** — connectivity only, no vertex moves. Three elements around an
+   interior edge become two (3-to-2), and a node whose only four elements span
+   five nodes collapses into one (4-to-1). Each is applied only where the worst
+   element involved gets better, and only around an interior edge, so the
+   boundary is untouched by construction.
+2. **smoothing** — quality-guarded Taubin over the bad elements and two layers
+   around them. A node's move is kept only if its own worst element does not
+   get worse, and the result is checked a second time with every move in place,
+   because two nodes of the same element can each be right alone and wrong
+   together.
+3. **shifting** — gradient descent on `Σ 10^(q + 1 − thr)` over the elements at
+   each bad node, with a backtracking step. The power makes the worst element
+   dominate the sum, so the step is aimed at the damage rather than at the
+   average.
+
+#### What happens to the wall
+
+81% of the elements above 0.8 on the example ventricle have at least one node
+on the wall and 17% have all four, so freezing the boundary would leave most of
+the problem untouchable. **Let wall nodes slide** (on by default) lets a
+boundary node move within its own tangent plane: the component of every step
+along the surface normal is removed, and no node may end up further from where
+it started than 30% of its shortest edge.
+
+Measured on the example ventricle, with the wall sliding:
+
+| | |
+|---|---|
+| set of boundary faces | unchanged |
+| surface area | +0.00007% |
+| total volume | −0.0000% |
+| wall drift off its original surface | 0.07 mm worst, 1.4 µm at p99 |
+| furthest any node travelled | 0.36 mm, along the wall |
+
+Nodes on a **sharp edge** never move, whatever the setting: an edge where two
+boundary faces meet at more than 30° is a feature, which is what keeps the rim
+of a valve opening a rim. Nodes where the boundary is not manifold are held
+too, because a surface normal is not defined there — run **Clean volume**
+first and there will not be any.
+
+On the example ventricle, after the clean, the pass takes 13 seconds and brings
+**889 elements above 0.8 down to 7**, with the worst element improving from
+0.895 to 0.870 and 872 flips applied.
 
 ### A note on speed
 
