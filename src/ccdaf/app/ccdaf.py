@@ -117,6 +117,8 @@ from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
 from ccdaf.core import ventricular_fibres as vfibres
 from ccdaf.gui.fibre_dialog import FibreDialog, FibreWorker
 from ccdaf.core.volume_clean import clean as clean_volume
+from ccdaf.core.volume_quality import improve_grid as improve_volume_quality
+from ccdaf.core.wall_report import check_wall
 from ccdaf.core.volume_postprocessor import remesh as remesh_volume
 from ccdaf.core.volume_from_segmentation import carve, growth_outside
 from ccdaf.core.tissue_property import (
@@ -561,6 +563,10 @@ class CCDAF(QtWidgets.QMainWindow):
             self._action_remesh_volume)
         self.volume_postproc.clean_requested.connect(
             self._action_clean_volume)
+        self.volume_postproc.quality_requested.connect(
+            self._action_improve_volume_quality)
+        self.volume_postproc.wall_check_requested.connect(
+            self._action_check_wall)
         self.volume_postproc.setVisible(False)
         body.addWidget(self.volume_postproc)
 
@@ -1258,6 +1264,21 @@ class CCDAF(QtWidgets.QMainWindow):
 
         return body
 
+    #: Panels whose tools act on a surface, collapsed when a volume is
+    #: loaded. Disabling them was not enough: they sat open and greyed
+    #: out, four panels deep, above the ones a volume actually uses.
+    SURFACE_SECTIONS = ("seeds", "tagging", "manual", "clipping")
+
+    def _collapse_surface_sections(self) -> None:
+        """Show the surface panels for a surface, hide them for a volume.
+
+        Done on load rather than on every sync, so that reopening one
+        from the Visualise menu sticks for as long as that mesh is open.
+        """
+        wanted = not self._volume_mode()
+        for key in self.SURFACE_SECTIONS:
+            self._set_section_visible(key, wanted)
+
     def _set_section_visible(self, key: str, visible: bool) -> None:
         frame = self._sections.get(key)
         if frame is None:
@@ -1361,6 +1382,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # The mesh kind is a gate on the surface panels just as the seed
         # type is, and it can only have changed here.
         self._sync_profile_panels()
+        self._collapse_surface_sections()
         self.seed_widget.set_prompt("Mesh loaded. Click 'Start seed selection'.")
         self.statusBar().showMessage(f"Loaded {source_name}")
 
@@ -3203,6 +3225,74 @@ class CCDAF(QtWidgets.QMainWindow):
                 or bool(report.after.tunnels):
             QtWidgets.QMessageBox.information(self, "Clean volume",
                                               report.details())
+
+
+    def _action_improve_volume_quality(self) -> None:
+        """Repair the shape of the worst elements, leaving the rest alone."""
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+        options = self.volume_postproc.quality_options()
+        try:
+            options.validate()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid quality options",
+                                          str(exc))
+            return
+
+        self.volume_postproc.set_busy(True)
+        self.volume_postproc.set_status("Improving quality…")
+        self.statusBar().showMessage("Improving element quality…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            new_grid, report = improve_volume_quality(
+                self.loader.grid, options,
+                on_status=self.statusBar().showMessage)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Quality repair failed",
+                                           str(exc))
+            self.volume_postproc.set_status("")
+            return
+        finally:
+            self.volume_postproc.set_busy(False)
+
+        # Nothing to repair is not an edit: the same rule the clean
+        # follows, for the same reason.
+        if report.changed:
+            self._replace_volume(new_grid)
+        self.volume_postproc.set_status(report.summary())
+        self.statusBar().showMessage(report.summary())
+        QtWidgets.QMessageBox.information(self, "Improve quality",
+                                          report.summary())
+
+
+    def _action_check_wall(self) -> None:
+        """Report what is wrong with the wall, changing nothing.
+
+        Measured on a repaired copy: the handle count and the join
+        finder are both undefined on a boundary that is not manifold,
+        and the clean leaves one deliberately so that the ventricular
+        labelling keeps working. The working mesh is never replaced
+        here, so this cannot mark the session dirty.
+        """
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+        self.volume_postproc.set_busy(True)
+        self.volume_postproc.set_status("Checking the wall…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            report = check_wall(self.loader.grid,
+                                on_status=self.statusBar().showMessage)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Check the wall", str(exc))
+            self.volume_postproc.set_status("")
+            return
+        finally:
+            self.volume_postproc.set_busy(False)
+
+        self.volume_postproc.set_status(report.summary())
+        self.statusBar().showMessage(report.summary())
+        QtWidgets.QMessageBox.information(self, "Check the wall",
+                                          report.details())
 
     # ==================================================================
     # Actions menu

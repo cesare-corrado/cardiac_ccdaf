@@ -99,3 +99,42 @@ def test_long_steps_report_progress(qapp):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# --------------------------------------------- the volumetric panel order
+def test_the_volume_panel_lists_its_actions_in_working_order():
+    """Clean, then remesh, then improve: the order they must be run in.
+
+    Not a style preference. A remesh carries every topological defect
+    straight through, so cleaning afterwards repairs the same defects on
+    a mesh tens of times larger — measured, 11 s against 9 minutes.
+    """
+    from ccdaf.gui.volume_postprocessing_widget import (
+        VolumePostprocessingWidget)
+
+    widget = VolumePostprocessingWidget()
+    buttons = [b.text() for b in widget.findChildren(QtWidgets.QPushButton)]
+    # "Check the wall" sits with the clean because it measures rather
+    # than changes: it belongs beside the repair, not in the sequence.
+    assert buttons == ["Clean volume", "Check the wall",
+                       "Remesh volume", "Improve quality"]
+
+
+def test_the_panel_never_asks_to_separate_touching_material():
+    """The one repair kept off the panel, and why.
+
+    Separating material that only touches is exact and the mesh it makes
+    is better described. Its only measured effect on a real workflow was
+    to break Actions → Label ventricular surfaces, which relies on
+    non-manifold edges acting as accidental cuts in the boundary. It
+    stays reachable from CleanOptions, and off whatever the panel does.
+    """
+    from ccdaf.core.volume_clean import CleanOptions
+    from ccdaf.gui.volume_postprocessing_widget import (
+        VolumePostprocessingWidget)
+
+    widget = VolumePostprocessingWidget()
+    assert not hasattr(widget, "chk_separate")
+    assert not widget.clean_options().separate_touching
+    # Still reachable, and still working, for anything that wants it.
+    assert CleanOptions(separate_touching=True).repair_options().split_touching

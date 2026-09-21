@@ -16,6 +16,9 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.volume_mesh
 ::: ccdaf.core.volume_postprocessor
 ::: ccdaf.core.volume_clean
+::: ccdaf.core.volume_repair
+::: ccdaf.core.volume_quality
+::: ccdaf.core.wall_report
 ::: ccdaf.core.surface_labels
 ::: ccdaf.core.orifice_labels
 ::: ccdaf.core.laplace

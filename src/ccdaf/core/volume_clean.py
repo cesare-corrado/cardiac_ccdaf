@@ -4,11 +4,13 @@ volume_clean
 Repair a tetrahedral volume's connectivity, and report its topology.
 
 This is not the volume counterpart of the surface cleaner's smoothing and
-hole filling. It touches no vertex position and invents no material: every
-operation here either removes something that is not part of the mesh's
-body, or renumbers what stays. That restraint is the point. A volume is
-usually the last stage of a pipeline, already validated by eye, and a
-"repair" that quietly moved the wall would invalidate that judgement.
+hole filling. No operation here moves a vertex: a volume is usually the
+last stage of a pipeline, already validated by eye, and a "repair" that
+quietly moved the wall would invalidate that judgement. What it does is
+remove what is not part of the mesh's body, renumber what stays, and —
+at a boundary that is not manifold — separate material that only touches
+or close a pinhole that has no thickness left to lose. That last part
+lives in :mod:`volume_repair`, which also says what it costs.
 
 Why a volume needs this at all
 ------------------------------
@@ -23,24 +25,18 @@ than plugging a void, so removing them leaves no hole behind.
 
 What it deliberately cannot fix
 -------------------------------
-Two defects survive this pass, and both are reported rather than repaired:
+**Tunnels.** A hole through the material is either anatomy (the example
+has one, and the left ventricle alone is simply connected, so it comes
+from how the right ventricular wall joins) or a segmentation artefact.
+Nothing local can tell those apart, and filling one means inventing
+material that was never imaged. A tunnel that has closed to a point is a
+different matter and is welded shut — see :mod:`volume_repair` for where
+the line is drawn and how it is enforced.
 
-* **Tunnels.** A hole through the material is either anatomy (the example
-  has one, and the left ventricle alone is simply connected, so it comes
-  from how the right ventricular wall joins) or a segmentation artefact.
-  Nothing local can tell those apart, and filling one means inventing
-  material that was never imaged.
-* **Pinches**, where the wall thins to nothing and the boundary touches
-  itself. The example has 17, and at every one of them the tetrahedra
-  around the node still form a single face-connected fan: the material is
-  continuous, and only the surface touches. Splitting such a node would
-  tear apart material that is genuinely joined — measured on the example,
-  splitting fixed 9 volume-level nodes and left all 17 surface pinches
-  exactly as they were.
-
-Reporting them is not a consolation prize. A pinch is where a surface
-label can leak from epicardium to endocardium, so a caller that labels
-surfaces needs to know the count before it trusts the labelling.
+The boundary defects that *are* repaired are still reported, before and
+after. A pinch is where a surface label can leak from epicardium to
+endocardium, so a caller that labels surfaces needs to know whether any
+were left.
 
 Topology, and when it is trustworthy
 ------------------------------------
@@ -68,12 +64,14 @@ from scipy.spatial import cKDTree
 # the same control and it would be a trap for them to drift apart.
 from ccdaf.core.mesh_postprocessor import MIN_COMPONENT_FRACTION
 from ccdaf.core.volume_mesh import (
-    TETRA, orient_positive, signed_volumes, tetrahedra, validate_tetrahedral,
+    EDGE_NODES as _EDGE_NODES,
+    TETRA, face_table as _face_table, orient_positive, signed_volumes,
+    sorted_unique_rows as _unique_rows, tetrahedra, validate_tetrahedral,
 )
-
-#: The four faces and six edges of a tetrahedron, as node positions.
-_FACE_NODES = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])
-_EDGE_NODES = np.array([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]])
+from ccdaf.core.volume_repair import (
+    RepairOptions, RepairReport, boundary_edge_table, boundary_sheets,
+    pinched_vertices, repair,
+)
 
 
 @dataclass
@@ -102,6 +100,38 @@ class CleanOptions:
     #: nothing, changes no geometry, and the remesher refuses a mesh
     #: without it.
     fix_inverted: bool = True
+    #: Separate material that only touches, and weld pinholes shut, so
+    #: that the boundary comes back manifold. On by default: a
+    #: non-manifold boundary is what a surface-labelling pass leaks
+    #: across, and it renders as a hole in a wall that has none.
+    repair_boundary: bool = True
+    #: The most material one weld may add, as a multiple of the mean
+    #: volume of the elements at that contact. See
+    #: :class:`volume_repair.RepairOptions`.
+    max_weld_volume: float = RepairOptions().max_weld_volume
+    #: Give each fan of material meeting at a node its own copy of it.
+    #:
+    #: **Off by default**, and it is the one repair here that is off.
+    #: The split is exact and the mesh it makes is better, but it has a
+    #: consequence nothing else here has: a non-manifold edge is skipped
+    #: by any analysis that walks faces across shared edges, so before
+    #: the split those edges act as accidental cuts in the boundary.
+    #: Measured on the example ventricle, Actions → Label ventricular
+    #: surfaces relies on exactly that: with the split it finds two
+    #: surface pieces where it needs three, and the labelling fails.
+    #: Welding alone leaves it working — and closes more pinholes, 43
+    #: against 25, because a contact the split would have separated
+    #: stays in the shape a weld can close.
+    #:
+    #: The assumption the labelling makes was never sound, and the
+    #: honest fix is there rather than here. Until then this stays off,
+    #: so that a clean does not break a working pipeline.
+    separate_touching: bool = False
+    #: Plug a perforation: a narrow passage straight through the wall.
+    #: Off by default, because unlike a pinhole it adds material across
+    #: a gap that is really there. See
+    #: :class:`volume_repair.RepairOptions`.
+    plug_perforations: bool = False
 
     def validate(self) -> None:
         if self.merge_tol < 0.0:
@@ -111,6 +141,16 @@ class CleanOptions:
         if not 0.0 <= self.min_component_fraction <= 1.0:
             raise ValueError(
                 "the minimum component fraction must be between 0 and 1")
+        self.repair_options().validate()
+
+    def repair_options(self) -> RepairOptions:
+        """The boundary repair's own options, derived from these."""
+        return RepairOptions(split_touching=(self.repair_boundary
+                                            and self.separate_touching),
+                             weld_pinholes=self.repair_boundary,
+                             max_weld_volume=self.max_weld_volume,
+                             plug_perforations=(self.repair_boundary
+                                                and self.plug_perforations))
 
 
 @dataclass
@@ -179,6 +219,7 @@ class CleanReport:
     flipped: int
     before: TopologyReport
     after: TopologyReport
+    repair: RepairReport
 
     @property
     def changed(self) -> bool:
@@ -189,7 +230,7 @@ class CleanReport:
         """
         return bool(self.merged_points or self.dropped_degenerate
                     or self.dropped_duplicate or self.dropped_component_cells
-                    or self.flipped)
+                    or self.flipped or self.repair.changed)
 
     def summary(self) -> str:
         if not self.changed:
@@ -212,6 +253,8 @@ class CleanReport:
                         + f" ({self.dropped_component_cells} element"
                         + ("" if self.dropped_component_cells == 1 else "s")
                         + ")")
+        if self.repair.changed:
+            bits.append(self.repair.summary())
         if self.flipped:
             bits.append(f"reoriented {self.flipped} inverted element"
                         + ("" if self.flipped == 1 else "s"))
@@ -228,25 +271,7 @@ class CleanReport:
 # ---------------------------------------------------------------------
 # Topology
 # ---------------------------------------------------------------------
-def _unique_rows(rows: np.ndarray):
-    """``np.unique`` over sorted rows, with the inverse and the counts."""
-    return np.unique(np.sort(rows, axis=1), axis=0,
-                     return_inverse=True, return_counts=True)
-
-
-def _face_table(tets: np.ndarray):
-    """Unique faces of *tets*, which tetrahedron each came from, and counts.
-
-    Vectorised on purpose: the obvious dictionary loop costs seconds on a
-    290,000-element mesh, and this runs on every clean and every report.
-    """
-    faces = tets[:, _FACE_NODES].reshape(-1, 3)
-    uniq, inv, counts = _unique_rows(faces)
-    owner = np.repeat(np.arange(len(tets), dtype=np.int64), 4)
-    return uniq, inv.ravel(), counts, owner
-
-
-def _cell_components(tets: np.ndarray) -> Tuple[int, np.ndarray]:
+def _cell_components(tets: np.ndarray, table=None) -> Tuple[int, np.ndarray]:
     """Label the tetrahedra by face-connected component.
 
     Elements that touch only at a node or along an edge are *not*
@@ -254,7 +279,7 @@ def _cell_components(tets: np.ndarray) -> Tuple[int, np.ndarray]:
     """
     if len(tets) == 0:
         return 0, np.zeros(0, dtype=np.int64)
-    _uniq, inv, counts, owner = _face_table(tets)
+    _uniq, inv, counts, owner = _face_table(tets, table)
     order = np.argsort(inv, kind="stable")
     starts = np.searchsorted(inv[order], np.arange(len(counts)))
     shared = np.where(counts == 2)[0]
@@ -263,87 +288,31 @@ def _cell_components(tets: np.ndarray) -> Tuple[int, np.ndarray]:
         b = owner[order[starts[shared] + 1]]
     else:
         a = b = np.zeros(0, dtype=np.int64)
-    graph = coo_matrix((np.ones(len(a)), (a, b)),
+    # One byte per edge, not eight: only the presence of a connection is
+    # read, never its weight, and on a 14-million-element mesh that edge
+    # list runs to 28 million entries.
+    graph = coo_matrix((np.ones(len(a), dtype=np.int8), (a, b)),
                        shape=(len(tets), len(tets)))
     return connected_components(graph, directed=False)
-
-
-def _boundary_faces(tets: np.ndarray) -> np.ndarray:
-    """The faces of *tets* that belong to exactly one tetrahedron."""
-    uniq, _inv, counts, _owner = _face_table(tets)
-    return uniq[counts == 1]
 
 
 def _boundary_flaws(boundary: np.ndarray) -> Tuple[int, int, int, int]:
     """``(open_edges, non_manifold_edges, pinched_vertices, sheets)``.
 
     A pinch is a vertex whose incident boundary faces form more than one
-    fan: the surface passes through the point twice. It is found by
-    joining, at each endpoint of every shared edge, the faces meeting
-    there, then counting how many groups each vertex ends up with.
-    Corners are the unit of work, not faces, which is what keeps the two
-    fans apart at the pinch itself.
-
-    Faces are joined across non-manifold edges as well as manifold ones,
-    so that this counts *only* surfaces touching at a point. Joining
-    across manifold edges alone would report every endpoint of a
-    non-manifold edge as a pinch too, inflating the count by counting
-    one defect twice: on the example ventricle that reads 47 rather than
-    the 17 places where the surface actually touches itself.
+    fan: the surface passes through the point twice. The counting lives
+    in :mod:`volume_repair`, because the repair has to find the same
+    places this report counts — two implementations of "where does the
+    boundary touch itself" would eventually disagree, and then the panel
+    would report defects the repair did not see.
     """
     if len(boundary) == 0:
         return 0, 0, 0, 0
-    pairs = boundary[:, [[0, 1], [1, 2], [0, 2]]].reshape(-1, 2)
-    uniq, inv, counts = _unique_rows(pairs)
+    _uniq, _inv, counts = boundary_edge_table(boundary)
     open_edges = int((counts == 1).sum())
     non_manifold = int((counts > 2).sum())
-
-    inv = inv.ravel()
-    face_of_edge = np.repeat(np.arange(len(boundary), dtype=np.int64), 3)
-    order = np.argsort(inv, kind="stable")
-    starts = np.searchsorted(inv[order], np.arange(len(counts)))
-    shared = np.where(counts == 2)[0]
-    if shared.size == 0:
-        return open_edges, non_manifold, 0, 0
-    f0 = face_of_edge[order[starts[shared]]]
-    f1 = face_of_edge[order[starts[shared] + 1]]
-
-    # Sheets: faces joined across manifold edges.
-    sheets = connected_components(
-        coo_matrix((np.ones(len(f0)), (f0, f1)),
-                   shape=(len(boundary),) * 2), directed=False)[0]
-
-    # Corner ids: 3 * face + slot. At every edge with two or more faces,
-    # join the corners sitting at the same vertex, pairing each face with
-    # the first one there.
-    multi = np.where(counts >= 2)[0]
-    extra = counts[multi] - 1
-    total = int(extra.sum())
-    base = np.repeat(starts[multi], extra)
-    offsets = np.arange(total) - np.repeat(np.cumsum(extra) - extra, extra) + 1
-    lead = face_of_edge[order[base]]
-    trail = face_of_edge[order[base + offsets]]
-    ends = np.repeat(uniq[multi], extra, axis=0)
-
-    rows: List[np.ndarray] = []
-    cols: List[np.ndarray] = []
-    for end in (0, 1):
-        vertex = ends[:, end]
-        slot0 = np.argmax(boundary[lead] == vertex[:, None], axis=1)
-        slot1 = np.argmax(boundary[trail] == vertex[:, None], axis=1)
-        rows.append(3 * lead + slot0)
-        cols.append(3 * trail + slot1)
-    corner_rows = np.concatenate(rows)
-    corner_cols = np.concatenate(cols)
-    n_corners = 3 * len(boundary)
-    labels = connected_components(
-        coo_matrix((np.ones(len(corner_rows)), (corner_rows, corner_cols)),
-                   shape=(n_corners, n_corners)), directed=False)[1]
-    corner_vertex = boundary.reshape(-1)
-    fans = np.unique(np.stack([corner_vertex, labels], axis=1), axis=0)
-    _vertices, fan_counts = np.unique(fans[:, 0], return_counts=True)
-    pinched = int((fan_counts > 1).sum())
-    return open_edges, non_manifold, pinched, int(sheets)
+    pinched = int(len(pinched_vertices(boundary)))
+    return open_edges, non_manifold, pinched, boundary_sheets(boundary)
 
 
 def topology(grid) -> TopologyReport:
@@ -358,11 +327,16 @@ def topology(grid) -> TopologyReport:
     if len(tets) == 0:
         return TopologyReport(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
-    n_components, _labels = _cell_components(tets)
+    # One face table, shared by everything that needs one. Built four
+    # times over before this: once here, once for the components, and
+    # again inside each of the boundary helpers. On a 14-million-element
+    # mesh that is minutes of repeated sorting for an answer already in
+    # hand.
+    table = _face_table(tets)
+    uniq_faces, _inv, counts, _owner = table
+    n_components, _labels = _cell_components(tets, table)
     n_vertices = len(np.unique(tets))
-    n_edges = len(np.unique(np.sort(tets[:, _EDGE_NODES].reshape(-1, 2),
-                                    axis=1), axis=0))
-    uniq_faces, _inv, counts, _owner = _face_table(tets)
+    n_edges = len(_unique_rows(tets[:, _EDGE_NODES].reshape(-1, 2))[0])
     chi = n_vertices - n_edges + len(uniq_faces) - len(tets)
 
     boundary = uniq_faces[counts == 1]
@@ -398,7 +372,8 @@ def _merge_points(points: np.ndarray,
     if tol > 0.0:
         pairs = cKDTree(points).query_pairs(tol, output_type="ndarray")
         graph = coo_matrix(
-            (np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])),
+            (np.ones(len(pairs), dtype=np.int8),
+             (pairs[:, 0], pairs[:, 1])),
             shape=(len(points),) * 2)
         _n, groups = connected_components(graph, directed=False)
     else:
@@ -469,7 +444,19 @@ def clean(grid,
     else:
         dropped_duplicate = 0
 
-    # 4. Detached components. The largest is always kept, so this cannot
+    # 4. Non-manifold boundary. After the degenerate and duplicate
+    #    passes, because both of those confuse the question of what is
+    #    joined to what, and before the component pass, because
+    #    separating material that only touches is exactly what turns a
+    #    crumb into the detached component the next step drops.
+    point_source = np.arange(len(new_points), dtype=np.int64)
+    repair_report = RepairReport()
+    if options.repair_boundary and len(tets):
+        new_points, tets, point_source, cell_source, repair_report = repair(
+            new_points, tets, options.repair_options(), on_status)
+        kept = kept[cell_source]
+
+    # 5. Detached components. The largest is always kept, so this cannot
     #    empty the mesh however the fraction is set.
     dropped_components = dropped_cells = 0
     if len(tets):
@@ -483,12 +470,12 @@ def clean(grid,
             dropped_cells = int((~survive).sum())
             tets, kept = tets[survive], kept[survive]
 
-    # 5. Orientation. Last, so it only pays for the elements that stay.
+    # 6. Orientation. Last, so it only pays for the elements that stay.
     flipped = 0
     if options.fix_inverted and len(tets):
         tets, flipped = orient_positive(new_points, tets)
 
-    # 6. Renumber, dropping points no surviving element uses.
+    # 7. Renumber, dropping points no surviving element uses.
     used = np.unique(tets) if len(tets) else np.zeros(0, dtype=np.int64)
     remap = np.full(len(new_points), -1, dtype=np.int64)
     remap[used] = np.arange(len(used))
@@ -497,7 +484,7 @@ def clean(grid,
 
     out = pv.UnstructuredGrid({TETRA: final_tets.astype(np.int64)},
                               final_points)
-    _carry_arrays(source, out, kept, first_of_group[used])
+    _carry_arrays(source, out, kept, first_of_group[point_source[used]])
 
     after = topology(out)
     report = CleanReport(
@@ -508,7 +495,7 @@ def clean(grid,
         dropped_duplicate=dropped_duplicate,
         dropped_components=dropped_components,
         dropped_component_cells=dropped_cells, flipped=int(flipped),
-        before=before, after=after)
+        before=before, after=after, repair=repair_report)
     if on_status is not None:
         on_status(report.summary())
     return out, report

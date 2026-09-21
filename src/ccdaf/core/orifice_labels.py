@@ -500,6 +500,163 @@ def label_ventricles(dataset,
             ) from open_
 
 
+
+# ---------------------------------------------------------------------
+# Where two surfaces that should be separate have been joined
+# ---------------------------------------------------------------------
+#: The share of the boundary that counts as its outer shell, by depth
+#: beneath the convex hull, and by symmetry the share that counts as
+#: deepest. A piece holding none of the first does not reach the outside
+#: of the wall; one holding none of the second holds no cavity.
+_OUTER_SHARE: float = 0.05
+
+
+@dataclass
+class Passage:
+    """One route from the cavity side of the wall to the outside.
+
+    A valve opening the band did not fully separate is one of these. So
+    is a hole through the wall. They differ in size and in nothing else,
+    which is why this reports them together and sorted.
+    """
+
+    #: The ring of boundary edges the route is narrowest at.
+    ring: np.ndarray = field(repr=False)
+    #: Length of that ring, in mesh units. The route's size.
+    circumference: float
+    #: Where it is.
+    centre: np.ndarray
+
+    def describe(self) -> str:
+        c = ", ".join(f"{v:.3g}" for v in self.centre)
+        return f"{self.circumference:.1f} around, centre ({c})"
+
+
+def find_passages(dataset,
+                  options: Optional[OrificeOptions] = None,
+                  label_options: Optional[LabelOptions] = None,
+                  openings: Optional[List[Opening]] = None) -> List[Passage]:
+    """Where the epicardium and a cavity are joined, largest ring first.
+
+    This answers one question: when the labelling reports that the
+    openings leave two surface pieces where it needs three, *what* joins
+    them and *where*? Every route from the outside of the wall to the
+    inside of a piece must cross the cheapest cut between the two, so
+    the cut lands on the narrowest ring of each join. On the example
+    ventricle it returns the three valve rims at 225, 179 and 91 units
+    around, and the perforation at 11.7 — told apart by size alone.
+
+    **It reports joins between surfaces, not every hole in the mesh.** A
+    piece holding one surface is skipped, because nothing passes through
+    it, so a hole that does not happen to join two pieces is not found
+    here. Counting *all* the handles is a different question, and
+    :func:`volume_repair.boundary_genus` answers it without saying where
+    they are.
+
+    Two approaches that do not work, both measured, in case they look
+    tempting. Run over the whole surface rather than one piece at a
+    time, the cut takes the cheapest single loop it can find: on the
+    example, one 278.9 unit contour around the entire base, which
+    separates inside from outside perfectly and says nothing about how
+    many ways through there are. And the voxel model cannot be asked
+    instead: it is a 1 mm approximation, and lowering its opening-size
+    filter from 30 mm² to 2 still finds the same three valves and not
+    the 3.7 mm perforation, because a channel that narrow never carries
+    outside air through the wall at that resolution.
+    """
+    options = options or OrificeOptions()
+    label_options = label_options or LabelOptions()
+    surface = _as_boundary(dataset)
+    tri = _faces(surface)
+    if len(tri) == 0:
+        return []
+    points = np.asarray(surface.points, dtype=float)
+    fa, fb, shared = _manifold_adjacency(tri, len(points))
+    if len(fa) == 0:
+        return []
+    if openings is None:
+        openings = find_openings(surface, options).openings
+    if not openings:
+        return []
+
+    centres = points[tri].mean(1)
+    area = _areas(surface)
+    width = options.band_mm / options.mm_per_unit
+    distance = np.full(len(tri), np.inf)
+    for opening in openings:
+        near, _ = cKDTree(opening.points).query(
+            centres, distance_upper_bound=width)
+        distance = np.minimum(distance, near)
+    count, pieces = _components(~(distance < width), fa, fb)
+    sizes = np.bincount(pieces[pieces >= 0], weights=area[pieces >= 0],
+                        minlength=count)
+    significant = np.where(sizes >= _SIGNIFICANT_SHARE * sizes.sum())[0]
+
+    depth = _hull_depth(surface, centres, label_options.seed)
+    lengths = np.linalg.norm(points[shared[:, 1]] - points[shared[:, 0]],
+                             axis=1)
+    capacity = np.maximum(1, np.round(lengths / lengths.mean() * 1000))
+    # Outer and inner are measured against the whole boundary, never
+    # against each piece. Against the piece they mean nothing: a cavity
+    # surface also runs from its shallowest face to its deepest, so
+    # splitting it at its own median reports a ring that is not there.
+    # Inclusive bounds. On a real mesh the depths are continuous and it
+    # makes no difference; on a mesh whose faces all sit at one of two
+    # depths — any box — a strict bound selects nothing at all, and the
+    # question then has no source and no sink to ask about.
+    outermost = depth <= np.percentile(depth, _OUTER_SHARE * 100.0)
+    innermost = depth >= np.percentile(depth, 100.0 - _OUTER_SHARE * 100.0)
+
+    passages: List[Passage] = []
+    for piece in significant:
+        inside = pieces == piece
+        source, sink = inside & outermost, inside & innermost
+        if not (source.any() and sink.any()):
+            continue                     # one surface: nothing crosses it
+        side = _min_cut(len(tri), fa, fb, capacity,
+                        inside & ~(source | sink), source, sink)
+        cut = shared[side[fa] != side[fb]]
+        if len(cut) == 0:
+            continue
+        # Rings, by the edges that share an end: two routes never share
+        # a node, where clustering by distance would only usually
+        # separate them.
+        nodes = np.unique(cut)
+        local = np.searchsorted(nodes, cut)
+        groups = connected_components(
+            sp.coo_matrix((np.ones(len(local), dtype=np.int8),
+                           (local[:, 0], local[:, 1])),
+                          shape=(len(nodes),) * 2), directed=False)[1]
+        for k in np.unique(groups[local[:, 0]]):
+            ring = cut[groups[local[:, 0]] == k]
+            passages.append(Passage(
+                ring=ring,
+                circumference=float(np.linalg.norm(
+                    points[ring[:, 1]] - points[ring[:, 0]], axis=1).sum()),
+                centre=points[np.unique(ring)].mean(axis=0)))
+    passages.sort(key=lambda item: -item.circumference)
+    return passages
+
+
+def describe_passages(passages: List[Passage], keep: int = 0) -> str:
+    """The passages as a report, naming which are too small to be valves.
+
+    *keep* is how many the anatomy is expected to have; the rest are
+    named as defects. Zero lists them without judgement, because how
+    many valve openings a mesh should have is the caller's question.
+    """
+    if not passages:
+        return "Nothing joins the epicardium to a cavity."
+    lines = [f"{len(passages)} join(s) between the epicardium and a cavity, "
+             f"largest first:"]
+    for index, passage in enumerate(passages):
+        tag = "   <- too small to be a valve opening" if (
+            keep and index >= keep) else ""
+        lines.append(f"  {passage.describe()}{tag}")
+    return "\n".join(lines)
+
+
 __all__ = ["UNITS", "TYPICAL_RMS_RADIUS_MM", "MAX_VOXELS", "OrificeOptions",
            "Opening", "OpeningSearch", "rms_radius", "guess_unit",
-           "find_openings", "label_open_boundary", "label_ventricles"]
+           "find_openings", "label_open_boundary", "label_ventricles",
+           "Passage", "find_passages", "describe_passages"]
