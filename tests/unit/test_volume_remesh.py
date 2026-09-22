@@ -42,7 +42,7 @@ from ccdaf.core.field_transfer import (
     average_axial, average_axial_grouped, transfer_volume_fields,
 )
 from ccdaf.core.volume_postprocessor import (
-    RemeshOptions, decode_tags, encode_tags, remesh,
+    RemeshOptions, _from_mmg, decode_tags, encode_tags, remesh,
 )
 
 
@@ -372,3 +372,87 @@ def test_an_adapted_boundary_drops_the_labels_and_says_so():
     assert any("label the surfaces again" in m for m in said)
     # The measurements still come across.
     assert "scar_probability" in dst.point_data
+
+
+# ------------------------------------------------- vertices with no element
+class _FakeMmg:
+    """The smallest thing ``_from_mmg`` reads: vertices and tetrahedra.
+
+    A real MMG run cannot be made to leave a vertex behind on demand, and
+    the case has to be exercised exactly rather than hoped for, so the
+    array it hands back is built here instead.
+    """
+
+    def __init__(self, points, tets, refs=None):
+        self._points = np.asarray(points, dtype=float)
+        self._tets = np.asarray(tets, dtype=np.int64)
+        self._refs = np.ones(len(self._tets), dtype=np.int32) if refs is None else refs
+
+    def get_vertices_with_refs(self):
+        return self._points, np.zeros(len(self._points), dtype=np.int32)
+
+    def get_tetrahedra_with_refs(self):
+        return self._tets, self._refs
+
+
+def test_a_vertex_no_tetrahedron_uses_is_dropped():
+    """The bug that cost a solver run: the node existed, nothing used it.
+
+    A solver numbers its nodes from the element list, so the count never
+    reaches the node total and it aborts before the first time step.
+    """
+    points = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.],
+                       [0., 0., 1.], [9., 9., 9.]])      # the last one is loose
+    out = _from_mmg(_FakeMmg(points, [[0, 1, 2, 3]]), None)
+
+    assert out.n_points == 4
+    assert out.n_cells == 1
+    assert np.unique(vm.tetrahedra(out)).tolist() == [0, 1, 2, 3]
+    # The tetrahedron is the same tetrahedron, not a renumbered muddle.
+    assert np.allclose(np.sort(out.points, axis=0), np.sort(points[:4], axis=0))
+
+
+def test_dropping_a_loose_vertex_renumbers_the_rest():
+    """A vertex in the middle shifts every index above it, or the mesh
+    quietly becomes a different mesh."""
+    points = np.array([[0., 0., 0.], [1., 0., 0.], [5., 5., 5.],   # 2 is loose
+                       [0., 1., 0.], [0., 0., 1.]])
+    out = _from_mmg(_FakeMmg(points, [[0, 1, 3, 4]]), None)
+
+    assert out.n_points == 4
+    assert vm.tetrahedra(out).tolist() == [[0, 1, 2, 3]]
+    assert np.allclose(out.points, points[[0, 1, 3, 4]])
+
+
+def test_dropping_loose_vertices_is_reported():
+    points = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.],
+                       [0., 0., 1.], [9., 9., 9.], [8., 8., 8.]])
+    said = []
+    _from_mmg(_FakeMmg(points, [[0, 1, 2, 3]]), None, said.append)
+    assert any("2 vertices" in m for m in said)
+
+
+def test_a_mesh_with_nothing_loose_is_left_alone():
+    """The common case pays nothing and, in particular, is not reordered."""
+    points = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
+    out = _from_mmg(_FakeMmg(points, [[0, 1, 2, 3]]), None)
+    assert np.allclose(out.points, points)
+    assert vm.tetrahedra(out).tolist() == [[0, 1, 2, 3]]
+
+
+def test_a_one_based_array_is_still_refused_not_compacted():
+    """Compacting must not paper over the off-by-one it resembles.
+
+    Read as 1-based, vertex 0 is unused — which is what the compaction
+    fixes — but the top index is also one past the end, which the range
+    check catches first.
+    """
+    points = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
+    with pytest.raises(RuntimeError, match="0-based"):
+        _from_mmg(_FakeMmg(points, [[1, 2, 3, 4]]), None)
+
+
+def test_a_real_remesh_leaves_no_vertex_unused(source):
+    """The property the export depends on, checked on the real call."""
+    out = remesh(source, RemeshOptions(target_edge=0.6))
+    assert len(np.unique(vm.tetrahedra(out))) == out.n_points

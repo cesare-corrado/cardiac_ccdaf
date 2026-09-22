@@ -188,6 +188,9 @@ class QualityReport:
     mean_after: float = 0.0
     flips_4_to_1: int = 0
     flips_3_to_2: int = 0
+    #: Nodes the flips took out of the connectivity and that were
+    #: therefore dropped. A 4-to-1 flip removes exactly one.
+    removed_nodes: int = 0
     moved_nodes: int = 0
     max_shift: float = 0.0
     max_boundary_shift: float = 0.0
@@ -220,6 +223,9 @@ class QualityReport:
         flips = self.flips_4_to_1 + self.flips_3_to_2
         if flips:
             bits.append(f"{flips} flip" + ("" if flips == 1 else "s"))
+        if self.removed_nodes:
+            bits.append(f"removed {self.removed_nodes} node"
+                        + ("" if self.removed_nodes == 1 else "s"))
         if self.moved_nodes:
             bits.append(f"moved {self.moved_nodes} node"
                         + ("" if self.moved_nodes == 1 else "s")
@@ -828,11 +834,17 @@ def improve(points: np.ndarray,
             on_status: Optional[Callable[[str], None]] = None):
     """Repair the shape of the elements above the threshold.
 
-    Returns ``(points, tets, source_cell, report)``. ``source_cell``
-    indexes the input elements, so a caller carries every element field
-    by selection: a flip's replacement takes the value of one of the
-    elements it replaced. Node positions change, so point fields stay
-    attached to their own nodes and need no transfer at all.
+    Returns ``(points, tets, point_source, source_cell, report)``.
+    ``source_cell`` indexes the input elements, so a caller carries
+    every element field by selection: a flip's replacement takes the
+    value of one of the elements it replaced.
+
+    ``point_source`` indexes the input *nodes*, and a caller has to use
+    it. The 4-to-1 flip exists to remove a node, so the node count is
+    not fixed and a point field cannot simply be handed across. Leaving
+    the node in place instead was a real bug: a node no element mentions
+    is invisible here and stops a solver later, because a solver numbers
+    its nodes from the element list and the count then comes up short.
 
     Neither input array is modified.
     """
@@ -858,7 +870,8 @@ def improve(points: np.ndarray,
         volume_after=float(volumes.sum()),
         threshold=options.threshold)
     if report.bad_before == 0:
-        return points, tets, source_cell, report
+        return (points, tets, np.arange(len(points), dtype=np.int64),
+                source_cell, report)
 
     # The boundary's faces do not change: a flip works on an interior
     # edge and a move changes no connectivity, so the table is rebuilt
@@ -944,9 +957,21 @@ def improve(points: np.ndarray,
     report.max_shift = float(shift.max()) if len(shift) else 0.0
     report.max_boundary_shift = (float(shift[on_wall].max())
                                  if on_wall.any() else 0.0)
+    # The flips are what make this necessary: a 4-to-1 flip replaces a
+    # node's four elements with one that does not mention the node, so
+    # the node is left in the array with nothing using it. Reported
+    # after the shift statistics above, which are over the nodes as they
+    # were asked to move.
+    point_source = np.unique(tets) if len(tets) else np.zeros(0, np.int64)
+    report.removed_nodes = len(points) - len(point_source)
+    if report.removed_nodes:
+        remap = np.empty(len(points), dtype=np.int64)
+        remap[point_source] = np.arange(len(point_source))
+        points, tets = points[point_source], remap[tets]
+
     if on_status is not None:
         on_status(report.summary())
-    return points, tets, source_cell, report
+    return points, tets, point_source, source_cell, report
 
 
 def improve_grid(grid,
@@ -954,17 +979,19 @@ def improve_grid(grid,
                  on_status: Optional[Callable[[str], None]] = None):
     """:func:`improve`, for a grid rather than arrays.
 
-    ``grid`` is not modified. Element arrays are carried by selection, so
-    a flip's replacement inherits the label and fibre of an element it
-    replaced; point arrays are carried untouched, because this pass
-    moves nodes but never adds or removes one.
+    ``grid`` is not modified. Both element and point arrays are carried
+    by selection, never by interpolation: a flip's replacement inherits
+    the label and fibre of an element it replaced, and a surviving node
+    keeps its own values. Point arrays are selected rather than copied
+    whole because the 4-to-1 flip removes a node, so the result can have
+    fewer nodes than the source.
 
     Raises ``ValueError`` for a non-tetrahedral volume or impossible
     options.
     """
     source = pv.wrap(grid)
     validate_tetrahedral(source)
-    points, tets, source_cell, report = improve(
+    points, tets, point_source, source_cell, report = improve(
         np.asarray(source.points, dtype=float), tetrahedra(source),
         options, on_status)
 
@@ -972,7 +999,7 @@ def improve_grid(grid,
     for name in source.cell_data.keys():
         out.cell_data[name] = np.asarray(source.cell_data[name])[source_cell]
     for name in source.point_data.keys():
-        out.point_data[name] = np.asarray(source.point_data[name])
+        out.point_data[name] = np.asarray(source.point_data[name])[point_source]
     return out, report
 
 
