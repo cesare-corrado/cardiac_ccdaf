@@ -332,3 +332,34 @@ def test_a_weld_candidate_is_measured_after_it_is_oriented():
     assert vm.shape_measure(points[cap]) == 2.0      # as written
     oriented, _flipped = vm.orient_positive(points, cap)
     assert float(vm.shape_measure(points[oriented])[0]) < 0.95
+
+
+def test_a_plug_looks_up_its_neighbours_by_node_not_by_element():
+    """The lookup that would have crashed the moment a plug fired.
+
+    The elements around a candidate are found from the nodes of its two
+    faces. Passing the faces' *owning elements* instead reads the node
+    adjacency past its end, which nothing noticed because no candidate
+    had ever survived far enough to ask.
+    """
+    grid = _pinhole_at_a_node(inner=0.4)
+    points = np.asarray(grid.points, dtype=float)
+    tets = vm.tetrahedra(grid)
+    starts, cells = vm.node_cells(tets, len(points))
+    faces, owners, _apexes = vm.boundary_table(tets)
+
+    # An owner is a cell index, and cell indices run past the node count
+    # on any mesh with more elements than nodes — which is most of them.
+    assert owners.max() >= len(points) or len(tets) < len(points)
+    for node in np.concatenate([faces[0], faces[1]]):
+        assert vr._cells_at(starts, cells, int(node)).size
+
+
+def test_plugging_a_pinhole_mesh_does_not_raise():
+    """The whole pass, with plugging on, over a mesh that has a pinhole."""
+    grid = _pinhole_at_a_node(inner=0.4)
+    points, tets, _sp, _sc, report = vr.repair(
+        np.asarray(grid.points, dtype=float), vm.tetrahedra(grid),
+        vr.RepairOptions(plug_perforations=True))
+    assert len(tets) >= grid.n_cells
+    assert report.genus_after is None or report.genus_after >= 0

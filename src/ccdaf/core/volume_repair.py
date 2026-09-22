@@ -893,8 +893,14 @@ def _plug_pass(points: np.ndarray, tets: np.ndarray, options: RepairOptions,
             continue
         if any(_spanning(tets, starts, cells, quad) for quad in candidate):
             continue
-        neighbours = np.union1d(_cells_at(starts, cells, int(owners[i])),
-                                _cells_at(starts, cells, int(owners[j])))
+        # The elements around the two faces, which means around their
+        # nodes. ``owners`` holds cell indices and this wants nodes, so
+        # passing one for the other reads the adjacency table past its
+        # end — caught on the example ventricle as node 123632 of 66824,
+        # and latent only because no candidate had ever got this far.
+        neighbours = np.unique(np.concatenate(
+            [_cells_at(starts, cells, int(node))
+             for node in np.concatenate([faces[i], faces[j]])]))
         if any(_overlaps(points, tets, neighbours, quad)
                for quad in candidate):
             continue
