@@ -22,7 +22,11 @@ The contract:
 * **a round that does not pay for itself is undone**, whole rather than
   in part;
 * **fields are carried by selection**: a flip's replacement takes the
-  label of an element it replaced, and point data stays with its node.
+  label of an element it replaced, and point data stays with its node;
+* **a 4-to-1 flip removes its node from the mesh, not just from the
+  connectivity.** Leaving it behind was a real bug: a node no element
+  mentions is invisible in the viewer and stops a solver later, which
+  numbers its nodes from the element list.
 """
 
 import sys
@@ -277,3 +281,88 @@ def test_an_impossible_threshold_is_refused():
 def test_a_surface_is_refused():
     with pytest.raises(ValueError):
         vq.improve_grid(pv.Sphere().cast_to_unstructured_grid())
+
+
+# ------------------------------------------------ the node a flip removes
+def _valence_four_sliver() -> tuple:
+    """A block with one interior tetrahedron split into four by a node
+    pushed almost onto one of its faces.
+
+    That node is interior and has valence 4, and its four elements are
+    slivers, which is precisely what the 4-to-1 flip is built to remove.
+    Returns ``(grid, inserted_node)``.
+    """
+    grid = _block(n=6, size=5.0)
+    points = np.asarray(grid.points, dtype=float)
+    tets = np.asarray(vm.tetrahedra(grid), dtype=np.int64)
+
+    surface = grid.extract_surface(algorithm="dataset_surface")
+    on_wall = np.zeros(len(points), bool)
+    on_wall[np.asarray(surface.point_data["vtkOriginalPointIds"])] = True
+    victim = next(i for i, t in enumerate(tets) if not on_wall[t].any())
+    a, b, c, d = tets[victim]
+
+    inner = (0.9 * points[a] + 0.0345 * points[b]
+             + 0.0345 * points[c] + 0.031 * points[d])
+    points = np.vstack([points, inner])
+    node = len(points) - 1
+    tets = np.vstack([np.delete(tets, victim, axis=0),
+                      [[node, b, c, d], [node, a, c, d],
+                       [node, a, b, d], [node, a, b, c]]])
+
+    out = pv.UnstructuredGrid({pv.CellType.TETRA: tets}, points)
+    out.cell_data["elemTag"] = np.arange(len(tets), dtype=np.int32) + 1
+    out.point_data["scar_probability"] = np.arange(len(points), dtype=float)
+    return out, node
+
+
+def test_a_four_to_one_flip_leaves_no_node_behind():
+    """The bug that reached a solver: the node was gone from every
+    element and still in the mesh."""
+    grid, node = _valence_four_sliver()
+    out, report = vq.improve_grid(grid)
+
+    assert report.flips_4_to_1 >= 1
+    used = np.unique(vm.tetrahedra(out))
+    assert len(used) == out.n_points
+    assert np.array_equal(used, np.arange(out.n_points))
+
+
+def test_the_removed_node_is_the_one_the_flip_took_out():
+    """Not merely "a" node: the inserted sliver node, and only it."""
+    grid, node = _valence_four_sliver()
+    out, report = vq.improve_grid(grid)
+
+    assert report.removed_nodes == grid.n_points - out.n_points
+    assert report.removed_nodes == 1
+    # Every other node is still there, with its own value.
+    kept = np.asarray(out.point_data["scar_probability"])
+    assert np.array_equal(kept, np.arange(node, dtype=float))
+
+
+def test_point_arrays_stay_the_length_of_the_points():
+    """A point array copied whole across a shorter mesh is the failure
+    this guards: it reads as a mesh and every value is off by one from
+    the node it belongs to."""
+    grid, _node = _valence_four_sliver()
+    out, _report = vq.improve_grid(grid)
+    for name in out.point_data.keys():
+        assert len(out.point_data[name]) == out.n_points
+
+
+def test_removing_a_node_is_reported():
+    grid, _node = _valence_four_sliver()
+    said = []
+    _out, report = vq.improve_grid(grid, on_status=said.append)
+    assert "removed 1 node" in report.summary()
+    assert any("removed 1 node" in message for message in said)
+
+
+def test_a_mesh_with_nothing_to_repair_keeps_every_node():
+    """The common path returns the nodes it was given, in order."""
+    grid = _block(n=5, size=4.0)
+    points, tets, point_source, source_cell, report = vq.improve(
+        np.asarray(grid.points, dtype=float), vm.tetrahedra(grid))
+    assert report.removed_nodes == 0
+    assert np.array_equal(point_source, np.arange(grid.n_points))
+    assert len(points) == grid.n_points

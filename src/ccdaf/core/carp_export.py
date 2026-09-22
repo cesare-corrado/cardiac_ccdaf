@@ -312,6 +312,14 @@ def write_carp(dataset, options: CarpExportOptions, *,
             f"Scaled, the mesh is {extent / 1e3:.1f} mm across. CARP reads "
             "micrometres, so check the scale factor.")
 
+    unused = len(points) - len(np.unique(connectivity)) if n_elements else len(points)
+    if unused:
+        noun = "node is" if unused == 1 else "nodes are"
+        notes.append(
+            f"{unused} {noun} in the mesh but in no element. A solver "
+            "numbers its nodes from the element list, so it will refuse "
+            "this mesh: clean the volume before exporting.")
+
     tags = _tags(dataset, options, n_elements, notes)
     vectors, axes, placeholder, normalised = _directions(
         dataset, options, n_elements, notes)

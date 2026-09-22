@@ -24,6 +24,12 @@ files to avoid an in-memory API that had never actually failed — so the
 convention is stated here and asserted in :func:`_from_mmg` rather than
 trusted.
 
+The vertex array that comes back is not compacted for the tetrahedra
+alone either: MMG can return a vertex no element references, and one that
+reaches a solver aborts the run, because a solver numbers its nodes from
+the element list and the count then comes up short. They are dropped on
+the way out, in :func:`_drop_unused_vertices`.
+
 Labels ride as references
 -------------------------
 MMG carries an integer *reference* per element through the adaptation, so
@@ -223,7 +229,9 @@ def _to_mmg(grid):
     return mesh, values
 
 
-def _from_mmg(mesh, values: Optional[np.ndarray]) -> pv.UnstructuredGrid:
+def _from_mmg(mesh, values: Optional[np.ndarray],
+              on_status: Optional[Callable[[str], None]] = None
+              ) -> pv.UnstructuredGrid:
     """Read an ``MmgMesh3D`` back as a grid, restoring the tags."""
     points = np.asarray(mesh.get_vertices_with_refs()[0], dtype=float)
     tets, refs = mesh.get_tetrahedra_with_refs()
@@ -237,10 +245,46 @@ def _from_mmg(mesh, values: Optional[np.ndarray]) -> pv.UnstructuredGrid:
             "MMG returned connectivity outside the vertex range — the "
             "0-based index convention no longer holds.")
 
+    points, tets = _drop_unused_vertices(points, tets, on_status)
+
     out = pv.UnstructuredGrid({TETRA: tets}, points)
     if values is not None:
         out.cell_data[TAG_FIELD] = decode_tags(np.asarray(refs), values)
     return out
+
+
+def _drop_unused_vertices(points: np.ndarray, tets: np.ndarray,
+                          on_status: Optional[Callable[[str], None]] = None
+                          ) -> Tuple[np.ndarray, np.ndarray]:
+    """Return *points* and *tets* with vertices no tetrahedron uses removed.
+
+    MMG's vertex array is not compacted for the tetrahedra alone. A vertex
+    it kept for a boundary triangle, or for bookkeeping of its own, can
+    come back referenced by no element at all. Such a vertex is invisible
+    in the viewer and fatal much later: a solver indexes its nodes from the
+    element list, so a node no element mentions makes the count come up
+    short and the run abort before it starts. The mesh is still ours here,
+    so this is the place to drop them rather than the export's.
+
+    This cannot paper over a 1-based array. Under that misreading every
+    index is one too high, vertex 0 is unused *and* the last index is one
+    past the end, so the range check above fires first and this is never
+    reached.
+    """
+    if not len(points):
+        return points, tets
+    used = np.unique(tets) if tets.size else np.zeros(0, dtype=np.int64)
+    if len(used) == len(points):
+        return points, tets
+
+    remap = np.empty(len(points), dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    dropped = len(points) - len(used)
+    if on_status is not None:
+        noun = "vertex" if dropped == 1 else "vertices"
+        on_status(f"Dropped {dropped} {noun} MMG left behind that no "
+                  f"tetrahedron uses.")
+    return points[used], remap[tets] if tets.size else tets
 
 
 def remesh(grid,
@@ -277,7 +321,7 @@ def remesh(grid,
         raise RuntimeError(
             f"MMG3D could not remesh this volume: {exc}") from exc
 
-    result = _from_mmg(mesh, values)
+    result = _from_mmg(mesh, values, on_status)
     if result.n_cells == 0:
         raise RuntimeError("MMG3D returned a mesh with no tetrahedra.")
 

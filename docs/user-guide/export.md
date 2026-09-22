@@ -80,7 +80,12 @@ It asks before writing when:
   every element, which is a placeholder in disguise;
 - the highest region tag is above 255, which older CARP versions cannot hold
   because they store the tag in an unsigned char;
-- a sheet direction is not perpendicular to its fibre.
+- a sheet direction is not perpendicular to its fibre;
+- **a node is in the mesh but in no element.** A solver numbers its nodes from
+  the element list, so a node no element mentions makes the count come up
+  short and the run stops before the first time step. CARP reports it as
+  `renumber_nodes_simply error: Not all node numbers could be indexed`. Run
+  **Clean volume** and export again.
 
 ## Worked example
 

@@ -168,6 +168,26 @@ def test_with_no_region_array_every_element_is_written_as_the_default_tag(tmp_pa
     assert any(f"written with tag {ce.DEFAULT_TAG}" in note for note in result.warnings)
 
 
+def test_a_node_in_no_element_is_reported(tmp_path):
+    """A solver numbers its nodes from the element list, so a node no
+    element mentions makes the count come up short and the run abort
+    before the first time step. Cheap to see here, expensive to find
+    there."""
+    grid = _tets()
+    loose = pv.UnstructuredGrid(
+        {pv.CellType.TETRA: np.asarray(grid.cells_dict[pv.CellType.TETRA])},
+        np.vstack([np.asarray(grid.points), [[99.0, 99.0, 99.0]]]))
+    loose.cell_data["elemTag"] = np.asarray(grid.cell_data["elemTag"])
+
+    result = ce.write_carp(loose, _options(tmp_path, region_field="elemTag"),
+                           dry_run=True)
+    assert any("in no element" in note for note in result.warnings)
+
+    clean = ce.write_carp(grid, _options(tmp_path, region_field="elemTag"),
+                          dry_run=True)
+    assert not any("in no element" in note for note in clean.warnings)
+
+
 def test_an_implausible_scale_is_reported(tmp_path):
     # 90 units across: a heart in millimetres, so x1000 is a plausible 90 mm
     # in micrometres and x1 is not.

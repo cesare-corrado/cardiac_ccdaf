@@ -483,6 +483,12 @@ the count of bad elements:
    five nodes collapses into one (4-to-1). Each is applied only where the worst
    element involved gets better, and only around an interior edge, so the
    boundary is untouched by construction.
+
+    A 4-to-1 flip **removes its node from the mesh**: the replacement element
+    is built from the other four nodes, so the node it collapsed has nothing
+    left using it and is dropped, and the point fields follow. The report says
+    how many nodes went this way. Node numbering therefore changes, which
+    matters if you are matching results back to a mesh saved earlier.
 2. **smoothing** — quality-guarded Taubin over the bad elements and two layers
    around them. A node's move is kept only if its own worst element does not
    get worse, and the result is checked a second time with every move in place,
