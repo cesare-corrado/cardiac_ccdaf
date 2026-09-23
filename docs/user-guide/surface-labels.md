@@ -121,7 +121,9 @@ nothing to do with the base.
   *Check these openings*.
 - **Check these openings**: build a ring at each listed opening and report,
   writing nothing. The preview draws the rings in red and a yellow marker at
-  the centre of each opening.
+  the centre of each opening. If the labels had to be cut through a hole in
+  the wall (see [Holes through the wall](#holes-through-the-wall)), a magenta
+  marker shows each cut, and the report lists them.
 
 ### How the openings are found
 
@@ -152,6 +154,65 @@ have) do not count as connections. On the example ventricle 18 such edges join
 the epicardium directly to an endocardium, and counting them would keep the
 surface in one piece whatever is cut.
 
+### Holes through the wall
+
+A segmentation can leave holes straight through the wall, narrower than a
+valve, that join the epicardium to a cavity. The rings at the openings cannot
+separate the surfaces then: they leave two, not three.
+
+When that happens, and only then, the labelling looks for the holes:
+
+1. Each boundary face looks out along its normal, up to 4 mm, into the voxel
+   model above. It is classed by the first thing it meets: outside air or a
+   blood pool. A hole narrower than a voxel is closed wall in that model, so
+   the faces around it are still classed correctly. Faces lining a hole meet
+   wall again first and stay unclassed.
+2. The large patches of each class, trimmed back by three rings of faces,
+   anchor a shortest cut between the outside-facing and the pool-facing
+   faces. The cut cannot use the bands at the openings. This finds where
+   the joins are.
+3. Within 10 mm of each join, the cut is solved again. Every classed face
+   there now costs its area (1 per mm², against 1 per mm of cut) if it ends
+   up on the side it does not face. Without this, the shortest loop round a
+   cluster of holes can run over the outer surface and take the patch of
+   outer wall inside it to the cavity. With it, the cut runs through each
+   hole. Farther away nothing changes, so a patch the voxel model misreads
+   elsewhere is never cut out.
+4. The labels are split along the cut, and the rings at the openings are
+   built as usual.
+
+**The mesh is not changed.** The holes stay in it, and a simulation sees them
+as small gaps in the tissue. Each cut is a seam between the epicardium and a
+cavity, with no base. Its nodes belong to both, so the fibre generator
+releases them, as it does any node touching both surfaces. A cavity face
+whose three nodes all also belong to the epicardium (inside a very small
+hole, or beside a cut at a pinch) is labelled epicardium, because that is
+what the saved form reads it back as. Saving and reloading then gives back
+exactly the same labels.
+
+The report lists every cut, with its length and centre, and the preview
+marks each one in magenta. Treat them as places to check in the segmentation.
+
+A cut is refused where the voxel model sees a pool open to the outside air
+over 30 mm² or more (the size of the smallest opening it reports) at no
+opening in the list. That is an opening that was missed or removed, not a
+hole, and cutting there would label a valve as wall. The refusal gives the
+place.
+
+**Measured on a heart whose wall has holes**
+
+The holes are in a cluster, in the basal LV wall, where the wall thins to
+0.35 to 0.9 mm (3.5 mm elsewhere).
+
+| Mesh | Cuts | Base / epi / LV / RV (% area) | Outer wall labelled LV, within 12 mm of the holes |
+|---|---|---|---:|
+| Cleaned | 5 rings, 8.3 to 13.0 mm | 1.2 / 47.5 / 23.9 / 27.4 | 0 mm² |
+| Not cleaned | 6 rings, 3.0 to 12.7 mm | 1.3 / 47.6 / 23.8 / 27.4 | 2.3 mm² |
+| Cleaned, without step 3 | 1 loop, 42.4 mm, round the cluster | 1.2 / 47.4 / 23.9 / 27.4 | 55 mm² |
+
+The fibres were then generated on both. The example ventricle and both
+reference meshes below made no cut, and their labels are unchanged.
+
 ### Measured accuracy
 
 **Agreement with reference labels, as a share of each surface's area**
@@ -175,7 +236,9 @@ mitral-aortic opening, where the reference base itself has a gap.
 ## The acceptance test
 
 Removing the base must leave **exactly three** connected surfaces. If it leaves
-one, the tool refuses and says so.
+one, the tool refuses and says so. On a mesh with valve openings, holes through
+the wall are cut first (see [Holes through the wall](#holes-through-the-wall)),
+and the test applies to what is left.
 
 That refusal is the useful part. It is what tells you the plane is in the wrong
 place, or that an opening is missing, instead of letting a meaningless solve

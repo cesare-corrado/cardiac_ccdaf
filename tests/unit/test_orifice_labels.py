@@ -13,6 +13,9 @@ The contract:
   three surfaces, named by the same rules as the truncated method;
 * a missing opening leaves the surface joined, and is refused;
 * edges shared by more than two faces do not join surfaces;
+* a hole through the wall too narrow to be an opening does not stop the
+  labelling: the labels are cut at it, the mesh is left alone, and a
+  cut at a place where a pool opens as widely as a valve is refused;
 * the automatic choice uses the flat cut on a truncated mesh and the
   openings otherwise.
 
@@ -35,7 +38,7 @@ import pyvista as pv
 
 from ccdaf.core.orifice_labels import (
     UNITS, OrificeOptions, find_openings, guess_unit, label_open_boundary,
-    label_ventricles, rms_radius, _manifold_adjacency,
+    label_ventricles, rms_radius, _as_read_back, _manifold_adjacency,
 )
 from ccdaf.core.surface_labels import (
     BASE, EPI, LABEL_MASK_FIELD, LV_ENDO, RV_ENDO, UNLABELLED, Plane,
@@ -235,6 +238,170 @@ def test_an_edge_of_three_faces_joins_nothing():
     fa, fb, edges = _manifold_adjacency(tri, 6)
     assert sorted(tuple(sorted(p)) for p in zip(fa.tolist(), fb.tolist())) == [(0, 3)]
     assert edges.tolist() == [[1, 2]]
+
+
+# ------------------------------------------------ holes through the wall
+def _drilled(width: float) -> pv.UnstructuredGrid:
+    """The block with a square hole *width* mm across drilled through
+    the 6 mm side wall into the first cavity, at y = z = 17."""
+    block = _open_block()
+    c = np.asarray(block.cell_centers().points)
+    low, high = 17 - width / 2, 17 + width / 2
+    hole = ((c[:, 0] < 6) & (c[:, 1] > low) & (c[:, 1] < high)
+            & (c[:, 2] > low) & (c[:, 2] < high))
+    return block.extract_cells(np.where(~hole)[0]).cast_to_unstructured_grid()
+
+
+@pytest.fixture(scope="module")
+def drilled():
+    return _drilled(2.0)
+
+
+@pytest.fixture(scope="module")
+def drilled_labels(drilled):
+    return label_open_boundary(drilled, options=OrificeOptions(**OPTIONS))
+
+
+def test_a_sound_wall_is_not_cut(labels):
+    assert labels.cuts == []
+    assert "hole" not in labels.note
+
+
+def test_a_hole_through_the_wall_is_cut_where_it_is(drilled_labels):
+    # Without the cut, the hole joins the epicardium to the first cavity
+    # and the openings leave two surfaces, which used to be refused.
+    assert set(np.unique(drilled_labels.face_labels)) == {
+        BASE, EPI, LV_ENDO, RV_ENDO}
+    assert len(drilled_labels.cuts) == 1
+    cut = drilled_labels.cuts[0]
+    assert cut.centre[0] <= 6.0 + 1e-9                  # in the side wall
+    assert np.allclose(cut.centre[1:], 17.0, atol=1.5)
+    assert cut.circumference < 12.0                     # the 8 mm hole, not a valve
+    assert "hole" in drilled_labels.details()
+
+
+def _cluster() -> pv.UnstructuredGrid:
+    """Four 2 mm holes, 2 mm apart, through the first cavity's side wall.
+
+    The shortest loop runs round all four over the outer face (24 mm,
+    against 32 mm for four rings), which would take the outer face
+    between them to the cavity.
+    """
+    block = _open_block()
+    c = np.asarray(block.cell_centers().points)
+    hole = np.zeros(len(c), dtype=bool)
+    for y in (15, 19):
+        for z in (15, 19):
+            hole |= ((c[:, 0] < 6) & (np.abs(c[:, 1] - y) < 1)
+                     & (np.abs(c[:, 2] - z) < 1))
+    return block.extract_cells(np.where(~hole)[0]).cast_to_unstructured_grid()
+
+
+def test_a_cluster_of_holes_is_cut_hole_by_hole():
+    grid = _cluster()
+    result = label_open_boundary(grid, options=OrificeOptions(**OPTIONS))
+    outer = np.abs(_face_centres(grid)[:, 0]) < 1e-6
+    assert (result.face_labels[outer] == EPI).all()
+    assert len(result.cuts) == 4
+
+
+def test_without_the_refinement_a_cluster_takes_outer_wall_inside(monkeypatch):
+    # What the refinement is for: the shortest loop alone gets it wrong.
+    import ccdaf.core.orifice_labels as orifice
+    monkeypatch.setattr(orifice, "_refine", lambda side, *_a, **_k: side)
+    grid = _cluster()
+    result = label_open_boundary(grid, options=OrificeOptions(**OPTIONS))
+    outer = np.abs(_face_centres(grid)[:, 0]) < 1e-6
+    assert len(result.cuts) == 1
+    assert (result.face_labels[outer] != EPI).any()
+
+
+def test_a_hole_changes_the_labels_only_around_it(labels, drilled_labels):
+    total = sum(labels.areas.values())
+    for key in (BASE, EPI, LV_ENDO, RV_ENDO):
+        assert abs(drilled_labels.areas[key] - labels.areas[key]) < 0.01 * total
+
+
+def test_a_cut_ring_belongs_to_the_epicardium_and_the_cavity(drilled,
+                                                             drilled_labels):
+    # Its nodes are in both sets, which is what the fibre solve releases.
+    surface = boundary_surface(drilled)
+    origin = np.asarray(surface.point_data["vtkOriginalPointIds"])
+    ring = origin[np.unique(drilled_labels.cuts[0].ring)]
+    sets = drilled_labels.node_sets
+    cavity = np.union1d(sets[LV_ENDO], sets[RV_ENDO])
+    assert np.isin(ring, sets[EPI]).all()
+    assert np.isin(ring, cavity).all()
+
+
+def test_a_cut_mesh_rebuilds_every_face_from_its_mask(drilled, drilled_labels):
+    surface = boundary_surface(drilled)
+    origin = np.asarray(surface.point_data["vtkOriginalPointIds"])
+    mask = node_label_mask(drilled, drilled_labels)
+    back = face_labels_from_mask(surface, mask[origin])
+    assert np.array_equal(back, drilled_labels.face_labels)
+
+
+def test_a_hole_is_cut_on_a_bare_surface_too(drilled, drilled_labels):
+    # No tetrahedra to say which side is solid: the normals are oriented
+    # from the surface alone, and must agree.
+    result = label_open_boundary(boundary_surface(drilled),
+                                 options=OrificeOptions(**OPTIONS))
+    assert len(result.cuts) == 1
+    assert np.array_equal(result.face_labels, drilled_labels.face_labels)
+
+
+def test_the_mesh_itself_is_not_changed_by_a_cut(drilled):
+    before = (drilled.n_points, drilled.n_cells,
+              np.asarray(drilled.points).copy())
+    label_open_boundary(drilled, options=OrificeOptions(**OPTIONS))
+    assert (drilled.n_points, drilled.n_cells) == before[:2]
+    assert np.array_equal(np.asarray(drilled.points), before[2])
+
+
+def test_a_hole_the_voxels_see_but_too_small_for_a_valve_is_cut():
+    # 6 mm across, the voxel model shows the pool meeting the outside
+    # there, over 12 mm²: under the 30 mm² an opening needs.
+    grid = _drilled(6.0)
+    result = label_open_boundary(grid, options=OrificeOptions(**OPTIONS))
+    assert len(result.cuts) >= 1
+
+
+def test_a_hole_as_wide_as_an_opening_is_refused_not_cut():
+    # The same 12 mm² counts as an opening once openings may be that
+    # small, and a join at an opening left out is a missing opening.
+    grid = _drilled(6.0)
+    options = OrificeOptions(**OPTIONS)
+    openings = find_openings(grid, options).openings
+    assert len(openings) == 2                 # the hole is not among them
+    strict = OrificeOptions(min_opening_mm2=10.0, **OPTIONS)
+    with pytest.raises(ValueError, match="probably missing"):
+        label_open_boundary(grid, openings, strict)
+
+
+def test_a_missing_opening_says_where_it_is(block):
+    options = OrificeOptions(**OPTIONS)
+    one = find_openings(block, options).openings[:1]
+    with pytest.raises(ValueError, match=r"not 3.*near \("):
+        label_open_boundary(block, one, options)
+
+
+def test_a_face_takes_the_label_it_reads_back_as():
+    # Face 0 is LV, but each of its nodes also lies on an epicardial face,
+    # as on a cut with a pinch beside it: saved per node, it reads back as
+    # epicardium, so it is labelled that. Face 4 reaches node 6, which no
+    # epicardial face touches, and stays LV.
+    tri = np.array([[0, 1, 2], [0, 1, 3], [1, 2, 4], [0, 2, 5], [1, 2, 6]])
+    given = np.array([LV_ENDO, EPI, EPI, EPI, LV_ENDO])
+    assert _as_read_back(tri, given).tolist() == [
+        EPI, EPI, EPI, EPI, LV_ENDO]
+    sound = np.array([LV_ENDO, LV_ENDO, LV_ENDO, LV_ENDO, LV_ENDO])
+    assert _as_read_back(tri, sound).tolist() == sound.tolist()
+
+
+def test_the_preview_marks_the_cuts(drilled, drilled_labels):
+    assert _preview(drilled_labels, drilled) == [
+        "label_base", "label_openings", "label_cuts"]
 
 
 # -------------------------------------------------------- automatic choice

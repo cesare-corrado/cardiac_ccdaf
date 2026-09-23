@@ -3448,7 +3448,8 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _action_label_preview(self, labels) -> None:
         """Draw the proposed base, or clear it when there is nothing to show."""
-        for name in ("label_base", "label_plane", "label_openings"):
+        for name in ("label_base", "label_plane", "label_openings",
+                     "label_cuts"):
             try:
                 self.plotter.remove_actor(name, reset_camera=False)
             except Exception:
@@ -3479,6 +3480,14 @@ class CCDAF(QtWidgets.QMainWindow):
             self.plotter.add_points(
                 centres, color="yellow", point_size=14,
                 render_points_as_spheres=True, name="label_openings",
+                reset_camera=False, pickable=False)
+        if getattr(labels, "cuts", None):
+            # Holes in the wall the labels were cut through: small and easy
+            # to miss, and each one is worth a look at the segmentation.
+            centres = np.array([c.centre for c in labels.cuts], dtype=float)
+            self.plotter.add_points(
+                centres, color="magenta", point_size=14,
+                render_points_as_spheres=True, name="label_cuts",
                 reset_camera=False, pickable=False)
         self.plotter.render()
 
