@@ -363,3 +363,64 @@ def test_plugging_a_pinhole_mesh_does_not_raise():
         vr.RepairOptions(plug_perforations=True))
     assert len(tets) >= grid.n_cells
     assert report.genus_after is None or report.genus_after >= 0
+
+
+# ------------------------------------------- saying why nothing was plugged
+def _ring() -> pv.UnstructuredGrid:
+    """A 3 x 3 x 1 slab of cubes with the middle one taken out.
+
+    One handle, and the hole is a whole element wide: far wider than
+    any gap a plug may span.
+    """
+    grid = pv.ImageData(dimensions=(4, 4, 2)).cast_to_unstructured_grid()
+    centres = np.asarray(grid.cell_centers().points)
+    middle = (np.abs(centres[:, 0] - 1.5) < 0.1) & (
+        np.abs(centres[:, 1] - 1.5) < 0.1)
+    ring = grid.extract_cells(np.where(~middle)[0]).triangulate()
+    return pv.UnstructuredGrid(ring.cells, ring.celltypes,
+                               np.asarray(ring.points))
+
+
+def _plug_only(grid, **options):
+    return vr.repair(np.asarray(grid.points, dtype=float), vm.tetrahedra(grid),
+                     vr.RepairOptions(plug_perforations=True, **options))[4]
+
+
+def test_plugging_says_when_the_boundary_is_too_broken_to_look():
+    # It used to return silently here: the report read exactly as if
+    # plugging had been off.
+    report = _plug_only(_touching_along_an_edge(), split_touching=False,
+                        weld_pinholes=False)
+    assert report.plugged == 0 and report.genus_before is None
+    assert "not manifold (1 contact)" in report.plug_note
+    assert report.plug_note in report.summary()
+
+
+def test_plugging_says_when_there_is_nothing_to_plug():
+    grid = _grid([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)],
+                 [(0, 1, 2, 3)])
+    report = _plug_only(grid)
+    assert "no handles" in report.plug_note
+    assert report.summary() == ("the boundary was already manifold, "
+                                + report.plug_note)
+
+
+def test_plugging_says_when_no_handle_is_narrow_enough():
+    report = _plug_only(_ring())
+    assert report.genus_before == 1 and report.plugged == 0
+    assert "none of the 1 handle is a gap narrow enough" in report.plug_note
+
+
+def test_plugging_off_says_nothing_about_plugging():
+    report = vr.repair(*(lambda g: (np.asarray(g.points, dtype=float),
+                                    vm.tetrahedra(g)))(_ring()))[4]
+    assert report.plug_note == ""
+
+
+def test_the_clean_report_carries_the_reason():
+    grid = _ring()
+    plain = clean(grid, CleanOptions())[1]
+    asked = clean(grid, CleanOptions(plug_perforations=True))[1]
+    assert plain.summary() == "Nothing to clean; the mesh was already sound."
+    assert "narrow enough" in asked.summary()
+    assert not asked.changed
