@@ -183,6 +183,12 @@ class RepairReport:
     plugged: int = 0
     genus_before: Optional[int] = None
     genus_after: Optional[int] = None
+    #: Why plugging was asked for and plugged nothing, or empty. A pass
+    #: that was requested and did nothing must say so: on a perforated
+    #: ventricle it used to leave a report identical to one with
+    #: plugging off, which read as "no perforations" when the truth was
+    #: "could not look".
+    plug_note: str = ""
 
     @property
     def changed(self) -> bool:
@@ -191,9 +197,11 @@ class RepairReport:
     def summary(self) -> str:
         if not self.changed:
             if self.unrepaired_edges or self.unrepaired_vertices:
-                return (f"{self.unrepaired_edges + self.unrepaired_vertices} "
+                text = (f"{self.unrepaired_edges + self.unrepaired_vertices} "
                         f"non-manifold contacts could not be repaired")
-            return "the boundary was already manifold"
+            else:
+                text = "the boundary was already manifold"
+            return f"{text}, {self.plug_note}" if self.plug_note else text
         bits: List[str] = []
         if self.split_vertices:
             bits.append(f"separated {self.split_vertices} touching contact"
@@ -215,6 +223,8 @@ class RepairReport:
             bits.append(f"{left} contact"
                         + ("" if left == 1 else "s")
                         + " left alone")
+        if self.plug_note:
+            bits.append(self.plug_note)
         return ", ".join(bits)
 
 
@@ -926,6 +936,22 @@ def _plug_pass(points: np.ndarray, tets: np.ndarray, options: RepairOptions,
     return tets, source, plugged, genus, current
 
 
+def _why_nothing_was_plugged(tets: np.ndarray,
+                             genus: Optional[int]) -> str:
+    """The reason a requested plugging pass plugged nothing."""
+    if genus is None:
+        faces = boundary_table(tets)[0]
+        left = len(non_manifold_edges(faces)) + len(pinched_vertices(faces))
+        return ("no perforation plugged: the boundary is still not "
+                f"manifold ({left} contact" + ("" if left == 1 else "s")
+                + "), so its handles cannot be counted")
+    if genus == 0:
+        return "no perforation to plug: the boundary has no handles"
+    return (f"no perforation plugged: none of the {genus} handle"
+            + ("" if genus == 1 else "s")
+            + " is a gap narrow enough")
+
+
 # ---------------------------------------------------------------------
 # The repair
 # ---------------------------------------------------------------------
@@ -1013,6 +1039,8 @@ def repair(points: np.ndarray,
             points, tets, options, on_status)
         report.genus_before, report.genus_after = before_genus, after_genus
         report.plugged = plugged
+        if not plugged:
+            report.plug_note = _why_nothing_was_plugged(tets, before_genus)
         if plugged:
             source_cell = np.concatenate([source_cell, source_cell[sources]])
             report.added_cells += len(sources)

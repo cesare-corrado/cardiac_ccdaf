@@ -234,6 +234,8 @@ class CleanReport:
 
     def summary(self) -> str:
         if not self.changed:
+            if self.repair.plug_note:
+                return ("Nothing to clean; " + self.repair.plug_note + ".")
             return "Nothing to clean; the mesh was already sound."
         bits: List[str] = []
         if self.merged_points:
@@ -255,6 +257,8 @@ class CleanReport:
                         + ")")
         if self.repair.changed:
             bits.append(self.repair.summary())
+        elif self.repair.plug_note:
+            bits.append(self.repair.plug_note)
         if self.flipped:
             bits.append(f"reoriented {self.flipped} inverted element"
                         + ("" if self.flipped == 1 else "s"))
