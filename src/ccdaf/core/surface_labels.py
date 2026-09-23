@@ -217,6 +217,11 @@ class SurfaceLabels:
     #: The openings the rings were built at, for the ``"openings"`` method.
     #: Items are :class:`ccdaf.core.orifice_labels.Opening`.
     openings: List[Any] = field(default_factory=list)
+    #: Where the labels were cut through holes in the wall, for the
+    #: ``"openings"`` method. Items are
+    #: :class:`ccdaf.core.orifice_labels.Passage`. Each ring's nodes
+    #: belong to the epicardium and to a cavity at once.
+    cuts: List[Any] = field(default_factory=list)
 
     def summary(self) -> str:
         total = sum(self.areas.values()) or 1.0

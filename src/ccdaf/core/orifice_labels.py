@@ -36,6 +36,18 @@ The method
    by definition the narrowest section of the opening, which is what a
    shortest loop finds; the band keeps the cut from drifting into a
    cavity. The base is the faces touching that loop.
+4. **Cut through holes, if the rings are not enough.** A hole through
+   the wall narrower than a voxel is closed wall to the voxel model, but
+   it still joins the epicardium to a cavity on the mesh, and then the
+   rings leave two surfaces instead of three. Only then, each face is
+   classed by what the voxel model says it faces, outside or a pool, and
+   the cheapest cut between the two is taken outside the bands. Near
+   each join the cut is then solved again with a price on every face put
+   on the side it does not face, so that it runs through each hole
+   rather than round a cluster of them. The labels are split along the
+   cut: the mesh itself is not changed. A cut where the voxel model
+   sees a pool open to the outside is refused, because that is an
+   opening missing from the list, not a hole.
 
 Measured on three meshes (a reference with gold labels, a second one with
 labels from another pipeline, and the example ventricle):
@@ -47,7 +59,13 @@ labels from another pipeline, and the example ventricle):
   epicardium, LV and RV agree with gold on 99.2%, 99.3% and 99.9% of their
   area;
 * the band must stay narrow: at 8 mm the loop slips into the LV cavity
-  and the LV agreement falls to 96.9%.
+  and the LV agreement falls to 96.9%;
+* step 4 made no cut on any of them. On a fourth heart, whose wall has
+  a cluster of holes joining the epicardium to the LV where it thins to
+  under 1 mm, it made five cuts of 8 to 13 mm, one per hole, and no
+  outward-facing face near them was labelled LV. Without the second
+  solve it made one 42 mm loop round the cluster, and 55 mm² of outer
+  wall inside it was labelled LV.
 
 Units
 -----
@@ -76,11 +94,11 @@ from scipy.spatial import cKDTree
 from vtk.util.numpy_support import vtk_to_numpy
 
 from ccdaf.core.surface_labels import (
-    BASE, UNLABELLED, LabelOptions, Plane, SurfaceLabels, _as_boundary,
+    BASE, MASK_BITS, UNLABELLED, LabelOptions, Plane, SurfaceLabels, _as_boundary,
     _areas, _assemble, _close_ring, _faces, _hull_depth, _name_pieces,
-    label_boundary,
+    _normals, label_boundary,
 )
-from ccdaf.core.volume_mesh import is_volume
+from ccdaf.core.volume_mesh import is_volume, tetrahedra
 
 #: Millimetres per mesh unit, for each unit the dialog offers.
 UNITS: Dict[str, float] = {"mm": 1.0, "cm": 10.0, "µm": 1e-3}
@@ -253,22 +271,60 @@ def _voxelise(points_mm: np.ndarray, tri: np.ndarray, voxel: float,
     return flat.reshape(dims[::-1]).transpose(2, 1, 0).astype(bool), low
 
 
-def find_openings(dataset,
-                  options: Optional[OrificeOptions] = None) -> OpeningSearch:
-    """Find the blood pools and where each opens to the outside.
+#: Region codes of :class:`_VoxelModel`. Pool ``i`` is ``_POOL + i``.
+_WALL, _OUTSIDE, _POOL = 0, 1, 2
+#: A voxel that is neither wall, outside nor pool: a crevice, a pocket,
+#: or the inside of a channel too narrow to count as air.
+_OTHER = -1
 
-    ``dataset`` is a volume or its closed boundary surface; it is not
-    modified. Openings are returned largest first within each pool.
+
+@dataclass
+class _VoxelModel:
+    """The solid, its blood pools and the outside air, on one voxel grid.
+
+    Everything here is in millimetres, whatever the mesh units.
     """
-    options = options or OrificeOptions()
-    options.validate()
-    surface = _as_boundary(dataset)
-    tri = _faces(surface)
-    if len(tri) == 0:
-        raise ValueError("this mesh has no boundary faces")
-    scale = options.mm_per_unit
+
+    #: One region code per voxel, indexed ``[x, y, z]``.
+    region: np.ndarray
+    #: Position of voxel ``[0, 0, 0]``.
+    low: np.ndarray
+    #: Voxel edge.
+    voxel: float
+    #: Volume of each pool, in mL, largest first.
+    pool_ml: List[float]
+
+    def rims(self) -> List[Tuple[int, np.ndarray]]:
+        """``(pool, voxel indices)`` of every place a pool meets outside.
+
+        Each place is one 26-connected patch. No size filter: that is
+        the caller's decision.
+        """
+        touching = ndimage.binary_dilation(self.region == _OUTSIDE)
+        out: List[Tuple[int, np.ndarray]] = []
+        for index in range(len(self.pool_ml)):
+            rim = (self.region == _POOL + index) & touching
+            parts, count = ndimage.label(rim, structure=np.ones((3, 3, 3)))
+            for j in range(1, count + 1):
+                out.append((index, np.argwhere(parts == j)))
+        return out
+
+    def position(self, indices: np.ndarray) -> np.ndarray:
+        """Voxel indices as positions, in mm."""
+        return indices * self.voxel + self.low
+
+    def at(self, points_mm: np.ndarray) -> np.ndarray:
+        """The region code of the voxel nearest each point."""
+        index = np.round((points_mm - self.low) / self.voxel).astype(int)
+        index = np.clip(index, 0, np.array(self.region.shape) - 1)
+        return self.region[index[:, 0], index[:, 1], index[:, 2]]
+
+
+def _voxel_model(surface: pv.PolyData, tri: np.ndarray,
+                 options: OrificeOptions) -> _VoxelModel:
+    """Voxelise the solid and find its pools and the outside air."""
     h = options.voxel_mm
-    points = np.asarray(surface.points, dtype=float) * scale
+    points = np.asarray(surface.points, dtype=float) * options.mm_per_unit
 
     solid, low = _voxelise(points, tri, h, pad=options.closing_mm + 2 * h)
     edt = ndimage.distance_transform_edt
@@ -292,28 +348,59 @@ def find_openings(dataset,
     air_labels, _ = ndimage.label(air)
     outside = air_labels == air_labels[0, 0, 0]
     del air, air_labels
-    touching = ndimage.binary_dilation(outside)
 
-    openings: List[Opening] = []
+    region = np.full(solid.shape, _OTHER, dtype=np.int8)
+    region[solid] = _WALL
+    region[outside] = _OUTSIDE
     for index, k in enumerate(pool_ids):
-        rim = (labels == k) & touching
-        parts, n_parts = ndimage.label(rim, structure=np.ones((3, 3, 3)))
-        sizes = np.bincount(parts.ravel())[1:] * h ** 2
-        for j in np.argsort(sizes)[::-1]:
-            if sizes[j] < options.min_opening_mm2:
+        region[labels == k] = _POOL + index
+    return _VoxelModel(region=region, low=low, voxel=h,
+                       pool_ml=[float(ml[k - 1]) for k in pool_ids])
+
+
+def _openings_in(model: _VoxelModel, options: OrificeOptions) -> List[Opening]:
+    """The rims large enough to be valve openings, largest first per pool."""
+    scale = options.mm_per_unit
+    h = model.voxel
+    openings: List[Opening] = []
+    by_pool: Dict[int, List[np.ndarray]] = {}
+    for pool, indices in model.rims():
+        by_pool.setdefault(pool, []).append(indices)
+    for pool in sorted(by_pool):
+        parts = sorted(by_pool[pool], key=len, reverse=True)
+        for indices in parts:
+            area = len(indices) * h ** 2
+            if area < options.min_opening_mm2:
                 break
-            vox = np.argwhere(parts == j + 1) * h + low
+            vox = model.position(indices)
             centre = vox.mean(0)
             if len(vox) >= 3:
                 _w, v = np.linalg.eigh(np.cov((vox - centre).T))
                 normal = v[:, 0]
             else:
                 normal = np.array([0.0, 0.0, 1.0])
-            openings.append(Opening(pool=index, centre=centre / scale,
-                                    normal=normal, area_mm2=float(sizes[j]),
+            openings.append(Opening(pool=pool, centre=centre / scale,
+                                    normal=normal, area_mm2=float(area),
                                     points=vox / scale))
-    return OpeningSearch(pool_ml=[float(ml[k - 1]) for k in pool_ids],
-                         openings=openings)
+    return openings
+
+
+def find_openings(dataset,
+                  options: Optional[OrificeOptions] = None) -> OpeningSearch:
+    """Find the blood pools and where each opens to the outside.
+
+    ``dataset`` is a volume or its closed boundary surface; it is not
+    modified. Openings are returned largest first within each pool.
+    """
+    options = options or OrificeOptions()
+    options.validate()
+    surface = _as_boundary(dataset)
+    tri = _faces(surface)
+    if len(tri) == 0:
+        raise ValueError("this mesh has no boundary faces")
+    model = _voxel_model(surface, tri, options)
+    return OpeningSearch(pool_ml=list(model.pool_ml),
+                         openings=_openings_in(model, options))
 
 
 # ---------------------------------------------------------------------
@@ -361,15 +448,30 @@ def _min_cut(n_faces: int, fa: np.ndarray, fb: np.ndarray,
              capacity: np.ndarray, free: np.ndarray,
              source: np.ndarray, sink: np.ndarray) -> np.ndarray:
     """Faces on the source side of the cheapest cut through *free* faces."""
-    s, t = n_faces, n_faces + 1
-    big = np.int32(2 ** 30)
     keep = free[fa] | free[fb]
-    src = np.where(source)[0]
-    snk = np.where(sink)[0]
-    rows = np.concatenate([fa[keep], fb[keep], np.full(len(src), s), snk])
-    cols = np.concatenate([fb[keep], fa[keep], src, np.full(len(snk), t)])
-    caps = np.concatenate([capacity[keep], capacity[keep],
-                           np.full(len(src), big), np.full(len(snk), big)])
+    return _st_cut(n_faces, fa[keep], fb[keep], capacity[keep],
+                   np.where(source, _HELD, 0), np.where(sink, _HELD, 0))
+
+
+#: Terminal capacity that holds a face on its side whatever the cut costs.
+_HELD = 2 ** 30
+
+
+def _st_cut(n_faces: int, fa: np.ndarray, fb: np.ndarray,
+            capacity: np.ndarray, to_source: np.ndarray,
+            to_sink: np.ndarray) -> np.ndarray:
+    """Faces on the source side of the cheapest cut.
+
+    Cutting the edge between faces ``fa[i]`` and ``fb[i]`` costs
+    ``capacity[i]``; putting face ``k`` on the sink side costs
+    ``to_source[k]``, and on the source side ``to_sink[k]``. All integer.
+    """
+    s, t = n_faces, n_faces + 1
+    src = np.where(to_source > 0)[0]
+    snk = np.where(to_sink > 0)[0]
+    rows = np.concatenate([fa, fb, np.full(len(src), s), snk])
+    cols = np.concatenate([fb, fa, src, np.full(len(snk), t)])
+    caps = np.concatenate([capacity, capacity, to_source[src], to_sink[snk]])
     graph = sp.csr_matrix((caps.astype(np.int32), (rows, cols)),
                           shape=(n_faces + 2,) * 2)
     flow = maximum_flow(graph, s, t)
@@ -404,8 +506,10 @@ def label_open_boundary(dataset,
     tri = _faces(surface)
     if len(tri) == 0:
         raise ValueError("this mesh has no boundary faces to label")
+    model = None
     if openings is None:
-        openings = find_openings(surface, options).openings
+        model = _voxel_model(surface, tri, options)
+        openings = _openings_in(model, options)
     if not openings:
         raise ValueError("no valve openings were found")
 
@@ -423,10 +527,24 @@ def label_open_boundary(dataset,
         distance = np.minimum(distance, near)
     band = distance < band_width
 
-    count, pieces = _components(~band, fa, fb)
-    sizes = np.bincount(pieces[pieces >= 0], weights=area[pieces >= 0],
-                        minlength=count)
-    significant = np.where(sizes >= _SIGNIFICANT_SHARE * sizes.sum())[0]
+    significant, pieces = _significant(~band, fa, fb, area)
+    cuts: List[Passage] = []
+    if len(significant) < 3:
+        # Joined where there is no opening: look for holes in the wall
+        # that the voxel model cannot see, and cut the labels there.
+        if model is None:
+            model = _voxel_model(surface, tri, options)
+        try:
+            keep, cuts = _cut_through_wall(dataset, surface, tri, area, fa,
+                                           fb, shared, band, openings, model,
+                                           options)
+        except ValueError as exc:
+            raise ValueError(
+                f"the openings separate the surface into {len(significant)} "
+                f"piece(s), not 3, and {exc}") from exc
+        if cuts:
+            fa, fb, shared = fa[keep], fb[keep], shared[keep]
+            significant, pieces = _significant(~band, fa, fb, area)
     if len(significant) != 3:
         raise ValueError(
             f"the openings separate the surface into {len(significant)} "
@@ -449,10 +567,7 @@ def label_open_boundary(dataset,
     on_cut[shared[epi_side[fa] != epi_side[fb]].ravel()] = True
     base = on_cut[tri].any(1)
 
-    count, pieces = _components(~base, fa, fb)
-    sizes = np.bincount(pieces[pieces >= 0], weights=area[pieces >= 0],
-                        minlength=count)
-    significant = np.where(sizes >= _SIGNIFICANT_SHARE * sizes.sum())[0]
+    significant, pieces = _significant(~base, fa, fb, area)
     if len(significant) != 3:
         raise ValueError(
             f"the rings leave {len(significant)} surface(s), not 3.")
@@ -469,13 +584,27 @@ def label_open_boundary(dataset,
     for key, faces in named.items():
         face_labels[faces] = key
     face_labels[base] = BASE
+    if cuts:
+        face_labels = _as_read_back(tri, face_labels)
     if stray.any():
         note = (note + f" {int(stray.sum())} stray face(s) next to a ring "
                 "were added to the base.").strip()
+    if cuts:
+        note = (note + "\n" + describe_cuts(cuts, options.mm_per_unit)
+                ).strip()
     return _assemble(surface, tri, face_labels, area, plane=None,
                      naming_confident=confident, note=note,
                      dropped_patches=0, method="openings",
-                     openings=list(openings))
+                     openings=list(openings), cuts=cuts)
+
+
+def _significant(mask: np.ndarray, fa: np.ndarray, fb: np.ndarray,
+                 area: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """The pieces of *mask* large enough to be surfaces, and every piece."""
+    count, pieces = _components(mask, fa, fb)
+    sizes = np.bincount(pieces[pieces >= 0], weights=area[pieces >= 0],
+                        minlength=count)
+    return np.where(sizes >= _SIGNIFICANT_SHARE * sizes.sum())[0], pieces
 
 
 def label_ventricles(dataset,
@@ -615,27 +744,35 @@ def find_passages(dataset,
             continue                     # one surface: nothing crosses it
         side = _min_cut(len(tri), fa, fb, capacity,
                         inside & ~(source | sink), source, sink)
-        cut = shared[side[fa] != side[fb]]
-        if len(cut) == 0:
-            continue
-        # Rings, by the edges that share an end: two routes never share
-        # a node, where clustering by distance would only usually
-        # separate them.
-        nodes = np.unique(cut)
-        local = np.searchsorted(nodes, cut)
-        groups = connected_components(
-            sp.coo_matrix((np.ones(len(local), dtype=np.int8),
-                           (local[:, 0], local[:, 1])),
-                          shape=(len(nodes),) * 2), directed=False)[1]
-        for k in np.unique(groups[local[:, 0]]):
-            ring = cut[groups[local[:, 0]] == k]
-            passages.append(Passage(
-                ring=ring,
-                circumference=float(np.linalg.norm(
-                    points[ring[:, 1]] - points[ring[:, 0]], axis=1).sum()),
-                centre=points[np.unique(ring)].mean(axis=0)))
+        passages.extend(_rings(shared[side[fa] != side[fb]], points))
     passages.sort(key=lambda item: -item.circumference)
     return passages
+
+
+def _rings(cut: np.ndarray, points: np.ndarray) -> List[Passage]:
+    """The edges of a cut, as one :class:`Passage` per ring.
+
+    Rings are grouped by the edges that share an end: two routes never
+    share a node, where clustering by distance would only usually
+    separate them.
+    """
+    if len(cut) == 0:
+        return []
+    nodes = np.unique(cut)
+    local = np.searchsorted(nodes, cut)
+    groups = connected_components(
+        sp.coo_matrix((np.ones(len(local), dtype=np.int8),
+                       (local[:, 0], local[:, 1])),
+                      shape=(len(nodes),) * 2), directed=False)[1]
+    out: List[Passage] = []
+    for k in np.unique(groups[local[:, 0]]):
+        ring = cut[groups[local[:, 0]] == k]
+        out.append(Passage(
+            ring=ring,
+            circumference=float(np.linalg.norm(
+                points[ring[:, 1]] - points[ring[:, 0]], axis=1).sum()),
+            centre=points[np.unique(ring)].mean(axis=0)))
+    return out
 
 
 def describe_passages(passages: List[Passage], keep: int = 0) -> str:
@@ -656,7 +793,275 @@ def describe_passages(passages: List[Passage], keep: int = 0) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------
+# Labelling through holes in the wall
+# ---------------------------------------------------------------------
+#: How far a face looks along its outward normal for the region it
+#: faces, in mm. Past the thickest trabecular crevice the voxel model
+#: keeps, short of the far wall of a cavity.
+_LOOK_MM: float = 4.0
+
+#: Rings of faces taken off the edge of each seed, so that every seam
+#: between two classes, and every hole, lies in faces the cut may choose.
+#: Three rings is about 4.5 mm on a 1.5 mm mesh: wider than the holes
+#: measured, narrower than the thinnest surface.
+_SEED_RINGS: int = 3
+
+#: A cut closer than this to a place where a pool meets the outside, at
+#: no opening in use, is refused, in mm. Such a place is an opening the
+#: voxel model can see, so a join there is a missing opening rather than
+#: a hole. Only places of ``min_opening_mm2`` or more count, the same
+#: size :func:`find_openings` reports: the uncleaned perforated heart
+#: shows two of 3 and 4 mm² inside its cluster of holes, which are
+#: holes. Measured: on the perforated heart the cut lay 26 mm or more
+#: from every opening; on a block with one opening left out, the cut
+#: lay at the one left out.
+_UNEXPLAINED_MM: float = 10.0
+
+
+#: What a face costs, per mm² of its area, on the side it does not face,
+#: against 1 per mm of cut. See :func:`_refine`.
+_DATA_WEIGHT: float = 1.0
+
+#: How far from a join the cut may move, in mm.
+_REFINE_MM: float = 10.0
+
+#: Integer cut capacities per mm (and per mm², for the data term).
+_PER_MM: float = 1000.0
+
+
+def _outward_normals(dataset, surface: pv.PolyData,
+                     tri: np.ndarray) -> np.ndarray:
+    """Unit normal of each boundary face, pointing away from the material.
+
+    From a volume this is exact: the tetrahedron behind each face says
+    which side is solid. A bare surface falls back to normals oriented
+    as one consistent, outward-facing set, which is the best a surface
+    alone can say.
+    """
+    points = np.asarray(surface.points, dtype=float)
+    a, b, c = points[tri[:, 0]], points[tri[:, 1]], points[tri[:, 2]]
+    normal = np.cross(b - a, c - a)
+    data = pv.wrap(dataset)
+    if (is_volume(data) and "vtkOriginalCellIds" in surface.cell_data
+            and "vtkOriginalPointIds" in surface.point_data):
+        origin = np.asarray(surface.point_data["vtkOriginalPointIds"],
+                            dtype=np.int64)
+        owner = np.asarray(surface.cell_data["vtkOriginalCellIds"],
+                           dtype=np.int64)
+        tets = tetrahedra(data)
+        apex = tets[owner].sum(1) - origin[tri].sum(1)
+        inward = np.einsum("ij,ij->i", normal,
+                           np.asarray(data.points, dtype=float)[apex]
+                           - (a + b + c) / 3.0)
+        normal[inward > 0] *= -1.0
+    else:
+        oriented = _normals(surface)
+        normal[np.einsum("ij,ij->i", normal, oriented) < 0] *= -1.0
+    return normal / np.maximum(np.linalg.norm(normal, axis=1),
+                               1e-300)[:, None]
+
+
+def _face_classes(centres_mm: np.ndarray, normals: np.ndarray,
+                  model: _VoxelModel) -> np.ndarray:
+    """What each face looks at: outside, a pool, or nothing (``_WALL``).
+
+    Each face steps out along its normal and takes the first outside or
+    pool voxel it meets. Meeting wall again first means it faces another
+    wall across a gap, as the lining of a hole does, and it is left
+    undecided.
+    """
+    out = np.full(len(centres_mm), _WALL, dtype=np.int8)
+    open_ = np.ones(len(centres_mm), dtype=bool)
+    step = model.voxel / 4.0
+    for t in np.arange(step, _LOOK_MM + step / 2, step):
+        region = model.at(centres_mm + normals * t)
+        found = open_ & (region >= _OUTSIDE)
+        out[found] = region[found]
+        open_ &= ~found
+        # The face's own voxel is usually wall: stop only past it.
+        if t > 1.5 * model.voxel:
+            open_ &= region != _WALL
+        if not open_.any():
+            break
+    return out
+
+
+def _seeds(classes: np.ndarray, band: np.ndarray, area: np.ndarray,
+           fa: np.ndarray, fb: np.ndarray) -> np.ndarray:
+    """The faces sure enough of their class to anchor the cut.
+
+    Large patches of one class only, so a few faces misread where the
+    wall is thinner than a voxel cannot pull the cut round them, and
+    trimmed back from every seam.
+    """
+    seed = np.zeros(len(classes), dtype=np.int8)
+    total = area.sum()
+    for code in np.unique(classes[classes >= _OUTSIDE]):
+        count, pieces = _components((classes == code) & ~band, fa, fb)
+        sizes = np.bincount(pieces[pieces >= 0], weights=area[pieces >= 0],
+                            minlength=count)
+        seed[np.isin(pieces, np.where(sizes >= _SIGNIFICANT_SHARE * total)[0])
+             ] = code
+    for _ in range(_SEED_RINGS):
+        seam = seed[fa] != seed[fb]
+        seed[fa[seam]] = seed[fb[seam]] = _WALL
+    return seed
+
+
+def _cut_through_wall(dataset, surface: pv.PolyData, tri: np.ndarray,
+                      area: np.ndarray, fa: np.ndarray, fb: np.ndarray,
+                      shared: np.ndarray, band: np.ndarray,
+                      openings: List[Opening], model: _VoxelModel,
+                      options: OrificeOptions
+                      ) -> Tuple[np.ndarray, List[Passage]]:
+    """Where to cut the labels so holes through the wall stop joining them.
+
+    Returns which adjacencies to keep and the cuts, one per ring. A hole
+    too small for the voxel model, which sees closed wall there, still
+    joins the epicardium to a cavity on the mesh, and no ring at the
+    openings can separate them. So each face is classed by what the
+    voxel model says it faces, and the cheapest cut between the faces
+    sure to face outside and those sure to face a pool is taken. That
+    finds the joins; :func:`_refine` then places the cut in each of
+    them, through the hole.
+
+    Raises ``ValueError`` when a cut lies at a place the voxel model
+    sees open, which is an opening missing from *openings*.
+    """
+    points = np.asarray(surface.points, dtype=float)
+    scale = options.mm_per_unit
+    centres = points[tri].mean(1)
+    classes = _face_classes(centres * scale,
+                            _outward_normals(dataset, surface, tri), model)
+    seed = _seeds(classes, band, area, fa, fb)
+    source = seed == _OUTSIDE
+    sink = seed >= _POOL
+    keep = np.ones(len(fa), dtype=bool)
+    if not (source.any() and sink.any()):
+        return keep, []
+
+    # The band belongs to the rings at the openings: the cut may not use it.
+    off_band = ~band[fa] & ~band[fb]
+    lengths = np.linalg.norm(points[shared[:, 1]] - points[shared[:, 0]],
+                             axis=1)
+    capacity = np.maximum(1, np.round(lengths / lengths.mean() * 1000))
+    side = _min_cut(len(tri), fa[off_band], fb[off_band], capacity[off_band],
+                    ~band & ~source & ~sink, source, sink)
+    joins = shared[off_band & (side[fa] != side[fb])]
+    if len(joins):
+        side = _refine(side, classes, band, area * scale ** 2,
+                       fa[off_band], fb[off_band], lengths[off_band] * scale,
+                       centres * scale, points[np.unique(joins)] * scale)
+    keep = ~(off_band & (side[fa] != side[fb]))
+    cuts = _rings(shared[~keep], points)
+    cuts.sort(key=lambda item: -item.circumference)
+
+    unexplained = _unexplained_rims(model, openings, options)
+    if len(unexplained) and cuts:
+        tree = cKDTree(unexplained)
+        for cut in cuts:
+            near, index = tree.query(points[np.unique(cut.ring)] * scale)
+            if near.min() < _UNEXPLAINED_MM:
+                where = ", ".join(f"{v:.3g}" for v in
+                                  unexplained[index[np.argmin(near)]] / scale)
+                raise ValueError(
+                    f"a blood pool meets the outside near ({where}), where "
+                    "no opening was given: an opening is probably missing.")
+    return keep, cuts
+
+
+def _refine(side: np.ndarray, classes: np.ndarray, band: np.ndarray,
+            area_mm2: np.ndarray, fa: np.ndarray, fb: np.ndarray,
+            length_mm: np.ndarray, centres_mm: np.ndarray,
+            joins_mm: np.ndarray) -> np.ndarray:
+    """Move the cut near each join so it also respects what faces face.
+
+    The first cut only asks for the shortest loop, and round a cluster of
+    holes the shortest loop can run over the outer surface, taking the
+    patch inside it to the cavity side. Here each face near a join also
+    costs :data:`_DATA_WEIGHT` per mm² to put on the side it does not
+    face, so the cut follows the hole linings instead. Faces farther
+    than :data:`_REFINE_MM` from a join keep their side: away from the
+    joins nothing needs cutting, and a data term there would cut round
+    every patch the voxel model misreads.
+    """
+    near, _ = cKDTree(joins_mm).query(centres_mm,
+                                      distance_upper_bound=_REFINE_MM)
+    near = (near < _REFINE_MM) & ~band
+    held = ~near & ~band
+    price = np.round(_DATA_WEIGHT * area_mm2 * _PER_MM).astype(np.int64)
+    to_source = np.where(held & side, _HELD, 0)
+    to_source[near & (classes == _OUTSIDE)] = price[
+        near & (classes == _OUTSIDE)]
+    to_sink = np.where(held & ~side, _HELD, 0)
+    to_sink[near & (classes >= _POOL)] = price[near & (classes >= _POOL)]
+    capacity = np.maximum(1, np.round(length_mm * _PER_MM)).astype(np.int64)
+    return _st_cut(len(side), fa, fb, capacity, to_source, to_sink)
+
+
+def _unexplained_rims(model: _VoxelModel, openings: List[Opening],
+                      options: OrificeOptions) -> np.ndarray:
+    """Voxels, in mm, where a pool opens as widely as an opening does,
+    at no opening in use."""
+    used = [o.points * options.mm_per_unit for o in openings]
+    tree = cKDTree(np.vstack(used)) if used else None
+    out = [np.zeros((0, 3))]
+    for _pool, indices in model.rims():
+        if len(indices) * model.voxel ** 2 < options.min_opening_mm2:
+            continue
+        vox = model.position(indices)
+        if tree is not None and tree.query(vox)[0].min() < model.voxel / 2:
+            continue
+        out.append(vox)
+    return np.vstack(out)
+
+
+def _as_read_back(tri: np.ndarray, face_labels: np.ndarray) -> np.ndarray:
+    """Each face as the saved form will read it back, once that is stable.
+
+    Labels are saved per node, and a face reads back as the lowest
+    surface all three of its nodes belong to. Every node on a cut belongs
+    to the epicardium and to a cavity, so a cavity face whose other
+    nodes also touch the epicardium reads back as epicardium: the lining
+    of a small hole, or a face beside a cut whose third node is a pinch,
+    where epicardium meets it at that node alone. Such a face is given
+    that label now, which is what :func:`surface_labels._close_ring`
+    does at the base. A face only ever moves to a lower label, so this
+    stops. Measured on the perforated heart: 5 of 77,576 faces cleaned,
+    34 of 77,782 uncleaned, where pinches are many.
+    """
+    out = face_labels.copy()
+    n_nodes = int(tri.max()) + 1
+    while True:
+        bits = np.zeros(n_nodes, dtype=np.int64)
+        for key, bit in MASK_BITS.items():
+            np.bitwise_or.at(bits, tri[out == key].ravel(), bit)
+        common = bits[tri[:, 0]] & bits[tri[:, 1]] & bits[tri[:, 2]]
+        lowest = common & (-common)
+        read = out.copy()
+        for key, bit in MASK_BITS.items():
+            read[lowest == bit] = key
+        if np.array_equal(read, out):
+            return out
+        out = read
+
+
+def describe_cuts(cuts: List[Passage], scale: float = 1.0) -> str:
+    """The cuts made through holes in the wall, for a report."""
+    if not cuts:
+        return ""
+    lines = [f"The wall has {len(cuts)} hole(s) joining the epicardium to a cavity, too small to be valve "
+             "openings. The labels were cut there, each ring "
+             "belonging to both the epicardium and the cavity:"]
+    for cut in cuts:
+        c = ", ".join(f"{v:.3g}" for v in cut.centre)
+        lines.append(f"  {cut.circumference * scale:.1f} mm around, "
+                     f"centre ({c})")
+    return "\n".join(lines)
+
+
 __all__ = ["UNITS", "TYPICAL_RMS_RADIUS_MM", "MAX_VOXELS", "OrificeOptions",
            "Opening", "OpeningSearch", "rms_radius", "guess_unit",
            "find_openings", "label_open_boundary", "label_ventricles",
-           "Passage", "find_passages", "describe_passages"]
+           "Passage", "find_passages", "describe_passages", "describe_cuts"]
