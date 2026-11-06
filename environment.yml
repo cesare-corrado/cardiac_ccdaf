@@ -6,6 +6,8 @@ dependencies:
   - python>=3.12   # validated on 3.14; floored with the VTK/pyvista stack below
   - numpy>=1.23
   - scipy>=1.10
+  # Algebraic multigrid preconditioner for the fibre Laplace solves.
+  - pyamg>=5.4
   # Floors follow the validated stack (VTK 9.6.2 / pyvista 0.48.4 — see
   # docs/eam-real-data-verification.md). Two VTK-9.6 behaviours are handled
   # in code rather than avoided by pinning lower: the scalar-bar "%d" format

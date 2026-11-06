@@ -14,6 +14,10 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.23",
     "scipy>=1.10",
+    # Algebraic multigrid, the preconditioner of the Laplace solves behind
+    # the fibres: about 9x faster than Jacobi on the apex-to-base problem of
+    # a 6-million-node ventricle. MIT; binary wheels need no compiler.
+    "pyamg>=5.4",
     # Floors follow the validated stack (VTK 9.6.2 / pyvista 0.48.4); the two
     # 9.6-specific behaviours are handled in code, not avoided by pinning —
     # see environment.yml for the full reasoning. No exact pin on purpose.

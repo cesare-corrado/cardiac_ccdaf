@@ -195,6 +195,20 @@ def test_a_run_writes_fibres_fields_and_digest(grid):
     assert np.allclose(grid.point_data["ldrb_ab"][apex.nodes], 0.0)
 
 
+def test_the_report_names_the_preconditioner(grid):
+    points, tets, mask = vf.inputs(grid)
+    apex = vf.find_apex(points, tets, mask)
+    amg = vf.generate(points, tets, mask, apex)
+    assert "amg preconditioner" in amg.details()
+    assert all(r.preconditioner == "amg" for r in amg.reports.values())
+    # The three transmural solves share one setup.
+    assert [amg.reports[k].setup_seconds == 0.0 for k in ("lv", "rv")] == [True, True]
+    jacobi = vf.generate(points, tets, mask, apex, preconditioner="jacobi")
+    assert "jacobi preconditioner" in jacobi.details()
+    for key in vf.FIELD_NAMES:
+        assert np.allclose(amg.fields[key], jacobi.fields[key], atol=1e-5)
+
+
 def test_a_second_run_reuses_the_fields(grid):
     points, tets, mask = vf.inputs(grid)
     apex = vf.find_apex(points, tets, mask)

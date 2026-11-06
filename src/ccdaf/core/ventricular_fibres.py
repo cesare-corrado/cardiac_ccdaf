@@ -72,7 +72,10 @@ import numpy as np
 import pyvista as pv
 from scipy.spatial import cKDTree
 
-from ccdaf.core.laplace import DEFAULT_RTOL, SolveReport, laplace, stiffness_matrix
+from ccdaf.core.laplace import (
+    DEFAULT_PRECONDITIONER, DEFAULT_RTOL, SolveReport, laplace, laplace_family,
+    stiffness_matrix,
+)
 from ccdaf.core.ldrb import FibreAngles, Fibres, fibres
 from ccdaf.core.orifice_labels import TYPICAL_RMS_RADIUS_MM, UNITS
 from ccdaf.core.surface_labels import (
@@ -483,11 +486,16 @@ class FibreRun:
             lines.append("Laplace fields: reused, solved earlier on this mesh, "
                          "these labels and this apex.")
         else:
-            lines.append("Laplace solves (conjugate gradients):")
+            kinds = sorted({rep.preconditioner for rep in self.reports.values()})
+            lines.append(f"Laplace solves (conjugate gradients, "
+                         f"{'/'.join(kinds) or 'none'} preconditioner):")
             for key, rep in self.reports.items():
                 state = "converged" if rep.converged else "NOT converged"
+                setup = (f", setup {rep.setup_seconds:.0f} s"
+                         if rep.setup_seconds >= 0.5 else "")
                 lines.append(f"  {key:4s} {rep.iterations:5d} iterations, "
-                             f"residual {rep.relative_residual:.1e}, {state}")
+                             f"residual {rep.relative_residual:.1e}, {state}, "
+                             f"{rep.solve_seconds:.0f} s{setup}")
         if len(self.released):
             lines.append(f"Released {len(self.released)} node(s) lying on the "
                          f"epicardium and an endocardium at once (the wall has "
@@ -512,6 +520,7 @@ def generate(points: np.ndarray, tets: np.ndarray, mask: np.ndarray,
              apex: Apex, angles: Optional[FibreAngles] = None, *,
              cached: Optional[Dict[str, np.ndarray]] = None,
              rtol: float = DEFAULT_RTOL,
+             preconditioner: str = DEFAULT_PRECONDITIONER,
              on_status: Optional[Callable[[str], None]] = None) -> FibreRun:
     """Solve (or reuse) the four fields, then build the fibres.
 
@@ -530,17 +539,24 @@ def generate(points: np.ndarray, tets: np.ndarray, mask: np.ndarray,
         say("Assembling the stiffness matrix…")
         k = stiffness_matrix(points, tets)
         epi, lv, rv, released = transmural_sets(sets)
-        problems = (
-            ("epi", epi, np.concatenate([lv, rv]), "epicardium to endocardia"),
-            ("lv", lv, np.concatenate([epi, rv]), "LV endocardium"),
-            ("rv", rv, np.concatenate([epi, lv]), "RV endocardium"),
-            ("ab", sets[BASE], apex.nodes, "apex to base"),
-        )
-        fields = {}
-        for i, (key, ones, zeros, what) in enumerate(problems, start=1):
-            say(f"Laplace solve {i} of 4: {what}…")
-            fields[key], reports[key] = laplace(points, tets, ones, zeros,
-                                                matrix=k, rtol=rtol)
+        what = {"epi": "epicardium to endocardia", "lv": "LV endocardium",
+                "rv": "RV endocardium", "ab": "apex to base"}
+        order = list(what)
+
+        def _start(key: str) -> None:
+            say(f"Laplace solve {order.index(key) + 1} of 4: {what[key]}…")
+
+        # The three transmural problems hold the same nodes, so they share
+        # one modified matrix and one preconditioner.
+        fields, reports = laplace_family(k, {
+            "epi": (epi, np.concatenate([lv, rv])),
+            "lv": (lv, np.concatenate([epi, rv])),
+            "rv": (rv, np.concatenate([epi, lv]))},
+            rtol=rtol, preconditioner=preconditioner, on_start=_start)
+        _start("ab")
+        fields["ab"], reports["ab"] = laplace(points, tets, sets[BASE], apex.nodes,
+                                              matrix=k, rtol=rtol,
+                                              preconditioner=preconditioner)
         del k
     else:
         fields = cached
