@@ -1,5 +1,7 @@
 numpy>=1.23
 scipy>=1.10
+# Algebraic multigrid preconditioner for the fibre Laplace solves (MIT).
+pyamg>=5.4
 vtk>=9.2
 pyvista>=0.43
 pyvistaqt>=0.11

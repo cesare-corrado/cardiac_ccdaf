@@ -67,16 +67,16 @@ while it is open. It opens with the apex already found.
 **Defaults** puts them back.
 
 **Generate** runs in the background, so the window stays responsive. The report
-shows each solver's iterations and residual, the conservation check, and how
-many elements were rebuilt from their neighbours (see below). The window stays
-open, so you can try other angles.
+shows the preconditioner, each solver's iterations, residual and time, the
+conservation check, and how many elements were rebuilt from their neighbours
+(see below). The window stays open, so you can try other angles.
 
 !!! tip "Changing only the angles is quick"
 
     The four Laplace fields are kept on the mesh. A second run on the same mesh,
     labels and apex reuses them and only rebuilds the frames: on the
-    2.9-million-element mesh, 19 s instead of 80 s; on the 148,000-element
-    example, about 1 s.
+    2.9-million-element mesh, 19 s instead of about 45 s; on the
+    148,000-element example, about 1 s.
 
 ## What is written
 
@@ -178,6 +178,30 @@ hold such a node at 1 and at 0 together, so it is held by none of the transmural
 solves and takes the value its neighbours give it. The three fields still add up
 to 1. The report says how many nodes were released: 12 of 35,856 on the
 truncated example.
+
+## Large meshes
+
+The four Laplace problems are solved with conjugate gradients preconditioned by
+algebraic multigrid (`pyamg`). The apex-to-base problem holds a small apex patch
+against a large base, which makes it hard for simpler preconditioners; multigrid
+solves it in a few dozen iterations. The three transmural problems hold the same
+nodes, so they share one matrix and one multigrid setup.
+
+The stiffness matrix is assembled a million elements at a time, so assembly
+needs little more memory than the matrix itself.
+
+**Fibre generation on a 35-million-element ventricle (400 µm), before and after the multigrid solver and chunked assembly**
+
+| | Jacobi preconditioner | Multigrid |
+|---|---:|---:|
+| Apex-to-base solve | 45 min | 6 min |
+| Whole fibre step | 56 min | 18 min |
+| Peak memory | about 30 GB (assembly) | 13.5 GB (building the frames) |
+
+The solver stops at a relative residual of 1e-9. At that tolerance the fibres
+match a fully converged solution to within 0.1°; at 1e-7, 100 to 200 of 2.9
+million elements, whose frames are close to undefined, came out more than 1°
+off.
 
 ## Choosing the apex
 
