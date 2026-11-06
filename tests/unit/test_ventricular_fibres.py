@@ -7,8 +7,11 @@ The contract:
 
 * the surface sets come from the label mask, and a mesh is refused, with a
   reason, until it has all four surfaces;
-* the apex is the epicardial node farthest from the base, never a base
-  node, and a click becomes the nearest epicardial node;
+* the apex is the epicardial node farthest from the base, and a click
+  becomes the nearest epicardial node;
+* the apex patch is the epicardial nodes within a set number of
+  millimetres, never a base node, and the same size on a coarse and a
+  fine mesh;
 * a node on the epicardium and an endocardium at once (a pinch point, no
   wall between them) is held by no transmural solve, and the run finishes;
 * a run writes ``fiber``, ``sheet``, the four fields and a digest, and a
@@ -41,22 +44,22 @@ from ccdaf.core.surface_labels import (
 N, SIZE = 9, 8.0
 
 
-def _labelled() -> pv.UnstructuredGrid:
+def _labelled(n: int = N) -> pv.UnstructuredGrid:
     """A cube with two blind holes drilled from the top, labelled.
 
     The top is the base, the outside the epicardium, the hole inside one
-    material the LV and the hole straddling both the RV.
+    material the LV and the hole straddling both the RV. The holes are
+    placed in length, not in cells, so *n* only changes the resolution.
     """
-    grid = pv.ImageData(dimensions=(N, N, N),
-                        spacing=(SIZE / (N - 1),) * 3).cast_to_unstructured_grid()
+    grid = pv.ImageData(dimensions=(n, n, n),
+                        spacing=(SIZE / (n - 1),) * 3).cast_to_unstructured_grid()
     grid = grid.triangulate()
-    step = SIZE / (N - 1)
     c = np.asarray(grid.cell_centers().points)
-    ix, iy, iz = (np.floor(c[:, k] / step).astype(int) for k in range(3))
-    holes = ((ix == 1) | (ix == 4)) & (iy == 3) & (iz >= 1)
+    x, y, z = c.T
+    holes = (((x > 1) & (x < 2)) | ((x > 4) & (x < 5))) & (y > 3) & (y < 4) & (z > 1)
     out = grid.extract_cells(np.where(~holes)[0])
     c = np.asarray(out.cell_centers().points)
-    out.cell_data["elemTag"] = np.where(c[:, 0] < 4 * step, 1, 2).astype(np.int32)
+    out.cell_data["elemTag"] = np.where(c[:, 0] < 4, 1, 2).astype(np.int32)
     labels = label_boundary(out, Plane(origin=[SIZE / 2, SIZE / 2, SIZE],
                                        normal=[0.0, 0.0, 1.0]))
     out.point_data[LABEL_MASK_FIELD] = node_label_mask(out, labels)
@@ -101,9 +104,49 @@ def test_the_apex_is_the_epicardial_node_farthest_from_the_base(grid):
     sets = vf.surface_sets(mask)
     # The base is the top (z = SIZE), so the apex lies on the bottom face.
     assert np.isclose(points[apex.node, 2], 0.0)
+    assert apex.node in sets[EPI]
+    assert apex.automatic and apex.node in apex.nodes
+
+
+def test_the_apex_patch_is_epicardial_and_off_the_base(grid):
+    points, tets, mask = vf.inputs(grid)
+    apex = vf.apex_at(points, tets, mask, [SIZE / 2, SIZE / 2, 0.0], radius_mm=2.0,
+                      unit_mm=1.0)
+    sets = vf.surface_sets(mask)
     assert np.isin(apex.nodes, sets[EPI]).all()
     assert not np.isin(apex.nodes, sets[BASE]).any()
-    assert apex.automatic and apex.node in apex.nodes
+    # The RV hole bottom, 1 mm above, lies inside the radius but is not held.
+    assert not np.isin(apex.nodes, np.union1d(sets[LV_ENDO], sets[RV_ENDO])).any()
+    far = np.linalg.norm(points[apex.nodes] - points[apex.node], axis=1)
+    assert np.isclose(apex.radius, 2.0) and far.max() <= 2.0 + 1e-12
+    assert len(apex.nodes) > 1
+
+
+def test_the_radius_is_in_millimetres(grid):
+    points, tets, mask = vf.inputs(grid)
+    at = [SIZE / 2, SIZE / 2, 0.0]
+    mm = vf.apex_at(points, tets, mask, at, radius_mm=2.0, unit_mm=1.0)
+    cm = vf.apex_at(points, tets, mask, at, radius_mm=2.0, unit_mm=10.0)
+    assert np.isclose(mm.radius, 2.0) and np.isclose(cm.radius, 0.2)
+    assert len(cm.nodes) < len(mm.nodes)
+
+
+def test_the_apex_patch_does_not_shrink_with_the_mesh():
+    """It used to be one mean edge wide, so a finer mesh held a smaller
+    patch and solved a different apicobasal field."""
+    at = [SIZE / 2, SIZE / 2, 0.0]
+    coarse, fine = (vf.apex_at(*vf.inputs(_labelled(n)), at, radius_mm=2.0, unit_mm=1.0)
+                    for n in (N, 2 * N - 1))
+    assert np.isclose(coarse.radius, fine.radius)
+    assert len(fine.nodes) > 2 * len(coarse.nodes)
+
+
+def test_the_unit_is_guessed_from_the_heart_size():
+    rng = np.random.default_rng(0)
+    heart = rng.normal(scale=45.0 / np.sqrt(3), size=(2000, 3))   # mm, RMS 45
+    assert vf.mm_per_unit(heart) == 1.0
+    assert vf.mm_per_unit(heart / 10.0) == 10.0
+    assert vf.mm_per_unit(heart * 1000.0) == 1e-3
 
 
 def test_a_click_becomes_the_nearest_epicardial_node(grid):
