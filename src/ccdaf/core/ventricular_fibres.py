@@ -19,10 +19,24 @@ The apex
 The labels do not name an apex, and the paper only says it is "the point
 lying closest to the ventricular apex". Here it is found as the
 epicardial node farthest from the base, measured across a plane fitted to
-the base nodes, and widened to the epicardial nodes within one mean edge
-length of it. A single held node would put a point singularity in the
-apicobasal field; a small patch does not. The caller may replace the node,
-and the patch is grown around the replacement the same way.
+the base nodes. The caller may replace the node.
+
+The node is widened to a patch: the epicardial nodes, base nodes excepted,
+within :data:`APEX_RADIUS_MM` of it. A single held node would put a point
+singularity in the apicobasal field.
+
+The radius is in millimetres, not in mesh edges. A patch one edge wide
+shrinks as the mesh is refined, so a coarse and a fine mesh of one heart
+solved different apicobasal problems.
+
+Only the fibre *direction* uses this field, and only through its
+gradient, so the patch is kept small and on the epicardium. Holding the
+endocardial apex too was tried: it makes the gradient normal to both
+walls of the thin apical wall, parallel to the transmural gradient, and
+about half the elements there then have no frame of their own. A larger
+patch does spread the field's *values* more evenly, but values are not
+what the fibres use, and an apicobasal coordinate needs a distance-based
+construction, not a wider Laplace patch.
 
 What is written
 ---------------
@@ -60,6 +74,7 @@ from scipy.spatial import cKDTree
 
 from ccdaf.core.laplace import DEFAULT_RTOL, SolveReport, laplace, stiffness_matrix
 from ccdaf.core.ldrb import FibreAngles, Fibres, fibres
+from ccdaf.core.orifice_labels import TYPICAL_RMS_RADIUS_MM, UNITS
 from ccdaf.core.surface_labels import (
     BASE, EPI, LABEL_MASK_FIELD, LV_ENDO, MASK_BITS, NAMES, RV_ENDO,
 )
@@ -88,11 +103,12 @@ KEPT: str = "kept"
 CARRIED: str = "carried"
 REMOVED: str = "removed"
 
-#: The apex patch reaches this many mean edge lengths from the apex node.
-APEX_RADIUS_EDGES: float = 1.0
+#: Radius of the apex patch, in millimetres, on the epicardium. See the
+#: module docstring for why it is sized in millimetres and kept small.
+APEX_RADIUS_MM: float = 2.0
 
-#: Tetrahedra sampled to estimate the mean edge length. The estimate only
-#: sizes the apex patch, so a sample is ample.
+#: Tetrahedra sampled to estimate the mean edge length. The estimate is a
+#: summary figure, so a sample is ample.
 _EDGE_SAMPLE: int = 20_000
 
 
@@ -149,10 +165,13 @@ class Apex:
     nodes: np.ndarray
     #: True when the node was found rather than picked.
     automatic: bool = True
+    #: Radius of the patch, in mesh units.
+    radius: float = 0.0
 
     def describe(self) -> str:
         how = "found automatically" if self.automatic else "picked"
-        return f"apex node {self.node} ({how}), {len(self.nodes)} node(s) held"
+        return (f"apex node {self.node} ({how}), {len(self.nodes)} node(s) "
+                f"held within {self.radius:.3g} mesh units of it")
 
 
 def base_plane(points: np.ndarray, base_nodes: np.ndarray
@@ -169,22 +188,53 @@ def base_plane(points: np.ndarray, base_nodes: np.ndarray
     return origin, vt[-1]
 
 
-def _patch(points: np.ndarray, epi: np.ndarray, base: np.ndarray,
-           centre: int, radius: float) -> np.ndarray:
+def mm_per_unit(points: np.ndarray) -> float:
+    """Millimetres per mesh unit: the unit of :data:`UNITS` that makes the
+    mesh heart-sized.
+
+    The rule the opening search uses, on the nodes alone: their RMS
+    distance from their mean. The candidate units are a factor of 10
+    apart, far more than node density can skew that radius.
+    """
+    p = np.asarray(points, dtype=float)
+    if len(p) == 0:
+        return 1.0
+    radius = float(np.sqrt(((p - p.mean(axis=0)) ** 2).sum(axis=1).mean()))
+    if radius <= 0.0:
+        return 1.0
+    return UNITS[min(UNITS, key=lambda u: abs(np.log(
+        radius * UNITS[u] / TYPICAL_RMS_RADIUS_MM)))]
+
+
+def _patch(points: np.ndarray, sets: Dict[int, np.ndarray], centre: int,
+           radius: float) -> np.ndarray:
     """Epicardial nodes within *radius* of *centre*, never a base node.
 
     A base node is held at 1 in the same problem, so it cannot also be
     held at 0.
     """
     p = np.asarray(points, dtype=float)
+    epi = np.setdiff1d(sets[EPI], sets[BASE])
     near = epi[np.linalg.norm(p[epi] - p[centre], axis=1) <= radius]
-    near = np.setdiff1d(near, base)
     return np.union1d(near, [centre]).astype(np.int64)
 
 
+def _apex(points: np.ndarray, sets: Dict[int, np.ndarray], centre: int,
+          radius_mm: float, unit_mm: Optional[float], automatic: bool) -> Apex:
+    radius = radius_mm / (unit_mm if unit_mm else mm_per_unit(points))
+    return Apex(node=centre, nodes=_patch(points, sets, centre, radius),
+                automatic=automatic, radius=radius)
+
+
 def find_apex(points: np.ndarray, tets: np.ndarray, mask: np.ndarray, *,
-              radius_edges: float = APEX_RADIUS_EDGES) -> Apex:
-    """The epicardial node farthest from the base, and its patch."""
+              radius_mm: float = APEX_RADIUS_MM,
+              unit_mm: Optional[float] = None) -> Apex:
+    """The epicardial node farthest from the base, and its patch.
+
+    *unit_mm* is millimetres per mesh unit; left out, it is guessed from
+    the size of the mesh (:func:`mm_per_unit`). *tets* is not used and is
+    kept so callers need not change.
+    """
     sets = surface_sets(mask)
     epi = np.setdiff1d(sets[EPI], sets[BASE])
     if len(epi) == 0:
@@ -192,12 +242,12 @@ def find_apex(points: np.ndarray, tets: np.ndarray, mask: np.ndarray, *,
     origin, normal = base_plane(points, sets[BASE])
     depth = np.abs((np.asarray(points, dtype=float)[epi] - origin) @ normal)
     centre = int(epi[int(np.argmax(depth))])
-    radius = radius_edges * mean_edge_length(points, tets)
-    return Apex(node=centre, nodes=_patch(points, epi, sets[BASE], centre, radius))
+    return _apex(points, sets, centre, radius_mm, unit_mm, automatic=True)
 
 
 def apex_at(points: np.ndarray, tets: np.ndarray, mask: np.ndarray,
-            position, *, radius_edges: float = APEX_RADIUS_EDGES) -> Apex:
+            position, *, radius_mm: float = APEX_RADIUS_MM,
+            unit_mm: Optional[float] = None) -> Apex:
     """The apex patch around the epicardial node nearest *position*.
 
     What a click on the surface becomes: the click lands on a triangle,
@@ -209,10 +259,8 @@ def apex_at(points: np.ndarray, tets: np.ndarray, mask: np.ndarray,
         raise ValueError("The epicardium has no node off the base.")
     p = np.asarray(points, dtype=float)
     _, i = cKDTree(p[epi]).query(np.asarray(position, dtype=float).reshape(3))
-    centre = int(epi[int(i)])
-    radius = radius_edges * mean_edge_length(points, tets)
-    return Apex(node=centre, nodes=_patch(points, epi, sets[BASE], centre, radius),
-                automatic=False)
+    return _apex(points, sets, int(epi[int(i)]), radius_mm, unit_mm,
+                 automatic=False)
 
 
 def transmural_sets(sets: Dict[int, np.ndarray]
@@ -566,9 +614,9 @@ __all__ = [
     "GEOMETRY_KEY", "CARRIED_KEY", "KEPT", "CARRIED", "REMOVED", "NO_FIBRES",
     "GENERATED", "FOREIGN", "stamp", "reconcile", "provenance",
     "describe_provenance", "geometry_digest",
-    "APEX_RADIUS_EDGES", "Apex", "FibreRun", "availability", "surface_sets",
+    "APEX_RADIUS_MM", "Apex", "FibreRun", "availability", "surface_sets",
     "transmural_sets",
-    "mean_edge_length", "base_plane", "find_apex", "apex_at", "digest",
+    "mean_edge_length", "mm_per_unit", "base_plane", "find_apex", "apex_at", "digest",
     "drop", "cached_fields", "generate",
     "write", "inputs", "written_names", "segments",
 ]

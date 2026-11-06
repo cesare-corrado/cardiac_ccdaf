@@ -22,7 +22,7 @@ tooltip says what is missing.
     | `ldrb_epi` | epicardium | both endocardia |
     | `ldrb_lv` | LV endocardium | epicardium, RV endocardium |
     | `ldrb_rv` | RV endocardium | epicardium, LV endocardium |
-    | `ldrb_ab` | base | apex |
+    | `ldrb_ab` | base | apex patch (see below) |
 
     Both values are held exactly (true Dirichlet conditions), and the three
     transmural fields add up to 1 everywhere. The report checks this.
@@ -40,10 +40,18 @@ while it is open. It opens with the apex already found.
 **Apex**
 
 - The apex is found automatically: the epicardial node farthest from the base,
-  measured across a plane fitted to the base nodes. It is widened to the
-  epicardial nodes within one mean edge length, because a single held node
-  would put a point singularity in the apex-to-base field. The apex nodes are
-  marked in yellow.
+  measured across a plane fitted to the base nodes.
+- The apex node is widened to a **patch**: the epicardial nodes within 2 mm
+  of it, never a base node. A single held node would put a point singularity
+  in the apex-to-base field. The apex nodes are marked in yellow.
+- The patch is sized in millimetres, not in mesh edges, so a coarse mesh and a
+  fine mesh of the same heart get the same patch. The mesh unit (mm, cm or µm)
+  is guessed from the size of the heart, as for the surface labelling.
+- The patch is kept small and on the epicardium on purpose. The fibres use only
+  the *direction* of the apex-to-base gradient. A larger patch, or one that
+  also holds the endocardial apex, spreads the field's values more evenly, but
+  it makes that gradient parallel to the transmural one across the thin apical
+  wall, so many elements there lose their frame.
 - **Pick on surface**: click the epicardium in the 3D view. The nearest
   epicardial node becomes the apex, and the patch is grown around it the same
   way. Press the button again to stop picking.
