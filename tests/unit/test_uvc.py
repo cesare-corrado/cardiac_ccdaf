@@ -14,7 +14,8 @@ The contract:
 * the RV septum is the RV-endocardial faces of LV elements, and with the
   free wall it makes up the RV endocardium;
 * the surfaces, built from candidate faces only, are node for node those
-  of the full face table;
+  of the full face table; a face with an unlabelled node, such as a pocket
+  inside the tissue, belongs to no surface, the LV outer wall included;
 * labels with the epicardium inside an endocardium are refused, not
   turned into plausible-looking coordinates;
 * nu follows the tags, z runs 0 at the apex to 1 at the base, rho 0 on
@@ -95,7 +96,12 @@ def test_the_septum_is_the_rv_endocardium_on_lv_elements(grid):
 
 def _reference_surfaces(tets, mask, is_lv):
     """The surfaces from the full face table: what the candidate-face
-    construction must reproduce."""
+    construction must reproduce.
+
+    A boundary face with an unlabelled node belongs to no surface, the LV
+    outer wall included: such a face is not part of the labelled heart (a
+    pocket or crack inside the tissue, for instance), and counting it as
+    outer wall would put rho = 1 inside the wall."""
     from ccdaf.core.volume_mesh import face_table
     uniq, inv, counts, owner = face_table(tets)
     lv_count = np.bincount(inv, weights=is_lv[owner].astype(float), minlength=len(uniq))
@@ -109,20 +115,44 @@ def _reference_surfaces(tets, mask, is_lv):
         return np.unique(faces[(fm & MASK_BITS[bit]) != 0])
 
     rv = (fm & MASK_BITS[RV_ENDO]) != 0
-    lvb = uniq[lv_count == 1]
+    labelled = (mask[faces] != 0).all(axis=1)
+    interface = uniq[(counts == 2) & (lv_count == 1)]
+    lvb = np.vstack([faces[face_lv & labelled], interface])
     lm = mask[lvb[:, 0]] & mask[lvb[:, 1]] & mask[lvb[:, 2]]
     return {"epi": of(EPI), "lv_endo": of(LV_ENDO), "rv_endo": of(RV_ENDO),
             "rv_septum": np.unique(faces[rv & face_lv]),
             "rv_free_endo": np.unique(faces[rv & ~face_lv]),
             "lv_outer": np.unique(lvb[(lm & (MASK_BITS[LV_ENDO] | MASK_BITS[BASE])) == 0]),
-            "interface": np.unique(uniq[(counts == 2) & (lv_count == 1)])}
+            "interface": np.unique(interface)}
 
 
-@pytest.mark.parametrize("n", [9, 13])
+# 9 and 17 nodes a side put the holes on voxel boundaries (spacing 1 and
+# 0.5). Other sizes cut voxels, leaving pockets whose shape depends on how
+# the VTK version splits a voxel into tetrahedra.
+@pytest.mark.parametrize("n", [9, 17])
 def test_candidate_faces_give_the_full_table_surfaces(n):
     points, tets, mask, tags = uvc.inputs(_labelled(n))
     lean = uvc.surfaces(tets, mask, tags == 1)
     ref = _reference_surfaces(tets, mask, tags == 1)
+    for key, nodes in ref.items():
+        assert np.array_equal(getattr(lean, key), nodes), key
+
+
+def test_an_unlabelled_pocket_is_not_outer_wall(grid):
+    """A void inside the LV tissue, which no labelling covers, is not part
+    of the LV outer wall, even though its faces are boundary faces."""
+    points, tets, mask, tags = uvc.inputs(grid)
+    is_lv = tags == 1
+    rv_nodes = np.zeros(len(points), dtype=bool)
+    rv_nodes[tets[~is_lv].ravel()] = True
+    inside = is_lv & (mask[tets] == 0).all(axis=1) & ~rv_nodes[tets].any(axis=1)
+    assert inside.any()
+    hole = int(np.where(inside)[0][0])
+    keep = np.ones(len(tets), dtype=bool)
+    keep[hole] = False
+    lean = uvc.surfaces(tets[keep], mask, is_lv[keep])
+    assert not np.isin(tets[hole], lean.lv_outer).any()
+    ref = _reference_surfaces(tets[keep], mask, is_lv[keep])
     for key, nodes in ref.items():
         assert np.array_equal(getattr(lean, key), nodes), key
 
