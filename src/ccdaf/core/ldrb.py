@@ -216,18 +216,24 @@ class Fibres:
 
     ``sheet`` is the in-sheet direction across the fibre (the paper's
     ``T``), which is what CARP's ``.lon`` and ``GlRuleFibers`` write as the
-    sheet. ``sheet_normal`` is the paper's ``S``.
+    sheet. ``sheet_normal`` is the paper's ``S``; nothing stores it, so it
+    is computed when asked for, from the other two.
     """
 
     fibre: np.ndarray
     sheet: np.ndarray          # third column of the frame, the paper's T
-    sheet_normal: np.ndarray   # second column, the paper's S
     #: Per-element mask: a gradient this element needed was undefined and
     #: was rebuilt from its neighbours. See :func:`repair_gradients`.
     repaired: Optional[np.ndarray] = None
     #: Per-element mask: still undefined after repair, because the whole
     #: neighbourhood was too. Their frame is not meaningful.
     unresolved: Optional[np.ndarray] = None
+
+    @property
+    def sheet_normal(self) -> np.ndarray:
+        """The second column of the frame, the paper's ``S``. The frame is
+        right-handed (``fibre x S = sheet``), so ``S = sheet x fibre``."""
+        return np.cross(self.sheet, self.fibre)
 
 
 #: A gradient smaller than this share of the field's median gradient is
@@ -267,7 +273,8 @@ def _scale(grad: np.ndarray) -> float:
 def degenerate_elements(tets: np.ndarray, fields: Dict[str, np.ndarray],
                         grads: Dict[str, np.ndarray], *,
                         rtol: float = DEGENERATE_RTOL,
-                        parallel_sine: float = PARALLEL_SINE) -> np.ndarray:
+                        parallel_sine: float = PARALLEL_SINE,
+                        chunk: int = 1_000_000) -> np.ndarray:
     """Elements whose frame cannot be built from their own gradients.
 
     Two cases, both from elements lying against a labelled surface:
@@ -285,21 +292,29 @@ def degenerate_elements(tets: np.ndarray, fields: Dict[str, np.ndarray],
     there, so its missing gradient is harmless and is not counted.
     """
     tets = np.asarray(tets, dtype=np.int64)
-    epi = _centroid(fields["epi"], tets)
-    lv = _centroid(fields["lv"], tets)
-    rv = _centroid(fields["rv"], tets)
-    ds = rv / np.where(lv + rv < _EPS, 1.0, lv + rv)
-    used = {"ab": np.ones(len(tets), dtype=bool),
-            "epi": epi > _NEGLIGIBLE,
-            "lv": (1.0 - epi) * (1.0 - ds) > _NEGLIGIBLE,
-            "rv": (1.0 - epi) * ds > _NEGLIGIBLE}
+    # The thresholds are global (a share of each field's median gradient);
+    # everything else is per element, so it is done a block at a time.
+    floors = {k: rtol * _scale(g) for k, g in grads.items()}
     bad = np.zeros(len(tets), dtype=bool)
-    for k, g in grads.items():
-        bad |= used[k] & (_norm(g) < rtol * _scale(g))
-    a = _unit(grads["ab"])
-    for k in ("epi", "lv", "rv"):
-        sine = _norm(np.cross(a, _unit(grads[k])))
-        bad |= used[k] & (sine < parallel_sine)
+    for start in range(0, len(tets), chunk):
+        sl = slice(start, start + chunk)
+        tt = tets[sl]
+        epi = _centroid(fields["epi"], tt)
+        lv = _centroid(fields["lv"], tt)
+        rv = _centroid(fields["rv"], tt)
+        ds = rv / np.where(lv + rv < _EPS, 1.0, lv + rv)
+        used = {"ab": np.ones(len(tt), dtype=bool),
+                "epi": epi > _NEGLIGIBLE,
+                "lv": (1.0 - epi) * (1.0 - ds) > _NEGLIGIBLE,
+                "rv": (1.0 - epi) * ds > _NEGLIGIBLE}
+        block = np.zeros(len(tt), dtype=bool)
+        for k, g in grads.items():
+            block |= used[k] & (_norm(g[sl]) < floors[k])
+        a = _unit(grads["ab"][sl])
+        for k in ("epi", "lv", "rv"):
+            sine = _norm(np.cross(a, _unit(grads[k][sl])))
+            block |= used[k] & (sine < parallel_sine)
+        bad[sl] = block
     return bad
 
 
@@ -331,30 +346,64 @@ def repair_gradients(tets: np.ndarray, grad: np.ndarray, volume: np.ndarray,
     usable gradient.
     """
     grad = np.array(grad, dtype=float, copy=True)
-    targets = np.asarray(targets, dtype=bool)
-    floor = rtol * _scale(grad)
-    source = ~targets & (_norm(grad) >= floor)
-    missing = targets.copy()
-    if not missing.any():
-        return grad, missing
-    rows = np.asarray(tets, dtype=np.int64).ravel()
-    cols = np.repeat(np.arange(len(tets)), 4)
-    incidence = sp.csr_matrix((np.ones(len(rows)), (rows, cols)),
-                              shape=(n_points, len(tets)))
-    for _ in range(passes):
-        if not missing.any():
-            break
-        weight = np.where(source, volume, 0.0)
-        num = incidence @ (weight[:, None] * grad)
-        den = incidence @ weight
-        node = num / np.where(den > 0.0, den, 1.0)[:, None]
-        idx = np.where(missing)[0]
-        candidate = node[tets[idx]].mean(axis=1)
-        found = _norm(candidate) >= floor
-        grad[idx[found]] = candidate[found]
-        missing[idx[found]] = False
-        source[idx[found]] = True
+    missing = repair_in_place(tets, {"g": grad}, volume, n_points, targets,
+                              rtol=rtol, passes=passes)["g"]
     return grad, missing
+
+
+def repair_in_place(tets: np.ndarray, grads: Dict[str, np.ndarray],
+                    volume: np.ndarray, n_points: int, targets: np.ndarray, *,
+                    rtol: float = DEGENERATE_RTOL, passes: int = 5
+                    ) -> Dict[str, np.ndarray]:
+    """:func:`repair_gradients` for several fields at once, writing the
+    rebuilt rows into *grads*. Returns, per field, the targets still
+    without a usable gradient.
+
+    Only the elements touching a target's nodes are looked at: a target's
+    value is the average over the elements at its own nodes, and a later
+    pass only adds targets rebuilt before, so no element outside that
+    neighbourhood can change the answer. On 35 million elements with 162
+    targets, building the incidence of the whole mesh once per field took
+    63 s and 8 GB; the neighbourhood is a few thousand elements.
+    """
+    tets = np.asarray(tets, dtype=np.int64)
+    targets = np.asarray(targets, dtype=bool)
+    floors = {k: rtol * _scale(g) for k, g in grads.items()}
+    missing = {k: targets.copy() for k in grads}
+    if not targets.any():
+        return missing
+    near = np.zeros(int(n_points), dtype=bool)
+    near[tets[targets].ravel()] = True
+    region = np.where(near[tets].any(axis=1))[0]
+    nodes, local = np.unique(tets[region], return_inverse=True)
+    local = local.reshape(-1, 4)
+    m = len(region)
+    incidence = sp.csr_matrix((np.ones(4 * m), (local.ravel(), np.repeat(np.arange(m), 4))),
+                              shape=(len(nodes), m))
+    is_target = targets[region]
+    vol = np.asarray(volume, dtype=float)[region]
+    for k, grad in grads.items():
+        g = grad[region]
+        source = ~is_target & (_norm(g) >= floors[k])
+        lost = is_target.copy()
+        for _ in range(passes):
+            if not lost.any():
+                break
+            weight = np.where(source, vol, 0.0)
+            num = incidence @ (weight[:, None] * g)
+            den = incidence @ weight
+            node = num / np.where(den > 0.0, den, 1.0)[:, None]
+            idx = np.where(lost)[0]
+            candidate = node[local[idx]].mean(axis=1)
+            found = _norm(candidate) >= floors[k]
+            g[idx[found]] = candidate[found]
+            lost[idx[found]] = False
+            source[idx[found]] = True
+        grad[region] = g
+        out = np.zeros(len(targets), dtype=bool)
+        out[region[lost]] = True
+        missing[k] = out
+    return missing
 
 
 def fibres(points: np.ndarray, tets: np.ndarray, fields: Dict[str, np.ndarray],
@@ -381,30 +430,37 @@ def fibres(points: np.ndarray, tets: np.ndarray, fields: Dict[str, np.ndarray],
     points = np.asarray(points, dtype=float)
 
     # All gradients first: an element's replacement comes from its
-    # neighbours, which a chunk boundary would cut off.
-    basis, volume = basis_gradients(points, tets)
-    grads = {k: np.einsum("nij,nj->ni", basis, np.asarray(fields[k], float)[tets])
-             for k in ("ab", "epi", "lv", "rv")}
-    del basis
-    targets = degenerate_elements(tets, fields, grads, rtol=rtol)
+    # neighbours, which a chunk boundary would cut off. They are computed
+    # a block at a time, though: the per-element bases of 35 million
+    # elements, built at once, took 12 GB of temporaries.
+    values = {k: np.asarray(fields[k], dtype=float) for k in ("ab", "epi", "lv", "rv")}
+    grads = {k: np.empty((len(tets), 3)) for k in values}
+    volume = np.empty(len(tets))
+    for start in range(0, len(tets), chunk):
+        sl = slice(start, start + chunk)
+        basis, volume[sl] = basis_gradients(points, tets[sl])
+        for k, v in values.items():
+            grads[k][sl] = np.einsum("nij,nj->ni", basis, v[tets[sl]])
+        del basis
+    targets = degenerate_elements(tets, values, grads, rtol=rtol)
     unresolved = np.zeros(len(tets), dtype=bool)
     if targets.any():
-        for k in grads:
-            grads[k], _ = repair_gradients(tets, grads[k], volume, len(points),
-                                           targets, rtol=rtol)
+        repair_in_place(tets, grads, volume, len(points), targets, rtol=rtol)
         # A field with no gradient anywhere around matters only where the
         # frame uses it, which is what the recheck decides.
-        unresolved = targets & degenerate_elements(tets, fields, grads, rtol=rtol)
+        unresolved = targets & degenerate_elements(tets, values, grads, rtol=rtol)
     repaired = targets & ~unresolved
+    del volume
 
-    out = [np.empty((len(tets), 3)) for _ in range(3)]
+    fibre = np.empty((len(tets), 3))
+    sheet = np.empty((len(tets), 3))
     for start in range(0, len(tets), chunk):
         sl = slice(start, start + chunk)
         tt = tets[sl]
         g = {k: grads[k][sl] for k in grads}
-        epi = _centroid(fields["epi"], tt)
-        lv = _centroid(fields["lv"], tt)
-        rv = _centroid(fields["rv"], tt)
+        epi = _centroid(values["epi"], tt)
+        lv = _centroid(values["lv"], tt)
+        rv = _centroid(values["rv"], tt)
         ds = rv / np.where(lv + rv < _EPS, 1.0, lv + rv)
 
         # Both septal angles flip from the LV side to the RV side. For beta
@@ -426,13 +482,12 @@ def fibres(points: np.ndarray, tets: np.ndarray, fields: Dict[str, np.ndarray],
             alpha = (1.0 - epi) * a_s + epi * angles.alpha_epi
             beta = (1.0 - epi) * b_s + epi * angles.beta_epi
             q = orient(base, alpha, beta)
-        out[0][sl], out[1][sl], out[2][sl] = q[:, :, 0], q[:, :, 1], q[:, :, 2]
-    return Fibres(fibre=_unit(out[0]), sheet=_unit(out[2]),
-                  sheet_normal=_unit(out[1]),
+        fibre[sl], sheet[sl] = _unit(q[:, :, 0]), _unit(q[:, :, 2])
+    return Fibres(fibre=fibre, sheet=sheet,
                   repaired=repaired & ~unresolved, unresolved=unresolved)
 
 
-__all__ = ["FibreAngles", "Fibres", "fibres", "repair_gradients",
+__all__ = ["FibreAngles", "Fibres", "fibres", "repair_gradients", "repair_in_place",
            "degenerate_elements", "DEGENERATE_RTOL", "PARALLEL_SINE", "axis", "orient", "bislerp",
            "rot_to_quat", "quat_to_rot", "quat_mul", "PUBLISHED", "LINEAR",
            "LEFT", "RIGHT"]

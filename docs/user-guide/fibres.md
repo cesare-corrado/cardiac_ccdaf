@@ -194,15 +194,17 @@ solves it in a few dozen iterations. The three transmural problems hold the same
 nodes, so they share one matrix and one multigrid setup.
 
 The stiffness matrix is assembled a million elements at a time, so assembly
-needs little more memory than the matrix itself.
+needs little more memory than the matrix itself. The frames are built in blocks
+too, and the few elements whose frame is undefined are rebuilt from the
+elements around them only, not from a table of the whole mesh.
 
-**Fibre generation on a 35-million-element ventricle (400 µm), before and after the multigrid solver and chunked assembly**
+**Fibre generation on a 35-million-element ventricle (400 µm), as the solver and the memory use were improved**
 
-| | Jacobi preconditioner | Multigrid |
-|---|---:|---:|
-| Apex-to-base solve | 45 min | 6 min |
-| Whole fibre step | 56 min | 18 min |
-| Peak memory | about 30 GB (assembly) | 13.5 GB (building the frames) |
+| | Jacobi preconditioner | Multigrid | Multigrid, frames in blocks |
+|---|---:|---:|---:|
+| Apex-to-base solve | 45 min | 6 min | 6 min |
+| Whole fibre step | 56 min | 18 min | 17 min |
+| Peak memory | about 30 GB (assembly) | 13.5 GB (building the frames) | 8.1 GB |
 
 The solver stops at a relative residual of 1e-9. At that tolerance the fibres
 match a fully converged solution to within 0.1°; at 1e-7, 100 to 200 of 2.9
