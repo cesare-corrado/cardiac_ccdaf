@@ -111,15 +111,16 @@ tried reproduced it. The apices set the LV–RV direction, and with it where
 
 | Mesh | Nodes | Elements | Time | Peak memory |
 |---|---:|---:|---:|---:|
-| 2.9-million-element ventricle | 637,000 | 2.9 million | 47 s | — |
-| 400 µm ventricle | 6.2 million | 35 million | 8.5 min | 22 GB |
+| 2.9-million-element ventricle | 637,000 | 2.9 million | 34 s | 1.1 GB |
+| 400 µm ventricle | 6.2 million | 35 million | 6.6 min | 10.5 GB |
 
-On the 400 µm mesh each of the sixteen distance fields takes about 17 s; most
-of the rest, and the memory peak, goes into finding the surfaces from the
-mesh's 140 million element faces. The distance solver uses every core; on a
-four-core laptop expect the distance part to take about four times longer
-(measured: 6.1 s on 4 threads against 1.6 s on 24, for one field on the
-637,000-node mesh).
+Peak memory includes the loaded mesh (5.3 GB of the 10.5). On the 400 µm mesh
+each of the sixteen distance fields takes about 15 s, and finding the surfaces
+8 s: only the element faces whose three nodes lie on a labelled surface are
+examined, about 1% of the mesh's 140 million faces. The distance solver uses
+every core; on a four-core laptop expect the distance part to take about four
+times longer (measured: 6.1 s on 4 threads against 1.6 s on 24, for one field
+on the 637,000-node mesh).
 
 ## Labels that cannot be right
 

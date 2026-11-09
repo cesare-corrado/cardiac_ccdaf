@@ -68,7 +68,7 @@ from scipy.sparse.csgraph import dijkstra
 
 from ccdaf.core import eikonal
 from ccdaf.core.surface_labels import BASE, EPI, LABEL_MASK_FIELD, LV_ENDO, MASK_BITS, RV_ENDO
-from ccdaf.core.volume_mesh import face_table, is_volume, tetrahedra
+from ccdaf.core.volume_mesh import FACE_NODES, is_volume, sorted_unique_rows, tetrahedra
 
 #: Point arrays written, one per coordinate.
 UVC_FIELDS: Dict[str, str] = {"ven": "uvc_ven", "z": "uvc_z", "rho": "uvc_rho",
@@ -185,21 +185,39 @@ class Surfaces:
     lv_elems: np.ndarray         # bool, per element
 
 
+def _faces_with(tets: np.ndarray, flag: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """``(faces, owner)``: the element faces whose three nodes all have
+    *flag*, with the element each came from. Built one face position at
+    a time, so the full ``4 x elements`` face list never exists."""
+    out, own = [], []
+    for a, b, c in FACE_NODES:
+        idx = np.where(flag[tets[:, a]] & flag[tets[:, b]] & flag[tets[:, c]])[0]
+        out.append(tets[idx][:, [a, b, c]])
+        own.append(idx)
+    return np.vstack(out), np.concatenate(own)
+
+
 def surfaces(tets: np.ndarray, mask: np.ndarray, is_lv: np.ndarray) -> Surfaces:
     """The derived surfaces, from the labels and the LV element flags."""
     tets = np.asarray(tets, dtype=np.int64)
     mask = np.asarray(mask, dtype=np.int64)
     n = len(mask)
-    # One face table serves every surface: per unique face, how many
-    # elements share it and how many of those are LV. Building it once
-    # matters: on 35 million elements each table sorts 140 million faces.
-    uniq, inv, counts, owner = face_table(tets)
-    lv_count = np.bincount(inv, weights=is_lv[owner].astype(float),
-                           minlength=len(uniq)).astype(np.int64)
+    # Only candidate faces are built and sorted, never the whole face
+    # table: on 35 million elements that table has 140 million faces, and
+    # sorting it took 107 s and 17 GB; the candidates are about 1% of it.
+    # Counting duplicates among candidates is still exact, because the two
+    # copies of an interior face pass the same node filter.
+    lv_nodes = np.zeros(n, dtype=bool)
+    lv_nodes[tets[is_lv].ravel()] = True
+    rv_nodes = np.zeros(n, dtype=bool)
+    rv_nodes[tets[~is_lv].ravel()] = True
+
+    # Boundary faces: a boundary face has all three nodes on a labelled
+    # surface, so faces that do are the candidates.
+    cand, owner = _faces_with(tets, mask != 0)
+    uniq, inv, counts = sorted_unique_rows(cand)
     one_owner = np.empty(len(uniq), dtype=np.int64)
     one_owner[inv] = owner                       # exact where counts == 1
-    del inv, owner
-
     boundary = counts == 1
     faces = uniq[boundary]
     face_lv = is_lv[one_owner[boundary]]
@@ -217,20 +235,22 @@ def surfaces(tets: np.ndarray, mask: np.ndarray, is_lv: np.ndarray) -> Surfaces:
     septum = np.unique(faces[rv_face & face_lv])
     rv_free = np.unique(faces[rv_face & ~face_lv])
 
-    # The LV sub-mesh boundary: faces with exactly one LV element, on the
-    # outside of the heart or against an RV element. Less the LV
-    # endocardium and the base, it is the LV outer wall.
-    lv_boundary = uniq[lv_count == 1]
+    # LV-RV interface: faces shared by an LV and an RV element. All three
+    # nodes of such a face belong to both an LV and an RV element.
+    cand, owner = _faces_with(tets, lv_nodes & rv_nodes)
+    iuniq, iinv, icounts = sorted_unique_rows(cand)
+    ilv = np.bincount(iinv, weights=is_lv[owner].astype(float),
+                      minlength=len(iuniq)).astype(np.int64)
+    interface_faces = iuniq[(icounts == 2) & (ilv == 1)]
+    interface = np.unique(interface_faces)
+
+    # The LV outer wall: the LV sub-mesh boundary (LV-owned boundary faces
+    # and the interface), less the LV endocardium and the base.
+    lv_boundary = np.vstack([faces[face_lv], interface_faces])
     lm = mask[lv_boundary[:, 0]] & mask[lv_boundary[:, 1]] & mask[lv_boundary[:, 2]]
     keep = (lm & (MASK_BITS[LV_ENDO] | MASK_BITS[BASE])) == 0
     lv_outer = np.unique(lv_boundary[keep])
 
-    # Faces shared by an LV and an RV element.
-    interface = np.unique(uniq[(counts == 2) & (lv_count == 1)])
-    del uniq, counts, lv_count, one_owner
-
-    lv_nodes = np.zeros(n, dtype=bool)
-    lv_nodes[tets[is_lv].ravel()] = True
     return Surfaces(base=np.where(mask & MASK_BITS[BASE])[0], epi=nodes_of(EPI),
                     lv_endo=nodes_of(LV_ENDO), rv_endo=nodes_of(RV_ENDO),
                     rv_septum=septum, rv_free_endo=rv_free, lv_outer=lv_outer,
