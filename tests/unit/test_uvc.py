@@ -13,6 +13,8 @@ The contract:
 * the LV tag is the one that touches the LV endocardium;
 * the RV septum is the RV-endocardial faces of LV elements, and with the
   free wall it makes up the RV endocardium;
+* the surfaces, built from candidate faces only, are node for node those
+  of the full face table;
 * labels with the epicardium inside an endocardium are refused, not
   turned into plausible-looking coordinates;
 * nu follows the tags, z runs 0 at the apex to 1 at the base, rho 0 on
@@ -89,6 +91,40 @@ def test_the_septum_is_the_rv_endocardium_on_lv_elements(grid):
     assert np.array_equal(np.union1d(s.rv_septum, s.rv_free_endo), s.rv_endo)
     # Septal nodes belong to LV elements.
     assert s.lv_nodes[s.rv_septum].all()
+
+
+def _reference_surfaces(tets, mask, is_lv):
+    """The surfaces from the full face table: what the candidate-face
+    construction must reproduce."""
+    from ccdaf.core.volume_mesh import face_table
+    uniq, inv, counts, owner = face_table(tets)
+    lv_count = np.bincount(inv, weights=is_lv[owner].astype(float), minlength=len(uniq))
+    one = np.empty(len(uniq), dtype=np.int64)
+    one[inv] = owner
+    faces = uniq[counts == 1]
+    face_lv = is_lv[one[counts == 1]]
+    fm = mask[faces[:, 0]] & mask[faces[:, 1]] & mask[faces[:, 2]]
+
+    def of(bit):
+        return np.unique(faces[(fm & MASK_BITS[bit]) != 0])
+
+    rv = (fm & MASK_BITS[RV_ENDO]) != 0
+    lvb = uniq[lv_count == 1]
+    lm = mask[lvb[:, 0]] & mask[lvb[:, 1]] & mask[lvb[:, 2]]
+    return {"epi": of(EPI), "lv_endo": of(LV_ENDO), "rv_endo": of(RV_ENDO),
+            "rv_septum": np.unique(faces[rv & face_lv]),
+            "rv_free_endo": np.unique(faces[rv & ~face_lv]),
+            "lv_outer": np.unique(lvb[(lm & (MASK_BITS[LV_ENDO] | MASK_BITS[BASE])) == 0]),
+            "interface": np.unique(uniq[(counts == 2) & (lv_count == 1)])}
+
+
+@pytest.mark.parametrize("n", [9, 13])
+def test_candidate_faces_give_the_full_table_surfaces(n):
+    points, tets, mask, tags = uvc.inputs(_labelled(n))
+    lean = uvc.surfaces(tets, mask, tags == 1)
+    ref = _reference_surfaces(tets, mask, tags == 1)
+    for key, nodes in ref.items():
+        assert np.array_equal(getattr(lean, key), nodes), key
 
 
 def test_swapped_labels_are_refused(grid):
