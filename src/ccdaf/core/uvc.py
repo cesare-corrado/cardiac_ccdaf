@@ -198,7 +198,13 @@ def _faces_with(tets: np.ndarray, flag: np.ndarray) -> Tuple[np.ndarray, np.ndar
 
 
 def surfaces(tets: np.ndarray, mask: np.ndarray, is_lv: np.ndarray) -> Surfaces:
-    """The derived surfaces, from the labels and the LV element flags."""
+    """The derived surfaces, from the labels and the LV element flags.
+
+    A boundary face with an unlabelled node belongs to no surface, the LV
+    outer wall included: it is not part of the labelled heart (a pocket or
+    crack inside the tissue, for instance), and counting it as outer wall
+    would put rho = 1 inside the wall.
+    """
     tets = np.asarray(tets, dtype=np.int64)
     mask = np.asarray(mask, dtype=np.int64)
     n = len(mask)
