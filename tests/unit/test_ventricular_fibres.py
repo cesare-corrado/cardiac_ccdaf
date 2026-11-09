@@ -221,13 +221,23 @@ def test_a_second_run_reuses_the_fields(grid):
     assert "reused" in again.details()
 
 
-def test_another_apex_does_not_reuse(grid):
+def test_another_apex_reuses_only_the_transmural_fields(grid):
+    """The three transmural fields do not depend on the apex: a new apex
+    re-solves the apex-to-base field alone, and gets what a full run gets."""
     points, tets, mask = vf.inputs(grid)
     apex = vf.find_apex(points, tets, mask)
     vf.write(grid, vf.generate(points, tets, mask, apex))
     other = vf.apex_at(points, tets, mask, [SIZE, SIZE, 0.0])
     assert other.node != apex.node
-    assert vf.cached_fields(grid, other) is None
+    cached = vf.cached_fields(grid, other)
+    assert sorted(cached) == ["epi", "lv", "rv"]
+    partial = vf.generate(points, tets, mask, other, cached=cached)
+    assert list(partial.reports) == ["ab"]
+    assert partial.reused_fields == ("epi", "lv", "rv") and not partial.reused
+    assert "transmural fields reused" in partial.summary()
+    full = vf.generate(points, tets, mask, other)
+    for key in vf.FIELD_NAMES:
+        assert np.allclose(partial.fields[key], full.fields[key], atol=1e-6)
 
 
 def test_the_result_survives_a_save(grid, tmp_path):

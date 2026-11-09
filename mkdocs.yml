@@ -80,6 +80,7 @@ nav:
       - Tissue properties: user-guide/tissue-properties.md
       - Surface labels: user-guide/surface-labels.md
       - Fibres: user-guide/fibres.md
+      - Universal ventricular coordinates: user-guide/uvc.md
       - Export: user-guide/export.md
       - EAM & visualisation: user-guide/eam-visualisation.md
   - Keyboard & mouse: shortcuts.md

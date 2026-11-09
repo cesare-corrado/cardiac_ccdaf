@@ -18,6 +18,11 @@ dependencies = [
     # the fibres: about 9x faster than Jacobi on the apex-to-base problem of
     # a 6-million-node ventricle. MIT; binary wheels need no compiler.
     "pyamg>=5.4",
+    # Compiles the geodesic-distance solver behind the ventricular
+    # coordinates: compiled and run on all cores, it is several times faster
+    # than the same method vectorised in numpy.
+    # BSD; binary wheels. Each numba release caps the numpy it supports.
+    "numba>=0.68",
     # Floors follow the validated stack (VTK 9.6.2 / pyvista 0.48.4); the two
     # 9.6-specific behaviours are handled in code, not avoided by pinning —
     # see environment.yml for the full reasoning. No exact pin on purpose.

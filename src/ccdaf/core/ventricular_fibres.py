@@ -17,9 +17,10 @@ It joins three pieces that exist on their own:
 The apex
 --------
 The labels do not name an apex, and the paper only says it is "the point
-lying closest to the ventricular apex". Here it is found as the
-epicardial node farthest from the base, measured across a plane fitted to
-the base nodes. The caller may replace the node.
+lying closest to the ventricular apex". Here it is the rule the UVC use
+(:func:`ccdaf.core.uvc.lv_apex_ends`): the LV-endocardial node farthest
+from the centroid of the base, and the epicardial node nearest it, which
+is the one held. The caller may replace the node.
 
 The node is widened to a patch: the epicardial nodes, base nodes excepted,
 within :data:`APEX_RADIUS_MM` of it. A single held node would put a point
@@ -78,6 +79,7 @@ from ccdaf.core.laplace import (
 )
 from ccdaf.core.ldrb import FibreAngles, Fibres, fibres
 from ccdaf.core.orifice_labels import TYPICAL_RMS_RADIUS_MM, UNITS
+from ccdaf.core.uvc import lv_apex_ends
 from ccdaf.core.surface_labels import (
     BASE, EPI, LABEL_MASK_FIELD, LV_ENDO, MASK_BITS, NAMES, RV_ENDO,
 )
@@ -232,19 +234,22 @@ def _apex(points: np.ndarray, sets: Dict[int, np.ndarray], centre: int,
 def find_apex(points: np.ndarray, tets: np.ndarray, mask: np.ndarray, *,
               radius_mm: float = APEX_RADIUS_MM,
               unit_mm: Optional[float] = None) -> Apex:
-    """The epicardial node farthest from the base, and its patch.
+    """The automatic apex: the epicardial end of the shared LV apex, and
+    its patch.
+
+    The location is :func:`ccdaf.core.uvc.lv_apex_ends`, the rule UVC use,
+    so the fibres and the coordinates put the apex in the same place: the
+    LV-endocardial node farthest from the centroid of the base, and the
+    epicardial node nearest it, which is the one held here.
 
     *unit_mm* is millimetres per mesh unit; left out, it is guessed from
     the size of the mesh (:func:`mm_per_unit`). *tets* is not used and is
     kept so callers need not change.
     """
     sets = surface_sets(mask)
-    epi = np.setdiff1d(sets[EPI], sets[BASE])
-    if len(epi) == 0:
+    if len(np.setdiff1d(sets[EPI], sets[BASE])) == 0:
         raise ValueError("The epicardium has no node off the base.")
-    origin, normal = base_plane(points, sets[BASE])
-    depth = np.abs((np.asarray(points, dtype=float)[epi] - origin) @ normal)
-    centre = int(epi[int(np.argmax(depth))])
+    _endo, centre = lv_apex_ends(points, sets[LV_ENDO], sets[EPI], sets[BASE])
     return _apex(points, sets, centre, radius_mm, unit_mm, automatic=True)
 
 
@@ -429,8 +434,13 @@ def describe_provenance(grid) -> str:
 
 
 def cached_fields(grid, apex: Apex) -> Optional[Dict[str, np.ndarray]]:
-    """The stored Laplace fields, if they were solved on this mesh, these
-    labels and this apex; otherwise ``None``."""
+    """The stored Laplace fields still valid for this mesh, these labels
+    and this apex, or ``None`` if none is.
+
+    The three transmural fields do not depend on the apex, so they are
+    returned whenever the mesh and labels are unchanged; the apex-to-base
+    field only when the apex is unchanged too. :func:`generate` solves
+    whatever is missing."""
     stored = _stored(grid, DIGEST_KEY)
     held = _stored(grid, APEX_KEY)
     if stored is None or held is None:
@@ -440,10 +450,9 @@ def cached_fields(grid, apex: Apex) -> Optional[Dict[str, np.ndarray]]:
     current = _grid_digest(grid)
     if current is None or not np.array_equal(current, stored):
         return None
-    if not np.array_equal(np.sort(held), np.sort(apex.nodes)):
-        return None
-    return {k: np.asarray(grid.point_data[name], dtype=float)
-            for k, name in FIELD_NAMES.items()}
+    keys = list(FIELD_NAMES) if np.array_equal(np.sort(held), np.sort(apex.nodes)) \
+        else [k for k in FIELD_NAMES if k != "ab"]
+    return {k: np.asarray(grid.point_data[FIELD_NAMES[k]], dtype=float) for k in keys}
 
 
 # ---------------------------------------------------------------------
@@ -459,7 +468,10 @@ class FibreRun:
     angles: FibreAngles
     digest: np.ndarray
     reports: Dict[str, SolveReport] = field(default_factory=dict)
+    #: True when every field was reused and nothing was solved.
     reused: bool = False
+    #: The fields taken from the mesh rather than solved.
+    reused_fields: Tuple[str, ...] = ()
     #: Pinch nodes on two transmural surfaces, held by no solve.
     released: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
     seconds: float = 0.0
@@ -473,7 +485,8 @@ class FibreRun:
         n = len(self.fibres.fibre)
         repaired = int(np.sum(self.fibres.repaired)) if self.fibres.repaired is not None else 0
         return (f"Fibres for {n:,} elements in {self.seconds:.0f} s"
-                + (" (Laplace fields reused)" if self.reused else "")
+                + (" (Laplace fields reused)" if self.reused
+                   else " (transmural fields reused)" if self.reused_fields else "")
                 + f"; {repaired} rebuilt from neighbours.")
 
     def details(self) -> str:
@@ -486,6 +499,9 @@ class FibreRun:
             lines.append("Laplace fields: reused, solved earlier on this mesh, "
                          "these labels and this apex.")
         else:
+            if self.reused_fields:
+                lines.append("Transmural fields: reused, solved earlier on this "
+                             "mesh and these labels; only the apex changed.")
             kinds = sorted({rep.preconditioner for rep in self.reports.values()})
             lines.append(f"Laplace solves (conjugate gradients, "
                          f"{'/'.join(kinds) or 'none'} preconditioner):")
@@ -535,38 +551,46 @@ def generate(points: np.ndarray, tets: np.ndarray, mask: np.ndarray,
     sets = surface_sets(mask)
     reports: Dict[str, SolveReport] = {}
 
-    if cached is None:
+    fields = dict(cached or {})
+    reused_fields = tuple(k for k in FIELD_NAMES if k in fields)
+    epi, lv, rv, released = transmural_sets(sets)
+    missing = [k for k in FIELD_NAMES if k not in fields]
+    if missing:
         say("Assembling the stiffness matrix…")
         k = stiffness_matrix(points, tets)
-        epi, lv, rv, released = transmural_sets(sets)
         what = {"epi": "epicardium to endocardia", "lv": "LV endocardium",
                 "rv": "RV endocardium", "ab": "apex to base"}
-        order = list(what)
+        count = {"n": 0}
 
         def _start(key: str) -> None:
-            say(f"Laplace solve {order.index(key) + 1} of 4: {what[key]}…")
+            count["n"] += 1
+            say(f"Laplace solve {count['n']} of {len(missing)}: {what[key]}…")
 
-        # The three transmural problems hold the same nodes, so they share
-        # one modified matrix and one preconditioner.
-        fields, reports = laplace_family(k, {
-            "epi": (epi, np.concatenate([lv, rv])),
-            "lv": (lv, np.concatenate([epi, rv])),
-            "rv": (rv, np.concatenate([epi, lv]))},
-            rtol=rtol, preconditioner=preconditioner, on_start=_start)
-        _start("ab")
-        fields["ab"], reports["ab"] = laplace(points, tets, sets[BASE], apex.nodes,
-                                              matrix=k, rtol=rtol,
-                                              preconditioner=preconditioner)
+        transmural = [key for key in ("epi", "lv", "rv") if key in missing]
+        if transmural:
+            # The three transmural problems hold the same nodes, so they
+            # share one modified matrix and one preconditioner.
+            problems = {"epi": (epi, np.concatenate([lv, rv])),
+                        "lv": (lv, np.concatenate([epi, rv])),
+                        "rv": (rv, np.concatenate([epi, lv]))}
+            solved, rep = laplace_family(k, {key: problems[key] for key in transmural},
+                                         rtol=rtol, preconditioner=preconditioner,
+                                         on_start=_start)
+            fields.update(solved)
+            reports.update(rep)
+        if "ab" in missing:
+            _start("ab")
+            fields["ab"], reports["ab"] = laplace(points, tets, sets[BASE], apex.nodes,
+                                                  matrix=k, rtol=rtol,
+                                                  preconditioner=preconditioner)
         del k
-    else:
-        fields = cached
-        released = transmural_sets(sets)[3]
 
     say("Building fibre and sheet directions…")
     result = fibres(points, tets, fields, angles)
     return FibreRun(fields=fields, fibres=result, apex=apex, angles=angles,
                     digest=digest(points, tets, mask), reports=reports,
-                    reused=cached is not None, released=released,
+                    reused=not missing, reused_fields=reused_fields,
+                    released=released,
                     seconds=time.time() - start)
 
 

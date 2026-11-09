@@ -119,8 +119,9 @@ class FibreDialog(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout()
         self.btn_auto = QtWidgets.QPushButton("Find automatically")
         self.btn_auto.setToolTip(
-            "The epicardial node farthest from the base plane, with the "
-            "epicardial nodes within one mean edge of it.")
+            "The apex the UVC also use: the LV-endocardial node farthest from "
+            "the centre of the base, then the epicardial node nearest it, with "
+            "the epicardial nodes within 2 mm.")
         self.btn_auto.clicked.connect(self.find_apex)
         self.btn_pick = QtWidgets.QPushButton("Pick on surface")
         self.btn_pick.setCheckable(True)

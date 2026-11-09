@@ -114,7 +114,8 @@ def test_every_ordered_pairing_survives(mesh, plotter):
 # ------------------------------------------------------------- the arbiter
 
 
-def _host(*, snake=False, selecting=False, clip=False, seeds=False, apex=False):
+def _host(*, snake=False, selecting=False, clip=False, seeds=False, apex=False,
+          uvc=False):
     """Stand-in carrying just what ``_release_picker`` touches."""
     host = MagicMock()
     host.editor.snake_active = snake
@@ -125,6 +126,7 @@ def _host(*, snake=False, selecting=False, clip=False, seeds=False, apex=False):
     host._selectors = {"pv": sel}
     host._seed_sel = sel
     host._apex_picking = apex
+    host._uvc_picking = uvc
     return host
 
 
@@ -209,6 +211,7 @@ def test_release_without_tools_does_not_crash():
     host.editor = None
     host.clipper = None
     host._apex_picking = False
+    host._uvc_picking = False
     assert CCDAF._release_picker(host) == []
 
 
@@ -339,3 +342,19 @@ def test_apex_picking_survives_taking_the_picker_for_itself():
     host = _host(apex=True)
     assert CCDAF._release_picker(host, keep="apex") == []
     assert host._apex_picking is True
+
+
+def test_uvc_apex_picking_is_stopped_and_its_buttons_put_back():
+    """The UVC window's apex pick is one more holder of the picker."""
+    from ccdaf.app.ccdaf import CCDAF
+    host = _host(uvc=True)
+    assert CCDAF._release_picker(host) == ["UVC apex picking"]
+    assert host._uvc_picking is False
+    host._uvc_dialog.uncheck_pick.assert_called_once()
+
+
+def test_uvc_apex_picking_survives_taking_the_picker_for_itself():
+    from ccdaf.app.ccdaf import CCDAF
+    host = _host(uvc=True)
+    assert CCDAF._release_picker(host, keep="uvc_apex") == []
+    assert host._uvc_picking is True

@@ -24,6 +24,8 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.laplace
 ::: ccdaf.core.ldrb
 ::: ccdaf.core.ventricular_fibres
+::: ccdaf.core.eikonal
+::: ccdaf.core.uvc
 ::: ccdaf.core.volume_from_segmentation
 ::: ccdaf.core.tissue_property
 ::: ccdaf.core.carp_export
