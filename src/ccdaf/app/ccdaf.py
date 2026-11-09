@@ -116,6 +116,8 @@ from ccdaf.core.surface_labels import (
 from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
 from ccdaf.core import ventricular_fibres as vfibres
 from ccdaf.gui.fibre_dialog import FibreDialog, FibreWorker
+from ccdaf.core import uvc as uvc_core
+from ccdaf.gui.uvc_dialog import UvcDialog, UvcWorker
 from ccdaf.core.volume_clean import clean as clean_volume
 from ccdaf.core.volume_quality import improve_grid as improve_volume_quality
 from ccdaf.core.wall_report import check_wall
@@ -323,6 +325,9 @@ class CCDAF(QtWidgets.QMainWindow):
         self._fibre_dialog = None                           # fibre generation, non-modal
         self._fibre_worker = None                           # its run, on a thread
         self._apex_picking = False                          # the dialog holds the picker
+        self._uvc_dialog = None                             # UVC, non-modal
+        self._uvc_worker = None                             # its run, on a thread
+        self._uvc_picking = False                           # the UVC dialog holds the picker
         self._seg_plane_widget = None                       # plane-relabel gizmo
         self._seg_plane_normal: Optional[tuple] = None
         self._seg_plane_point: Optional[tuple] = None
@@ -466,6 +471,13 @@ class CCDAF(QtWidgets.QMainWindow):
             "(rule-based, Bayer et al. 2012).")
         self.act_generate_fibres.triggered.connect(self._action_generate_fibres)
         actions_menu.addAction(self.act_generate_fibres)
+
+        self.act_compute_uvc = QtWidgets.QAction("Compute UVC…", self)
+        self.act_compute_uvc.setStatusTip(
+            "Compute universal ventricular coordinates (nu, z, rho, phi) on a "
+            "labelled ventricular volume with LV and RV element tags.")
+        self.act_compute_uvc.triggered.connect(self._action_compute_uvc)
+        actions_menu.addAction(self.act_compute_uvc)
 
         # --- Export menu: the working mesh in another tool's format -----
         export_menu = menubar.addMenu("E&xport")
@@ -1190,6 +1202,12 @@ class CCDAF(QtWidgets.QMainWindow):
                 self._fibre_dialog.uncheck_pick()
             stopped.append("apex picking")
 
+        if keep != "uvc_apex" and self._uvc_picking:
+            self._uvc_picking = False
+            if self._uvc_dialog is not None:
+                self._uvc_dialog.uncheck_pick()
+            stopped.append("UVC apex picking")
+
         if (keep != "clip" and self.clipper is not None
                 and self.clipper.mode is not ClipMode.NONE):
             try:
@@ -1353,6 +1371,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.setWindowTitle(window_title(display_name(source_name)))
         # A fibre window measured the mesh that was here before.
         self._close_fibre_dialog()
+        self._close_uvc_dialog()
         # Before anything asks what fields the mesh has: a labelling read
         # back from a file arrives as the node mask alone, and the faces
         # are rebuilt from it here. Done later — next to the editor setup,
@@ -1558,6 +1577,7 @@ class CCDAF(QtWidgets.QMainWindow):
         if self._seg_array is not None:
             self._close_segmentation()
         self._close_fibre_dialog()
+        self._close_uvc_dialog()
 
         # EAM state.
         self._eam_directory = None
@@ -3124,6 +3144,8 @@ class CCDAF(QtWidgets.QMainWindow):
         outcome = vfibres.reconcile(new_grid, previous)
         if self._fibre_dialog is not None and not self._fibre_dialog.matches(new_grid):
             self._close_fibre_dialog()
+        if self._uvc_dialog is not None and not self._uvc_dialog.matches(new_grid):
+            self._close_uvc_dialog()
         if outcome is not None and fibre_note:
             self._report_fibres(outcome)
         self.loader.set_volume(new_grid)
@@ -3329,6 +3351,18 @@ class CCDAF(QtWidgets.QMainWindow):
             can_fibre, fibre_why = vfibres.availability(self.loader.grid)
         self.act_generate_fibres.setEnabled(can_fibre)
         self.act_generate_fibres.setToolTip(fibre_why)
+
+        # UVC need the labels and the LV/RV element tags.
+        if self._seg_array is not None:
+            can_uvc, uvc_why = False, "Close the segmentation first."
+        elif self._uvc_worker is not None:
+            can_uvc, uvc_why = False, "UVC are being computed."
+        elif self.loader.kind != VOLUME:
+            can_uvc, uvc_why = False, "Load a tetrahedral volume first."
+        else:
+            can_uvc, uvc_why = uvc_core.availability(self.loader.grid)
+        self.act_compute_uvc.setEnabled(can_uvc)
+        self.act_compute_uvc.setToolTip(uvc_why)
 
         # Exporting reads the mesh and changes nothing, so it needs only a
         # mesh — not a field to read, and not the segmentation closed.
@@ -3701,6 +3735,148 @@ class CCDAF(QtWidgets.QMainWindow):
         """
         if self._fibre_dialog is not None:
             self._fibre_dialog.reject()           # finished → the tidy-up above
+
+    # ==================================================================
+    # Actions → Compute UVC
+    # ==================================================================
+    def _action_compute_uvc(self) -> None:
+        """Open the UVC window, non-modally so apices can be clicked."""
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+        if self._uvc_dialog is not None:
+            self._uvc_dialog.raise_()
+            self._uvc_dialog.activateWindow()
+            return
+        ok, why = uvc_core.availability(self.loader.grid)
+        if not ok:
+            QtWidgets.QMessageBox.warning(self, "Compute UVC", why)
+            return
+        dlg = UvcDialog(self.loader.grid, parent=self)
+        self._uvc_dialog = dlg
+        dlg.apices_changed.connect(self._show_uvc_apices)
+        dlg.pick_requested.connect(self._uvc_pick_apex)
+        dlg.run_requested.connect(self._uvc_run)
+        dlg.finished.connect(self._uvc_dialog_finished)
+        if self._uvc_worker is not None:
+            dlg.set_running(True)
+            dlg.set_status("A run is still in progress…")
+        dlg.show()
+
+    def _show_uvc_apices(self, lv, rv) -> None:
+        """Mark the LV (gold) and RV (cyan) apex nodes; ``None`` clears one."""
+        grid = self.loader.grid
+        for name, apex, colour in (("uvc_lv_apex", lv, "#ffd700"),
+                                   ("uvc_rv_apex", rv, "#00ced1")):
+            try:
+                self.plotter.remove_actor(name, reset_camera=False)
+            except Exception:
+                pass
+            if apex is not None and grid is not None:
+                self.plotter.add_points(
+                    np.asarray(grid.points)[apex.nodes], color=colour,
+                    point_size=14, render_points_as_spheres=True, name=name,
+                    pickable=False, reset_camera=False)
+        self.plotter.render()
+
+    def _uvc_pick_apex(self, which: str) -> None:
+        """Hand the surface picker to the UVC window for *which* apex, or
+        take it back for ``""``."""
+        if not which:
+            if self._uvc_picking:
+                self._uvc_picking = False
+                try:
+                    self.plotter.disable_picking()
+                except Exception:
+                    pass
+            return
+        self._focus_3d()
+        self._take_picker("uvc_apex")
+        try:
+            self.plotter.enable_point_picking(
+                callback=self._on_uvc_pick, picker="hardware",
+                use_picker=True, show_message=False, show_point=False,
+                pickable_window=False, left_clicking=True)
+        except Exception as exc:
+            if self._uvc_dialog is not None:
+                self._uvc_dialog.uncheck_pick()
+            QtWidgets.QMessageBox.warning(
+                self, "Compute UVC", f"Could not start picking:\n{exc}")
+            return
+        self._uvc_picking = True
+        cavity = "LV" if which == "lv" else "RV"
+        self.statusBar().showMessage(
+            f"Click the {cavity} endocardium where the apex is; the nearest "
+            f"{cavity}-endocardial node is taken.")
+
+    def _on_uvc_pick(self, point, *_args, **_kwargs) -> None:
+        if not self._uvc_picking or self._uvc_dialog is None or point is None:
+            return
+        self._uvc_dialog.set_apex_at(point)
+
+    def _uvc_run(self, lv, rv) -> None:
+        """Start a run on a worker thread."""
+        dlg = self._uvc_dialog
+        if self._uvc_worker is not None or dlg is None or self.loader.grid is None:
+            return
+        worker = UvcWorker(*dlg.inputs(), lv, rv, parent=self)
+        worker.status.connect(self._uvc_status)
+        worker.done.connect(self._uvc_done)
+        worker.failed.connect(self._uvc_failed)
+        worker.finished.connect(self._uvc_worker_finished)
+        self._uvc_worker = worker
+        dlg.set_running(True)
+        dlg.set_status("Starting…")
+        self._sync_menu_actions()
+        worker.start()
+
+    def _uvc_status(self, text: str) -> None:
+        if self._uvc_dialog is not None:
+            self._uvc_dialog.set_status(text)
+        self.statusBar().showMessage(text)
+
+    def _uvc_done(self, run) -> None:
+        """Write a finished run, unless the mesh changed under it."""
+        grid = self.loader.grid
+        dlg = self._uvc_dialog
+        if (dlg is None or grid is None or self.loader.kind != VOLUME
+                or not dlg.matches(grid)):
+            self._uvc_status("The mesh or its labels changed while the UVC were "
+                             "being computed, so the result was discarded.")
+            return
+        uvc_core.write(grid, run)
+        # Re-derive the view so the new point arrays are listed; the mesh
+        # and labels are unchanged, so nothing else is touched.
+        self._replace_volume(grid, fibre_note=False)
+        if self._uvc_dialog is not None:
+            self._uvc_dialog.show_run(run)
+        self.statusBar().showMessage(run.summary(), 30000)
+
+    def _uvc_failed(self, text: str) -> None:
+        self._uvc_status(f"UVC failed:\n{text}")
+        QtWidgets.QMessageBox.warning(self, "Compute UVC", text)
+
+    def _uvc_worker_finished(self) -> None:
+        worker = self._uvc_worker
+        self._uvc_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if self._uvc_dialog is not None:
+            self._uvc_dialog.set_running(False)
+        self._sync_menu_actions()
+
+    def _uvc_dialog_finished(self, _result: int) -> None:
+        dlg = self._uvc_dialog
+        self._uvc_dialog = None
+        self._uvc_pick_apex("")
+        self._show_uvc_apices(None, None)
+        if dlg is not None:
+            dlg.deleteLater()
+
+    def _close_uvc_dialog(self) -> None:
+        """Shut the UVC window: the mesh it measured is going away. A run in
+        flight carries on and is discarded on arrival if the mesh changed."""
+        if self._uvc_dialog is not None:
+            self._uvc_dialog.reject()
 
     #: What each outcome of a mesh change did to the fibres, in words.
     FIBRE_NOTES = {

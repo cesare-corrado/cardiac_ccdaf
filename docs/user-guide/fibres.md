@@ -39,8 +39,10 @@ while it is open. It opens with the apex already found.
 
 **Apex**
 
-- The apex is found automatically: the epicardial node farthest from the base,
-  measured across a plane fitted to the base nodes.
+- The apex is found automatically, by the same rule as **Compute UVC**, so the
+  two place the apex in the same spot: the LV-endocardial node farthest from
+  the centre of the base, then the epicardial node nearest it. That epicardial
+  node is the apex here (see [Universal ventricular coordinates](uvc.md)).
 - The apex node is widened to a **patch**: the epicardial nodes within 2 mm
   of it, never a base node. A single held node would put a point singularity
   in the apex-to-base field. The apex nodes are marked in yellow.
@@ -77,6 +79,10 @@ conservation check, and how many elements were rebuilt from their neighbours
     labels and apex reuses them and only rebuilds the frames: on the
     2.9-million-element mesh, 19 s instead of about 45 s; on the
     148,000-element example, about 1 s.
+
+    A new apex on the same mesh and labels reuses the three transmural fields,
+    which do not depend on the apex, and solves only the apex-to-base field
+    again. The report says which fields were reused.
 
 ## What is written
 
@@ -206,7 +212,7 @@ off.
 ## Choosing the apex
 
 The apex changes the apex-to-base field, and with it the fibres, mostly near the
-apex. On the 2.9-million-element mesh, the automatic apex lies 6 mean edges
-(about 5.6 mm) from the apex its universal ventricular coordinates use. The
-fibres then differ from those built with that apex by a median of 1.2°, and by up
-to 18° for the 1% nearest the apex. If you have a preferred apex, pick it.
+apex: moving the patch by a few millimetres changes the fibres by about a degree
+over most of the heart and by more within a centimetre of the apex. The
+automatic apex is the one **Compute UVC** uses, so fibres and coordinates on the
+same mesh agree on where the apex is. If you have a preferred apex, pick it.

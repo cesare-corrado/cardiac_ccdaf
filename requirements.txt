@@ -2,6 +2,9 @@ numpy>=1.23
 scipy>=1.10
 # Algebraic multigrid preconditioner for the fibre Laplace solves (MIT).
 pyamg>=5.4
+# Compiles the geodesic-distance solver behind the ventricular coordinates
+# (BSD). Each numba release caps the numpy it supports.
+numba>=0.68
 vtk>=9.2
 pyvista>=0.43
 pyvistaqt>=0.11
