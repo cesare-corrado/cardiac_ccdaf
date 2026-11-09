@@ -182,6 +182,80 @@ def test_a_zero_gradient_is_rebuilt_from_its_neighbours():
     assert np.allclose(fixed[target], [1.0, 0.0, 0.0])
 
 
+def _reference_degenerate(tets, fields, grads, rtol=1e-8, parallel_sine=1e-6):
+    """The all-at-once construction the block-by-block one must match."""
+    from ccdaf.core.ldrb import _EPS, _NEGLIGIBLE, _centroid, _norm, _scale, _unit
+    epi, lv, rv = (_centroid(fields[k], tets) for k in ("epi", "lv", "rv"))
+    ds = rv / np.where(lv + rv < _EPS, 1.0, lv + rv)
+    used = {"ab": np.ones(len(tets), dtype=bool), "epi": epi > _NEGLIGIBLE,
+            "lv": (1.0 - epi) * (1.0 - ds) > _NEGLIGIBLE, "rv": (1.0 - epi) * ds > _NEGLIGIBLE}
+    bad = np.zeros(len(tets), dtype=bool)
+    for k, g in grads.items():
+        bad |= used[k] & (_norm(g) < rtol * _scale(g))
+    a = _unit(grads["ab"])
+    for k in ("epi", "lv", "rv"):
+        bad |= used[k] & (_norm(np.cross(a, _unit(grads[k]))) < parallel_sine)
+    return bad
+
+
+def _reference_repair(tets, grad, volume, n_points, targets, rtol=1e-8, passes=5):
+    """The whole-mesh construction the neighbourhood one must match."""
+    import scipy.sparse as sp
+    from ccdaf.core.ldrb import _norm, _scale
+    grad = np.array(grad, dtype=float, copy=True)
+    floor = rtol * _scale(grad)
+    source = ~targets & (_norm(grad) >= floor)
+    missing = targets.copy()
+    incidence = sp.csr_matrix((np.ones(4 * len(tets)), (tets.ravel(), np.repeat(np.arange(len(tets)), 4))),
+                              shape=(n_points, len(tets)))
+    for _ in range(passes):
+        if not missing.any():
+            break
+        weight = np.where(source, volume, 0.0)
+        node = (incidence @ (weight[:, None] * grad)) / np.maximum(incidence @ weight, 1e-300)[:, None]
+        node[(incidence @ weight) <= 0.0] = 0.0
+        idx = np.where(missing)[0]
+        cand = node[tets[idx]].mean(axis=1)
+        found = _norm(cand) >= floor
+        grad[idx[found]] = cand[found]
+        missing[idx[found]] = False
+        source[idx[found]] = True
+    return grad, missing
+
+
+def test_finding_undefined_frames_block_by_block_matches_all_at_once(oracle):
+    d, fields = oracle
+    tets = d["tets"]
+    g = {k: element_gradients(d["points"], tets, fields[k]) for k in fields}
+    ref = _reference_degenerate(tets, fields, g)
+    assert ref.any()
+    for chunk in (37, 1000, len(tets)):
+        assert np.array_equal(degenerate_elements(tets, fields, g, chunk=chunk), ref)
+
+
+def test_the_neighbourhood_repair_matches_the_whole_mesh_one(oracle):
+    from ccdaf.core.ldrb import repair_in_place
+    d, fields = oracle
+    tets, pts = d["tets"], d["points"]
+    basis, volume = basis_gradients(pts, tets)
+    g = {k: np.einsum("nij,nj->ni", basis, fields[k][tets]) for k in fields}
+    targets = degenerate_elements(tets, fields, g)
+    assert targets.any()
+    expected = {k: _reference_repair(tets, g[k], volume, len(pts), targets) for k in g}
+    missing = repair_in_place(tets, g, volume, len(pts), targets)
+    for k in g:
+        assert np.allclose(g[k], expected[k][0], rtol=0, atol=1e-12)
+        assert np.array_equal(missing[k], expected[k][1])
+
+
+def test_the_fibres_do_not_depend_on_the_block_size(oracle):
+    d, fields = oracle
+    a = fibres(d["points"], d["tets"], fields)
+    b = fibres(d["points"], d["tets"], fields, chunk=53)
+    assert np.array_equal(a.fibre, b.fibre) and np.array_equal(a.sheet, b.sheet)
+    assert np.array_equal(a.repaired, b.repaired)
+
+
 # ---------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------
