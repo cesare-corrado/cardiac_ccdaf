@@ -43,6 +43,8 @@ from typing import Mapping, Optional
 import numpy as np
 import pyvista as pv
 
+from ccdaf.io.carto_egm import pack_egm
+
 
 EXPORT_BINARY = "binary"
 EXPORT_VTK = "vtk"
@@ -115,7 +117,7 @@ def electrodes_at(electrodes: Optional[dict],
 #: Payload keys ``export_binary`` writes itself. A point set may not
 #: claim one of them: the collision would silently replace the surface
 #: or the electrodes with a name → xyz mapping.
-_RESERVED_KEYS = frozenset(("surface", "electrodes", "elemTag", "cell_fields"))
+_RESERVED_KEYS = frozenset(("surface", "electrodes", "elemTag", "cell_fields", "egm"))
 
 
 def _plain_seeds(seeds) -> dict:
@@ -134,7 +136,8 @@ def export_binary(path: str, mesh: pv.PolyData,
                   electrode_points: Optional[np.ndarray] = None,
                   point_sets: Optional[Mapping[str, dict]] = None,
                   include_elem_tag: bool = False,
-                  cell_fields: Optional[Mapping[str, np.ndarray]] = None) -> None:
+                  cell_fields: Optional[Mapping[str, np.ndarray]] = None,
+                  egm: Optional[dict] = None) -> None:
     """Pickle ``{'surface': <reader dict>, 'electrodes': <record>}``.
 
     ``cell_fields`` maps a cell field's name to its values — ``tissueTag``
@@ -154,8 +157,13 @@ def export_binary(path: str, mesh: pv.PolyData,
     ``['surface']``/``['electrodes']`` and ignores the rest, so the extra
     keys stay compatible.
 
+    ``egm`` is the electrogram dictionary of :mod:`ccdaf.io.carto_egm`. It
+    is written under an ``"egm"`` key, traces zlib-compressed, only when
+    given, so a bundle without electrograms is exactly as before.
+
     A key colliding with the payload's own (``surface``, ``electrodes``,
-    ``elemTag``) is rejected rather than allowed to overwrite it.
+    ``elemTag``, ``cell_fields``, ``egm``) is rejected rather than allowed
+    to overwrite it.
     """
     payload = {
         "surface": polydata_to_carto_dict(mesh),
@@ -181,6 +189,8 @@ def export_binary(path: str, mesh: pv.PolyData,
         extra[str(name)] = values
     if extra:
         payload["cell_fields"] = extra
+    if egm is not None:
+        payload["egm"] = pack_egm(egm)
     with open(path, "wb") as fh:
         pickle.dump(payload, fh)
 

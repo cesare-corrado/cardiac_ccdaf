@@ -79,8 +79,9 @@ def test_bundle_round_trip(tmp_path):
     mesh = _mesh()
     export_binary(path, mesh, point_sets={LA: SEEDS}, include_elem_tag=True)
 
-    back, point_sets, electrodes = read_bundle(path)
+    back, point_sets, electrodes, egm = read_bundle(path)
     seeds = point_sets[SEED_LA_PROFILE.type_id]
+    assert egm is None                        # no electrograms given, none read
     assert back.n_points == mesh.n_points
     assert back.n_cells == mesh.n_cells
     assert electrodes is None
@@ -107,7 +108,7 @@ def test_field_selection_governs_the_surface(tmp_path):
     mesh = _mesh()
     mesh.point_data.remove("LAT")
     export_binary(path, mesh, include_elem_tag=True)
-    back, _, _ = read_bundle(path)
+    back, _, _, _ = read_bundle(path)
     assert "LAT" not in back.point_data
 
 
@@ -117,7 +118,7 @@ def test_electrodes_round_trip(tmp_path):
                                 [1.0, 0.0, 5.0, 0.0, 43.0]])}
     pts = np.array([[5.0, 0.0, 0.0], [0.0, 5.0, 0.0]])
     export_binary(path, _mesh(), electrodes=record, electrode_points=pts)
-    _, _, electrodes = read_bundle(path)
+    _, _, electrodes, _ = read_bundle(path)
     assert electrodes is not None
     assert np.allclose(np.asarray(electrodes["data"])[:, 1:4], pts)
 
@@ -133,7 +134,7 @@ def test_landmarks_round_trip_alongside_seeds(tmp_path):
     assert LA in payload and UAC in payload
     assert "seeds" not in payload      # new files use the new spelling
 
-    _, point_sets, _ = read_bundle(path)
+    _, point_sets, _, _ = read_bundle(path)
     seeds = point_sets[SEED_LA_PROFILE.type_id]
     landmarks = point_sets[LANDMARKS_LA_UAC_PROFILE.type_id]
     assert set(seeds) == set(SEEDS)
@@ -159,7 +160,7 @@ def test_empty_sets_are_not_written(tmp_path):
 def test_reserved_keys_are_refused(tmp_path):
     """A point set cannot overwrite the payload's own keys."""
     path = tmp_path / "clash.pkl"
-    for key in ("surface", "electrodes", "elemTag"):
+    for key in ("surface", "electrodes", "elemTag", "egm"):
         with pytest.raises(ValueError):
             export_binary(path, _mesh(), point_sets={key: SEEDS})
 
@@ -178,7 +179,7 @@ def test_legacy_seeds_key_is_read_as_seed_la(tmp_path):
     with open(path, "wb") as fh:
         pickle.dump(payload, fh)
 
-    _, point_sets, _ = read_bundle(path)
+    _, point_sets, _, _ = read_bundle(path)
     seeds = point_sets[SEED_LA_PROFILE.type_id]
     assert set(seeds) == set(SEEDS)
     assert np.allclose(seeds["MV"], SEEDS["MV"])
@@ -220,7 +221,7 @@ def test_cell_fields_round_trip(tmp_path):
     tissue = (np.arange(mesh.n_cells) % 3).astype(np.int32)
     export_binary(path, mesh, point_sets={LA: SEEDS}, include_elem_tag=True,
                   cell_fields={"tissueTag": tissue})
-    back, point_sets, _ = read_bundle(path)
+    back, point_sets, _, _ = read_bundle(path)
     assert np.array_equal(np.asarray(back.cell_data["tissueTag"]), tissue)
     assert np.array_equal(np.asarray(back.cell_data["elemTag"]),
                           np.asarray(mesh.cell_data["elemTag"]))
@@ -233,7 +234,7 @@ def test_a_bundle_without_cell_fields_loads_as_before(tmp_path):
     with open(path, "rb") as fh:
         payload = pickle.load(fh)
     assert "cell_fields" not in payload
-    back, _, _ = read_bundle(path)
+    back, _, _, _ = read_bundle(path)
     assert set(back.cell_data.keys()) == {"elemTag"}
 
 
@@ -259,7 +260,7 @@ def test_cell_fields_never_override_elem_tag(tmp_path):
     payload["cell_fields"]["elemTag"] = np.zeros(mesh.n_cells, dtype=np.int32)
     with open(path, "wb") as fh:
         pickle.dump(payload, fh)
-    back, _, _ = read_bundle(path)
+    back, _, _, _ = read_bundle(path)
     assert np.array_equal(np.asarray(back.cell_data["elemTag"]),
                           np.asarray(mesh.cell_data["elemTag"]))
 
