@@ -94,9 +94,11 @@ from ccdaf.gui.save_mesh_dialog import SaveMeshDialog, FORMAT_PICKLE
 from ccdaf.gui.eam_export_dialog import EAMExportDialog
 from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
 from ccdaf.io.carto_egm import (
-    egm_positions, load_carto_egm, scan_carto_egm, set_egm_positions,
+    egm_positions, load_carto_egm, nearest_bipole, placement_bipoles,
+    scan_carto_egm, set_egm_positions,
 )
 from ccdaf.gui.egm_channel_dialog import EGMChannelDialog
+from ccdaf.gui.egm_panel import EGMPanel
 from ccdaf.io.carto_functions import extract_map_list_names
 from ccdaf.core.eam_loader import (
     EAMData, load_carto_mapping, displace_electrodes_for, read_bundle,
@@ -214,6 +216,16 @@ EAM_ABOVE_COLOR = "magenta"
 # EAM electrodes, drawn as Gaussian points.
 EAM_ELECTRODE_COLOR = (100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0)
 EAM_ELECTRODE_RADIUS_FRAC = 0.008     # of the mesh's bounding-box diagonal
+# Electrogram view: the picked placement's bipoles, at their first electrode.
+# Blue = a _car.txt point, red = not a point. Both are bigger than the grey
+# electrode blobs so they sit on top of them, and carry a thick black outline
+# so they stay visible on the strong blues and reds of a colour map.
+EGM_POINT_COLOR = "#1f5fd6"
+EGM_NOPOINT_COLOR = "#d62728"
+EGM_SPHERE_SCALE = 1.3       # x the electrode radius
+EGM_PICKED_SCALE = 2.0       # x the electrode radius, for the picked bipole
+EGM_OUTLINE_PX = 5           # outline width, pixels
+EGM_ARROW_SCALE = 3.0        # direction arrow length, x the picked radius
 
 
 #: Below this share of what it started with, a morphological operation is
@@ -314,6 +326,17 @@ class CCDAF(QtWidgets.QMainWindow):
         # to — a re-render rebuilds the bar, and would otherwise reset it.
         self._eam_bar_title: Optional[str] = None
         self._eam_bar_geom = None
+        # Electrogram view: the selected (placement, bipole), whether the
+        # electrode picker is live, and the widths the right panel and the
+        # left control panel had when last hidden.
+        self._egm_sel: Optional[Tuple[int, int]] = None
+        self._egm_picking = False
+        # Every actor the selection drew, outlines included: pyvista adds a
+        # silhouette as its own unnamed actor, so removing by name alone
+        # would leave the outlines behind.
+        self._egm_actors: list = []
+        self._egm_panel_width = 0
+        self._control_width = 0
 
         # ---- segmentation state ----------------------------------------
         self._seg_sitk: Optional[sitk.Image] = None
@@ -495,6 +518,22 @@ class CCDAF(QtWidgets.QMainWindow):
 
         # Visualise menu — toggles the left-panel sections.
         self.visualise_menu = menubar.addMenu("&Visualise")
+        self.act_control_panel = QtWidgets.QAction("Control panel", self)
+        self.act_control_panel.setCheckable(True)
+        self.act_control_panel.setChecked(True)
+        self.act_control_panel.setToolTip(
+            "Show or hide the whole left panel, to give the views more room.")
+        self.act_control_panel.toggled.connect(self._set_control_panel_visible)
+        self.visualise_menu.addAction(self.act_control_panel)
+        self.act_egm_view = QtWidgets.QAction("Electrograms", self)
+        self.act_egm_view.setCheckable(True)
+        self.act_egm_view.setEnabled(False)
+        self.act_egm_view.setToolTip(
+            "Show the electrogram panel beside the 3D view (needs a map loaded "
+            "with electrograms).")
+        self.act_egm_view.toggled.connect(self._set_egm_view)
+        self.visualise_menu.addAction(self.act_egm_view)
+        self.visualise_menu.addSeparator()
 
         # --- Help menu -------------------------------------------------
         help_menu = menubar.addMenu("&Help")
@@ -550,6 +589,15 @@ class CCDAF(QtWidgets.QMainWindow):
         side = QtWidgets.QWidget()
         side_scroll.setWidget(side)
         self._splitter.addWidget(side_scroll)
+        # The electrogram panel lives right of the plotter (which is inserted
+        # between the two), shown only by a view that names it.
+        self.egm_panel = EGMPanel()
+        self.egm_panel.setMinimumWidth(320)
+        self.egm_panel.pick_toggled.connect(self._on_egm_pick_toggled)
+        self.egm_panel.bipole_clicked.connect(self._on_egm_bipole_clicked)
+        self.egm_panel.direction_toggled.connect(self._on_egm_direction_toggled)
+        self.egm_panel.hide()
+        self._splitter.addWidget(self.egm_panel)
         v = QtWidgets.QVBoxLayout(side)
         v.setAlignment(QtCore.Qt.AlignTop)
 
@@ -661,6 +709,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.vis_widget = VisualisationWidget()
         self.vis_widget.settings_changed.connect(self._render_field)
         self.vis_widget.electrodes_toggled.connect(self._on_electrodes_toggled)
+        self.vis_widget.opacity_changed.connect(self._on_surface_opacity_changed)
         self.vis_widget.fibres_changed.connect(self._render_fibres)
         body = self._register_section(v, "visualisation", "Visualisation")
         body.addWidget(self.vis_widget)
@@ -774,11 +823,13 @@ class CCDAF(QtWidgets.QMainWindow):
         # From here the live plotter is the new view — the single write site.
         self._view = spec
         self.plotter.interactor.setMinimumSize(480, 360)
-        self._splitter.addWidget(self.plotter.interactor)
+        self._splitter.insertWidget(1, self.plotter.interactor)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
+        self._splitter.setStretchFactor(2, 0)
         rest = max(self._splitter.width() - side_w, self.plotter.interactor.minimumWidth())
-        self._splitter.setSizes([side_w, rest])
+        self._splitter.setSizes([side_w, rest, 0])
+        self._sync_side_panel()
 
         # The X key has one owner: the app. PV clipping and manual correction
         # both want it, and when each bound it itself, whoever came last won —
@@ -1092,6 +1143,9 @@ class CCDAF(QtWidgets.QMainWindow):
     def _enter_segmentation_mode(self) -> None:
         if self._view.name == "segmentation":
             return
+        if self._view.name == "egm":
+            self.act_egm_view.setChecked(False)      # back to general first
+        self.act_egm_view.setEnabled(False)
         # Force-stop any active mesh-side picker — its callbacks are bound
         # to the plotter we're about to destroy.
         self._teardown_mesh_tools(rebuild_clipper=False)
@@ -1114,6 +1168,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self._render_field()
             self.plotter.reset_camera()
             self._build_mesh_tools()
+        self._sync_egm_action()
 
     def _teardown_mesh_tools(self, *, rebuild_clipper: bool) -> None:
         """Drop refs to selector/editor/clipper bound to the old plotter."""
@@ -1205,6 +1260,11 @@ class CCDAF(QtWidgets.QMainWindow):
             if self._fibre_dialog is not None:
                 self._fibre_dialog.uncheck_pick()
             stopped.append("apex picking")
+
+        if keep != "egm" and self._egm_picking:
+            self._egm_picking = False
+            self.egm_panel.set_pick_checked(False)
+            stopped.append("electrode picking")
 
         if keep != "uvc_apex" and self._uvc_picking:
             self._uvc_picking = False
@@ -1461,6 +1521,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 egm=egm,
             )
             self._eam_electrode_points = elec_points
+            self._on_egm_available()
             self.vis_widget.set_electrodes_available(True)
             self.act_eam_export.setEnabled(True)
             self._render_field()
@@ -1491,6 +1552,11 @@ class CCDAF(QtWidgets.QMainWindow):
 
     def _reset_eam_state(self) -> None:
         """Drop any loaded mapping's state — a fresh non-EAM mesh has none."""
+        if self._view.name == "egm":
+            self.act_egm_view.setChecked(False)
+        self._egm_sel = None
+        self.egm_panel.set_egm(None)
+        self.act_egm_view.setEnabled(False)
         self._eam_data = None
         self._eam_electrode_points = None
         self._eam_electrode_actor = None
@@ -1905,6 +1971,7 @@ class CCDAF(QtWidgets.QMainWindow):
         QtWidgets.QApplication.restoreOverrideCursor()
 
         self._eam_data.egm = egm
+        self._on_egm_available()
         n_place, n_ch, _ = egm["traces"].shape
         self.statusBar().showMessage(
             f"Electrograms: {n_place} catheter placements, {n_ch} channels.")
@@ -1913,6 +1980,210 @@ class CCDAF(QtWidgets.QMainWindow):
                 self, "Electrograms",
                 "Electrograms loaded, with these notes:\n\n• "
                 + "\n• ".join(egm["warnings"]))
+
+    # ==================================================================
+    # Electrogram view
+    # ==================================================================
+    def _egm(self) -> Optional[dict]:
+        return self._eam_data.egm if self._eam_data is not None else None
+
+    def _sync_egm_action(self) -> None:
+        """Electrograms can be shown from the 3D views, once there are some."""
+        self.act_egm_view.setEnabled(
+            self._egm() is not None and self._view.name in ("general", "egm"))
+
+    def _on_egm_available(self) -> None:
+        """A map with electrograms is now loaded: hand them to the panel."""
+        egm = self._egm()
+        if egm is None:
+            return
+        self._egm_sel = None
+        lat = None
+        rec = self._eam_data.electrodes
+        if rec is not None:
+            data = np.asarray(rec.get("data"), dtype=float)
+            names = list(rec.get("Names", []))
+            if data.ndim == 2 and "LAT" in names:
+                lat = data[:, names.index("LAT")]
+        self.egm_panel.set_egm(egm, lat)
+        self._sync_egm_action()
+
+    def _sync_side_panel(self) -> None:
+        """Show the side panel the current view names, at a sensible width.
+
+        Hiding it remembers its width, so it comes back as the user left it.
+        """
+        sizes = self._splitter.sizes()
+        want = self._view.side_panel == "egm"
+        if not want:
+            if self.egm_panel.isVisible() and len(sizes) > 2 and sizes[2] > 0:
+                self._egm_panel_width = sizes[2]
+            self.egm_panel.hide()
+            return
+        self.egm_panel.show()
+        total = sum(sizes)
+        ctrl = sizes[0] if self._side_scroll.isVisible() else 0
+        width = self._egm_panel_width or max(420, int(0.45 * (total - ctrl)))
+        width = min(width, max(total - ctrl - 300, 320))
+        self._splitter.setSizes([ctrl, max(total - ctrl - width, 300), width])
+
+    def _set_control_panel_visible(self, on: bool) -> None:
+        """Visualise → Control panel: hide or show the whole left panel."""
+        sizes = self._splitter.sizes()
+        if not on:
+            if self._side_scroll.isVisible() and sizes[0] > 0:
+                self._control_width = sizes[0]
+            self._side_scroll.hide()
+            return
+        self._side_scroll.show()
+        width = self._control_width or self._side_width
+        sizes = self._splitter.sizes()
+        sizes[1] = max(sizes[1] - max(width - sizes[0], 0), 300)
+        sizes[0] = width
+        self._splitter.setSizes(sizes)
+
+    def _set_egm_view(self, on: bool) -> None:
+        """Visualise → Electrograms: switch between the general and egm views.
+
+        Both views use the same plotter, so this swaps the side panel only:
+        the camera, the field and the electrodes stay as they are.
+        """
+        target = VIEWS["egm" if on else "general"]
+        if self._view.name == target.name:
+            return
+        if not self._view.same_plotter(target):
+            # Only reachable from a view with another layout (segmentation),
+            # where the action is disabled; refuse rather than half-switch.
+            self.act_egm_view.blockSignals(True)
+            self.act_egm_view.setChecked(self._view.name == "egm")
+            self.act_egm_view.blockSignals(False)
+            return
+        if not on:
+            self._stop_egm_picking()
+        # The second write site of _view (after _build_plotter): legitimate
+        # only because the plotter is unchanged.
+        self._view = target
+        self._sync_side_panel()
+        self._draw_egm_selection()
+        if self.plotter is not None:
+            self.plotter.render()
+        if on and self._egm_sel is None:
+            self.statusBar().showMessage(
+                "Electrograms: press 'Pick electrode', then click near an electrode.")
+
+    def _on_egm_pick_toggled(self, on: bool) -> None:
+        if not on:
+            self._stop_egm_picking()
+            return
+        if self.plotter is None or self._egm() is None:
+            self.egm_panel.set_pick_checked(False)
+            return
+        self._focus_3d()
+        self._take_picker("egm")
+        try:
+            self.plotter.enable_point_picking(
+                callback=self._on_egm_pick, picker="hardware",
+                use_picker=True, show_message=False, show_point=False,
+                pickable_window=False, left_clicking=True)
+        except Exception as exc:
+            self.egm_panel.set_pick_checked(False)
+            QtWidgets.QMessageBox.warning(
+                self, "Electrograms", f"Could not start picking:\n{exc}")
+            return
+        self._egm_picking = True
+        self.statusBar().showMessage(
+            "Click near an electrode; its placement's electrograms are shown.")
+
+    def _stop_egm_picking(self) -> None:
+        if self._egm_picking:
+            self._egm_picking = False
+            try:
+                self.plotter.disable_picking()
+            except Exception:
+                pass
+        self.egm_panel.set_pick_checked(False)
+
+    def _on_egm_pick(self, point, *_args, **_kwargs) -> None:
+        egm = self._egm()
+        if egm is None or point is None:
+            return
+        target = nearest_bipole(
+            egm, np.asarray(point, dtype=float), car_points=self._eam_electrode_points,
+            placement=self._egm_sel[0] if self._egm_sel else None)
+        if target is not None:
+            self._egm_select(*target)
+
+    def _on_egm_direction_toggled(self, _on: bool) -> None:
+        """Show bipole (EGM panel): draw or drop the direction arrow."""
+        self._draw_egm_selection()
+        if self.plotter is not None:
+            self.plotter.render()
+
+    def _on_egm_bipole_clicked(self, bipole: int) -> None:
+        """A trace group was clicked in the panel: select that bipole."""
+        if self._egm_sel is not None:
+            self._egm_select(self._egm_sel[0], bipole)
+
+    def _egm_select(self, placement: int, bipole: int) -> None:
+        self._egm_sel = (int(placement), int(bipole))
+        self.egm_panel.show_bipole(*self._egm_sel)
+        self._draw_egm_selection()
+        if self.plotter is not None:
+            self.plotter.render()
+
+    def _draw_egm_selection(self) -> None:
+        """Draw the selected placement's bipoles: blue (point) / red (not),
+        the picked one larger with an arrow along its direction.
+
+        Only the current placement is drawn; another placement replaces it.
+        """
+        if self.plotter is None:
+            return
+        for actor in self._egm_actors:
+            try:
+                self.plotter.remove_actor(actor, reset_camera=False)
+            except Exception:
+                pass
+        self._egm_actors = []
+        egm = self._egm()
+        if (egm is None or self._egm_sel is None or self._view.name != "egm"
+                or self.loader.mesh is None):
+            return
+        self._focus_3d()
+        ip, sel = self._egm_sel
+        first, second, has_point = placement_bipoles(egm, ip)
+        b = self.loader.mesh.bounds
+        diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
+        r = max(EAM_ELECTRODE_RADIUS_FRAC * diag, 1e-6)
+        known = np.isfinite(first).all(axis=1)
+
+        def outlined(mesh, color):
+            self._egm_actors.append(self.plotter.add_mesh(
+                mesh, color=color, pickable=False, reset_camera=False))
+            self._egm_actors.append(self.plotter.add_silhouette(
+                mesh, color="black", line_width=EGM_OUTLINE_PX))
+
+        def spheres(mask, radius, color):
+            idx = np.nonzero(mask)[0]
+            if len(idx):
+                outlined(pv.PolyData(first[idx]).glyph(
+                    geom=pv.Sphere(radius=radius), scale=False, orient=False), color)
+
+        others = known.copy()
+        if 0 <= sel < len(others):
+            others[sel] = False
+        spheres(others & has_point, EGM_SPHERE_SCALE * r, EGM_POINT_COLOR)
+        spheres(others & ~has_point, EGM_SPHERE_SCALE * r, EGM_NOPOINT_COLOR)
+        if 0 <= sel < len(known) and known[sel]:
+            picked = np.zeros(len(known), dtype=bool)
+            picked[sel] = True
+            spheres(picked, EGM_PICKED_SCALE * r,
+                    EGM_POINT_COLOR if has_point[sel] else EGM_NOPOINT_COLOR)
+            d = second[sel] - first[sel]
+            n = float(np.linalg.norm(d))
+            if self.egm_panel.show_direction() and np.isfinite(n) and n > 0:
+                outlined(pv.Arrow(start=first[sel], direction=d / n,
+                                  scale=EGM_ARROW_SCALE * EGM_PICKED_SCALE * r), "white")
 
     def _clear_scalar_bars(self) -> None:
         """Drop every scalar bar on the plotter.
@@ -2180,11 +2451,16 @@ class CCDAF(QtWidgets.QMainWindow):
     def _draw_electrodes(self) -> None:
         """(Re)draw the EAM electrode positions as Gaussian points.
 
+        Also redraws the electrogram view's picked placement, so a field
+        change, which rebuilds the scene, keeps it.
+
         ``points_gaussian`` is pyvista's equivalent of ParaView's Point
         Gaussian representation; spheres are its sphere shader preset. The
         default gaussian-blur preset washes the electrodes out against the
         surface, leaving them visible only where they overhang the background.
         """
+        self._apply_surface_opacity()
+        self._draw_egm_selection()
         try:
             self.plotter.remove_actor("eam_electrodes", reset_camera=False)
         except Exception:
@@ -2210,6 +2486,35 @@ class CCDAF(QtWidgets.QMainWindow):
             render_points_as_spheres=True, name="eam_electrodes",
             reset_camera=False, pickable=False,
         )
+
+    def _apply_surface_opacity(self) -> None:
+        """Make the surface see-through by the Visualisation panel's Opacity,
+        so electrodes inside the chamber show; capped at
+        ``FIBRE_SURFACE_OPACITY`` while fibres are shown.
+
+        Depth peeling is what sorts translucent layers correctly; it costs
+        frame time, so it is on only while the surface is translucent.
+        """
+        if self.plotter is None or self._mesh_actor is None:
+            return
+        alpha = self.vis_widget.surface_opacity()
+        # Shown fibres need the wall faded at least this much; a lower slider
+        # setting still wins.
+        if self.loader.kind == VOLUME and self.vis_widget.show_fibres():
+            alpha = min(alpha, FIBRE_SURFACE_OPACITY)
+        try:
+            self._mesh_actor.prop.opacity = alpha
+            if alpha < 1.0:
+                self.plotter.enable_depth_peeling()
+            else:
+                self.plotter.disable_depth_peeling()
+        except Exception:
+            pass
+
+    def _on_surface_opacity_changed(self, _alpha: float) -> None:
+        self._apply_surface_opacity()
+        if self.plotter is not None:
+            self.plotter.render()
 
     def _on_electrodes_toggled(self, _on: bool) -> None:
         """Show/hide the electrode actor without re-rendering the field.
@@ -3992,15 +4297,12 @@ class CCDAF(QtWidgets.QMainWindow):
         self.plotter.render()
 
     def _apply_fibre_see_through(self) -> None:
-        """Fade the surface while fibres are shown, so the wall is visible."""
-        actor = self._mesh_actor
-        if actor is None:
-            return
-        shown = (self.loader.kind == VOLUME and self.vis_widget.show_fibres())
-        try:
-            actor.GetProperty().SetOpacity(FIBRE_SURFACE_OPACITY if shown else 1.0)
-        except Exception:
-            pass
+        """Fade the surface while fibres are shown, so the wall is visible.
+
+        One rule sets the surface opacity (see :meth:`_apply_surface_opacity`),
+        so the fibres and the Opacity slider never overwrite each other.
+        """
+        self._apply_surface_opacity()
 
     def _action_export_carp(self) -> None:
         """Export → Carp: write the working mesh as CARP files."""

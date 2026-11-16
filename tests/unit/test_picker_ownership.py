@@ -115,7 +115,7 @@ def test_every_ordered_pairing_survives(mesh, plotter):
 
 
 def _host(*, snake=False, selecting=False, clip=False, seeds=False, apex=False,
-          uvc=False):
+          uvc=False, egm=False):
     """Stand-in carrying just what ``_release_picker`` touches."""
     host = MagicMock()
     host.editor.snake_active = snake
@@ -127,6 +127,7 @@ def _host(*, snake=False, selecting=False, clip=False, seeds=False, apex=False,
     host._seed_sel = sel
     host._apex_picking = apex
     host._uvc_picking = uvc
+    host._egm_picking = egm
     return host
 
 
@@ -212,6 +213,7 @@ def test_release_without_tools_does_not_crash():
     host.clipper = None
     host._apex_picking = False
     host._uvc_picking = False
+    host._egm_picking = False
     assert CCDAF._release_picker(host) == []
 
 
@@ -358,3 +360,19 @@ def test_uvc_apex_picking_survives_taking_the_picker_for_itself():
     host = _host(uvc=True)
     assert CCDAF._release_picker(host, keep="uvc_apex") == []
     assert host._uvc_picking is True
+
+
+def test_electrode_picking_is_stopped_and_its_button_put_back():
+    """The electrogram view's electrode pick is one more holder."""
+    from ccdaf.app.ccdaf import CCDAF
+    host = _host(egm=True)
+    assert CCDAF._release_picker(host) == ["electrode picking"]
+    assert host._egm_picking is False
+    host.egm_panel.set_pick_checked.assert_called_once_with(False)
+
+
+def test_electrode_picking_survives_taking_the_picker_for_itself():
+    from ccdaf.app.ccdaf import CCDAF
+    host = _host(egm=True)
+    assert CCDAF._release_picker(host, keep="egm") == []
+    assert host._egm_picking is True

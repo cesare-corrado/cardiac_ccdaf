@@ -13,6 +13,13 @@ A locator is whatever ``plotter.subplot(*locator)`` accepts: ``(row, col)``
 for grid shapes, a single index ``(i,)`` for pyvista's string shapes such
 as ``"1|2"`` (one pane left, two stacked right). Adding a multi-view task
 is therefore a new entry in :data:`VIEWS`, not a new flag or code path.
+
+A view may also name a **side panel**: a Qt widget shown to the right of the
+plotter, for content a VTK pane draws poorly (the electrogram traces of the
+``egm`` view). The host owns the widget; the spec only says which one the view
+shows. Two views whose plotter layout is the same (``shape``, ``roles``,
+``groups``, ``titles``) differ only in that panel, so switching between them
+keeps the plotter and its actors (:meth:`ViewSpec.same_plotter`).
 """
 
 from __future__ import annotations
@@ -30,10 +37,17 @@ class ViewSpec:
     roles: Mapping[str, Tuple[int, ...]]  # role -> subplot locator, all panes
     titles: Mapping[str, str] = field(default_factory=dict)  # role -> title
     groups: Optional[Sequence] = None    # passed verbatim when present
+    side_panel: Optional[str] = None     # host widget shown right of the plotter
 
     @property
     def is_multiview(self) -> bool:
         return len(self.roles) > 1
+
+    def same_plotter(self, other: "ViewSpec") -> bool:
+        """True when *other* needs exactly this plotter (side panels aside)."""
+        return (self.shape == other.shape and dict(self.roles) == dict(other.roles)
+                and self.groups == other.groups
+                and dict(self.titles) == dict(other.titles))
 
 
 def title_actor_name(locator: Tuple[int, ...]) -> str:
@@ -51,6 +65,14 @@ VIEWS: Mapping[str, ViewSpec] = {
         name="general",
         shape=(1, 1),
         roles={"3d": (0, 0)},
+    ),
+    # The general 3D view plus the electrograms of the picked electrode's
+    # catheter placement on the right.
+    "egm": ViewSpec(
+        name="egm",
+        shape=(1, 1),
+        roles={"3d": (0, 0)},
+        side_panel="egm",
     ),
     "segmentation": ViewSpec(
         name="segmentation",
