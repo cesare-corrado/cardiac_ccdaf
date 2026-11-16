@@ -567,3 +567,58 @@ def set_egm_positions(egm: Optional[dict], points: np.ndarray) -> None:
         i += n
     if i != len(points):
         raise ValueError("more positions than the catheters hold")
+
+
+def mapping_catheter(egm: Optional[dict]) -> Optional[dict]:
+    """The mapping catheter's entry of ``egm['catheters']`` (the first one)."""
+    if not egm or not egm.get("catheters"):
+        return None
+    return next(iter(egm["catheters"].values()))
+
+
+def placement_bipoles(egm: dict, placement: int
+                      ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The bipoles of one placement: ``(first, second, has_point)``.
+
+    *first* / *second* are (n_bipoles, 3) positions of each bipole's two
+    electrodes (NaN where unknown); *has_point* is True where the bipole is a
+    ``_car.txt`` point at this placement.
+    """
+    cat = mapping_catheter(egm)
+    pos = np.asarray(cat["positions"][placement], dtype=float)
+    pairs = np.asarray(cat["bipole_electrodes"], dtype=int).reshape(-1, 2)
+    return pos[pairs[:, 0]], pos[pairs[:, 1]], cat["point_link"][placement] >= 0
+
+
+def nearest_bipole(egm: dict, xyz: Sequence[float],
+                   car_points: Optional[np.ndarray] = None,
+                   placement: Optional[int] = None) -> Optional[Tuple[int, int]]:
+    """``(placement, bipole)`` nearest to *xyz* among the pickable ones.
+
+    Pickable: every bipole that is a ``_car.txt`` point (at its row of
+    *car_points*, the electrode positions as displayed; without them, at its
+    catheter position), plus every bipole of *placement*, the one on show.
+    """
+    cat = mapping_catheter(egm)
+    if cat is None:
+        return None
+    link = np.asarray(cat["point_link"])
+    ip, ib = np.nonzero(link >= 0)
+    if car_points is not None and len(car_points):
+        rows = link[ip, ib]
+        ok = rows < len(car_points)
+        ip, ib, cand = ip[ok], ib[ok], np.asarray(car_points, dtype=float)[rows[ok]]
+    else:
+        e1 = np.asarray(cat["bipole_electrodes"])[ib, 0]
+        cand = np.asarray(cat["positions"], dtype=float)[ip, e1]
+    keys = list(zip(ip.tolist(), ib.tolist()))
+    if placement is not None:
+        first, _, _ = placement_bipoles(egm, placement)
+        keys += [(placement, b) for b in range(len(first))]
+        cand = np.vstack([cand.reshape(-1, 3), first])
+    ok = np.isfinite(cand).all(axis=1)
+    if not ok.any():
+        return None
+    d = np.linalg.norm(cand - np.asarray(xyz, dtype=float), axis=1)
+    d[~ok] = np.inf
+    return keys[int(np.argmin(d))]

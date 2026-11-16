@@ -36,7 +36,9 @@ flowchart TD
   by the headless suite. Interaction tools keep a thin, mockable plotter surface
   so their logic is testable too.
 - **One view registry.** New window layouts are entries in `ccdaf.app.views.VIEWS`,
-  not new code paths.
+  not new code paths. A view can also name a Qt *side panel* shown right of the
+  plotter (the `egm` view's electrogram panel); two views with the same plotter
+  layout switch in place, keeping the 3D scene.
 
 ## Where things live
 

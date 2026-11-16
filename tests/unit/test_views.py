@@ -102,3 +102,11 @@ def test_a_future_string_shape_view_is_expressible():
     )
     assert spec.is_multiview
     assert set(spec.titles) <= set(spec.roles)
+
+
+def test_egm_view_is_general_plus_a_side_panel():
+    egm, general = VIEWS["egm"], VIEWS["general"]
+    assert egm.side_panel == "egm" and general.side_panel is None
+    # Same plotter: switching between them keeps the 3D view and its actors.
+    assert egm.same_plotter(general) and general.same_plotter(egm)
+    assert not egm.same_plotter(VIEWS["segmentation"])

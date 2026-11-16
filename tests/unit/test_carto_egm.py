@@ -381,6 +381,9 @@ class _Host:
     def statusBar(self):
         return self._status
 
+    def _on_egm_available(self):
+        self.egm_available = True
+
 
 def _quiet_boxes(monkeypatch):
     from PyQt5 import QtWidgets

@@ -12,6 +12,7 @@ Qt panels and dialogs. Widgets expose signals and hold no business logic.
 ::: ccdaf.gui.clipping_widget
 ::: ccdaf.gui.segmentation_widget
 ::: ccdaf.gui.visualisation_widget
+::: ccdaf.gui.egm_panel
 ::: ccdaf.gui.volume_postprocessing_widget
 
 ## Dialogs

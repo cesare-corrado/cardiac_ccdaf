@@ -81,6 +81,9 @@ Controls how the mesh is coloured:
 - **Auto min/max** — take the colour range from the field's own data range; when
   off, set **Min** / **Max** by hand.
 - **Iso lines** — number of discrete colour bands.
+- **Opacity** — how opaque the surface is (10–100 %). Lower it to see electrodes
+  inside the chamber. While fibres are shown the surface is faded to at most
+  25 %; a lower setting still applies.
 - **Show electrodes** — draw the mapping's electrode positions (greyed until a
   mapping with electrodes is loaded).
 - **Show fibres**, **Direction**, **Segments**: draw a volume's `fiber` or
@@ -88,4 +91,48 @@ Controls how the mesh is coloured:
   the volume carries `fiber`). See [Fibres](fibres.md#showing-the-fibres).
 
 The **Visualise** menu and the **Display** options control which overlays
-(points, projected points, slices) are shown.
+(points, projected points, slices) are shown. **Visualise → Control panel**
+hides the whole left panel, to give the views more room; tick it again to bring
+it back at the width it had.
+
+## Electrogram view
+
+With a map loaded with electrograms (see [Electrograms](#electrograms), or a
+`.pkl` bundle that carries them), tick **Visualise → Electrograms**. The 3D view
+stays as it is, and an electrogram panel opens on its right; drag the divider to
+resize it. Untick it to close the panel.
+
+**Picking an electrode.** Press **Pick electrode** at the top of the panel, then
+left-click near an electrode in the 3D view. The nearest `_car.txt` point is
+picked, and the panel shows the electrograms of its catheter placement (the
+catheter at that location). The 3D view then also shows that placement's
+bipoles, each at its first electrode:
+
+- **blue** — a point (in `_car.txt`);
+- **red** — a bipole Carto did not keep as a point;
+- the **picked** bipole is larger, with a white arrow from its first to its
+  second electrode (the bipole direction). Untick **Show bipole** at the top of
+  the panel to hide the arrow.
+
+The blue and red bipoles can be picked too. Picking a point of another placement
+replaces them with that placement's bipoles. Like the other picking tools,
+**Pick electrode** stops any tool that was using the mouse.
+
+**The panel**, top to bottom:
+
+- **Reference**, **Bipolar**, **Unipolar**, **Extra** — tick to show or hide
+  each type of trace; **−** / **+** lower or raise that type's gain. Each type
+  has one vertical scale for all its rows, so amplitudes can be compared by eye
+  (a low-voltage bipole looks small).
+- **WOI** zooms to the window of interest, **Full** shows the whole recording;
+  the toolbar zooms and pans.
+- The **reference** trace, pinned at the top with the time axis: ms, with 0 at
+  the reference activation.
+- The other traces, scrolling: one group per bipole (the bipolar trace, then its
+  two unipoles), then the extra channels. A channel that was not recorded at this
+  placement keeps its row, labelled *not recorded*.
+
+The window of interest is shaded, 0 ms is a dashed line, and a bipole that is a
+point has a red tick at its LAT. The picked bipole's rows have a shaded
+background. Clicking another bipole's rows selects that bipole, in the panel and
+in 3D.

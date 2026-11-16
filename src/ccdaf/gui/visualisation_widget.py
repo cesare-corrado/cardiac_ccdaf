@@ -44,6 +44,10 @@ DEFAULT_CMAP     = "viridis"
 DEFAULT_ISOLINES = 256      # a continuous-looking map; lower it to band
 MIN_ISOLINES     = 2
 MAX_ISOLINES     = 256
+# The surface never goes fully invisible: below this it is hard to tell it is
+# there at all, and a 0 % surface can only be told apart from no mesh by the
+# slider position.
+MIN_OPACITY_PCT  = 10
 DEFAULT_SEGMENTS = 20_000   # fibre segments drawn: enough to read, quick to draw
 
 POINT_FIELD = "point"
@@ -56,6 +60,8 @@ class VisualisationWidget(QtWidgets.QGroupBox):
     # Emitted by the electrode checkbox alone: toggling visibility only needs
     # the electrode actor redrawn, not the whole field re-rendered.
     electrodes_toggled = QtCore.pyqtSignal(bool)
+    # Surface opacity, 0..1.
+    opacity_changed = QtCore.pyqtSignal(float)
     # Emitted by the fibre controls alone: the glyphs are their own actor,
     # so changing them needs no re-render of the field underneath.
     fibres_changed = QtCore.pyqtSignal()
@@ -117,6 +123,17 @@ class VisualisationWidget(QtWidgets.QGroupBox):
         self.spn_iso.setValue(DEFAULT_ISOLINES)
         self.spn_iso.setToolTip("Number of discrete colour bands (minimum 2).")
         grid.addWidget(self.spn_iso, row, 1)
+        row += 1
+
+        grid.addWidget(QtWidgets.QLabel("Opacity:"), row, 0)
+        self.sld_opacity = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sld_opacity.setRange(MIN_OPACITY_PCT, 100)
+        self.sld_opacity.setValue(100)
+        self.sld_opacity.setToolTip(
+            "Surface opacity. Lower it to see electrodes inside the chamber.")
+        self.sld_opacity.valueChanged.connect(
+            lambda v: self.opacity_changed.emit(v / 100.0))
+        grid.addWidget(self.sld_opacity, row, 1)
         row += 1
 
         self.chk_electrodes = QtWidgets.QCheckBox("Show electrodes")
@@ -242,6 +259,10 @@ class VisualisationWidget(QtWidgets.QGroupBox):
 
     def n_isolines(self) -> int:
         return int(self.spn_iso.value())
+
+    def surface_opacity(self) -> float:
+        """Surface opacity, 0..1 (1 = opaque)."""
+        return self.sld_opacity.value() / 100.0
 
     def show_electrodes(self) -> bool:
         return bool(self.chk_electrodes.isChecked())
