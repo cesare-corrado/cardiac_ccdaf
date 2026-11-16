@@ -97,12 +97,47 @@ triangle. `elemTag` keeps its own key and is never read from `cell_fields`.
 Bundles written before the key existed load exactly as before, and an older
 version of CCDAF opens a new bundle and simply leaves those fields out.
 
+### Electrograms
+
+When electrograms are loaded, the bundle has an `egm` key. Bundles without it
+load as before. `read_bundle` returns it with the traces decompressed. The
+module is `ccdaf.io.carto_egm`.
+
+A *placement* is one catheter location: one Carto
+`<map>_ECG_Export_<StartTime>.txt`.
+
+| Key | Content |
+| --- | --- |
+| `channel_names` | Trace column order: reference, point bipoles, their unipoles, extra channels |
+| `gain` | mV per raw count (0.003 in the exports seen) |
+| `woi` | Window of interest `(from, to)` in ms, relative to the reference annotation |
+| `traces` | int16, (placements, channels, samples); samples at 1 kHz. Stored zlib-compressed in the file |
+| `missing_value` | int16 fill for a channel absent from a placement's ECG file |
+| `reference_annotation` | Per placement: the sample (counted from 0) where the reference activates |
+| `catheters` | One entry per catheter, keyed by connector (only the mapping catheter for now) |
+| `warnings` | Notes from the import (missing splines, skipped points, …) |
+
+Each `catheters` entry:
+
+| Key | Content |
+| --- | --- |
+| `electrode_channels` | Unipolar channel of each electrode |
+| `positions` | float32, (placements, electrodes, 3); NaN where the position is not known |
+| `electrode_column` | Trace column of each electrode's unipole |
+| `bipole_electrodes` | The two electrode indices of each bipole |
+| `bipole_column` | Trace column of each bipole |
+| `point_link` | (placements, bipoles): the bipole's row in `electrodes` (`_car.txt`), or −1 when it is not a point there |
+
+Time on a trace: `t (ms) = sample − reference_annotation[placement]`.
+
 ## EAM export
 
 `ccdaf.core.eam_export` writes:
 
 - **Binary** (`EXPORT_BINARY`) — a pickled `{'surface', 'electrodes'}`
-  dictionary, as the reference Carto pipeline dumps.
+  dictionary, as the reference Carto pipeline dumps. The electrograms ride
+  along under `egm` when loaded; a reader that only wants the surface and
+  electrodes ignores the key.
 - **VTK** (`EXPORT_VTK`) — the surface with every field, for ParaView.
   Electrodes are separate geometry and are **not** embedded in the VTK.
 

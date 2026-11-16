@@ -93,6 +93,10 @@ from ccdaf.gui.mapping_select_dialog import MappingSelectDialog
 from ccdaf.gui.save_mesh_dialog import SaveMeshDialog, FORMAT_PICKLE
 from ccdaf.gui.eam_export_dialog import EAMExportDialog
 from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
+from ccdaf.io.carto_egm import (
+    egm_positions, load_carto_egm, scan_carto_egm, set_egm_positions,
+)
+from ccdaf.gui.egm_channel_dialog import EGMChannelDialog
 from ccdaf.io.carto_functions import extract_map_list_names
 from ccdaf.core.eam_loader import (
     EAMData, load_carto_mapping, displace_electrodes_for, read_bundle,
@@ -1434,7 +1438,7 @@ class CCDAF(QtWidgets.QMainWindow):
     def _load_bundle(self, filename: str) -> None:
         """Load a File → Save pickle bundle: mesh, tagging, seeds, electrodes."""
         try:
-            mesh, point_sets, electrodes = read_bundle(filename)
+            mesh, point_sets, electrodes, egm = read_bundle(filename)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Load failed", str(exc))
             return
@@ -1454,6 +1458,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 electrode_points=elec_points,
                 map_name=Path(filename).stem,
                 electrodes=electrodes,
+                egm=egm,
             )
             self._eam_electrode_points = elec_points
             self.vis_widget.set_electrodes_available(True)
@@ -1714,10 +1719,12 @@ class CCDAF(QtWidgets.QMainWindow):
         point_sets = self._collect_point_sets()
 
         electrodes = self._eam_data.electrodes if self._eam_data else None
+        egm = self._eam_data.egm if self._eam_data else None
         export_binary(
             fn, surface,
             electrodes=electrodes,
             electrode_points=self._eam_electrode_points,
+            egm=egm,
             point_sets=point_sets,
             include_elem_tag=("elemTag" in keep),
             cell_fields={name: np.asarray(surface.cell_data[name])
@@ -1751,6 +1758,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._eam_selected_file = path
         self._eam_directory = str(Path(path).parent)
         self._eam_format = dlg.selected_format()
+        load_egm = dlg.load_electrograms()
         self.recent_folder = Path(self._eam_directory)
 
         if self._eam_format == FORMAT_CARTO_STUDY:
@@ -1780,11 +1788,16 @@ class CCDAF(QtWidgets.QMainWindow):
         if not map_name:
             QtWidgets.QMessageBox.warning(self, "EAM", "No mapping selected.")
             return
-        self._load_eam_mapping(self._eam_directory, map_name)
+        self._load_eam_mapping(self._eam_directory, map_name, load_egm=load_egm)
 
-    def _load_eam_mapping(self, directory: str, map_name: str) -> None:
+    def _load_eam_mapping(self, directory: str, map_name: str,
+                          load_egm: bool = False) -> None:
         """Read ``<map_name>.mesh`` + electrodes and adopt them as the working
-        mesh, then show the EAM panel and render the first field + electrodes."""
+        mesh, then show the EAM panel and render the first field + electrodes.
+
+        With *load_egm*, the electrograms follow (see
+        :meth:`_load_eam_electrograms`); the map stays loaded whatever
+        happens to them."""
         self.statusBar().showMessage(f"Loading EAM mapping '{map_name}'…")
         QtWidgets.QApplication.processEvents()
         try:
@@ -1847,6 +1860,59 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Loaded EAM mapping '{map_name}': {mesh.n_points} points, "
             f"{len(self._eam_electrode_points)} electrodes.")
+        if load_egm:
+            self._load_eam_electrograms(directory, map_name)
+
+    def _load_eam_electrograms(self, directory: str, map_name: str) -> None:
+        """Scan the map's point files, let the user pick channels and the
+        mapping catheter, then read the electrograms into ``_eam_data.egm``.
+
+        Every failure leaves the map loaded without electrograms and says so.
+        """
+        def progress(done: int, total: int, what: str) -> None:
+            self.statusBar().showMessage(f"{what}… {done}/{total}")
+            QtWidgets.QApplication.processEvents()
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            scan = scan_carto_egm(directory, map_name, progress=progress)
+        except Exception as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(
+                self, "Electrograms",
+                f"The map is loaded, but its electrograms could not be read:\n{exc}")
+            self.statusBar().showMessage("Loaded without electrograms.")
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+
+        dlg = EGMChannelDialog(scan, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            self.statusBar().showMessage("Loaded without electrograms.")
+            return
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            egm = load_carto_egm(scan, dlg.selected_extra_channels(),
+                                 connector=dlg.selected_connector(),
+                                 progress=progress)
+        except Exception as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(
+                self, "Electrograms",
+                f"The map is loaded, but its electrograms could not be read:\n{exc}")
+            self.statusBar().showMessage("Loaded without electrograms.")
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+
+        self._eam_data.egm = egm
+        n_place, n_ch, _ = egm["traces"].shape
+        self.statusBar().showMessage(
+            f"Electrograms: {n_place} catheter placements, {n_ch} channels.")
+        if egm["warnings"]:
+            QtWidgets.QMessageBox.information(
+                self, "Electrograms",
+                "Electrograms loaded, with these notes:\n\n• "
+                + "\n• ".join(egm["warnings"]))
 
     def _clear_scalar_bars(self) -> None:
         """Drop every scalar bar on the plotter.
@@ -3988,6 +4054,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 export_binary(path, self.loader.mesh,
                               electrodes=self._eam_data.electrodes,
                               electrode_points=self._eam_electrode_points,
+                              egm=self._eam_data.egm,
                               point_sets=self._collect_point_sets(),
                               include_elem_tag=True)
             else:
@@ -4015,10 +4082,18 @@ class CCDAF(QtWidgets.QMainWindow):
                 or old_mesh.n_cells == 0 or new_mesh.n_cells == 0):
             return
         self._eam_warp_note = None
+        # The catheter electrodes of the electrograms ride along with the
+        # _car.txt electrodes: same rule, one call, so a bipole's direction is
+        # still right after smoothing.
+        egm = self._eam_data.egm
+        cat_pts = egm_positions(egm)
         try:
-            self._eam_electrode_points = displace_electrodes_for(
-                pts, old_mesh, new_mesh,
+            moved = displace_electrodes_for(
+                np.vstack([np.asarray(pts, dtype=float), cat_pts]),
+                old_mesh, new_mesh,
                 on_status=lambda msg: setattr(self, "_eam_warp_note", msg))
+            self._eam_electrode_points = moved[:len(pts)]
+            set_egm_positions(egm, moved[len(pts):])
         except Exception as exc:
             QtWidgets.QMessageBox.warning(
                 self, "EAM",
@@ -4562,6 +4637,10 @@ class CCDAF(QtWidgets.QMainWindow):
                 electrodes = np.asarray(electrodes, dtype=float).copy()
                 electrodes[:, :2] *= -1.0
                 self._eam_electrode_points = electrodes
+            if self._eam_data is not None and self._eam_data.egm:
+                cat_pts = egm_positions(self._eam_data.egm)
+                cat_pts[:, :2] *= -1.0
+                set_egm_positions(self._eam_data.egm, cat_pts)
 
         max_distance = guard_distance(source_mesh, src["spacing"])
 

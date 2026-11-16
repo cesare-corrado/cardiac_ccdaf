@@ -30,6 +30,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pyvista as pv
 
+from ccdaf.io.carto_egm import unpack_egm
 from ccdaf.io.carto_functions import read_carto_mesh_file, load_carto_electrodes
 from ccdaf.core.seed_profiles import SEED_PROFILE_ORDER
 
@@ -76,6 +77,7 @@ class EAMData:
     electrode_points: np.ndarray            # (N, 3) electrode coordinates
     map_name: str
     electrodes: Optional[dict] = field(default=None)   # raw load_carto_electrodes() output
+    egm: Optional[dict] = field(default=None)          # carto_egm.load_carto_egm() output
 
 
 def carto_mesh_to_polydata(mesh0: dict) -> pv.PolyData:
@@ -129,7 +131,7 @@ def _read_point_set(payload: dict, key: str
 
 def read_bundle(path: str
                 ) -> Tuple[pv.PolyData, Dict[str, Dict[str, np.ndarray]],
-                           Optional[dict]]:
+                           Optional[dict], Optional[dict]]:
     """Read a File → Save pickle bundle back into working objects.
 
     The inverse of :func:`eam_export.export_binary` used with the bundle
@@ -138,7 +140,9 @@ def read_bundle(path: str
     restores the cell tags the Carto surface dict cannot carry, and every
     point-set key a seed profile claims comes back as it was saved.
 
-    Returns ``(mesh, point_sets, electrodes)``. ``point_sets`` maps a
+    Returns ``(mesh, point_sets, electrodes, egm)``. ``egm`` is the
+    electrogram dictionary (traces uncompressed) or ``None`` when the bundle
+    has none. ``point_sets`` maps a
     profile's ``type_id`` to its name → xyz mapping and holds only the
     sets the file actually carries, so a bundle written from a mesh with
     no landmarks yields no landmark entry rather than an empty one. A set
@@ -176,7 +180,10 @@ def read_bundle(path: str
                 break
 
     electrodes = payload.get("electrodes")
-    return mesh, point_sets, electrodes
+    egm = payload.get("egm")
+    if egm is not None:
+        egm = unpack_egm(egm)
+    return mesh, point_sets, electrodes, egm
 
 
 def load_carto_mapping(directory: str, map_name: str) -> EAMData:

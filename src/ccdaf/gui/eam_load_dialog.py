@@ -133,11 +133,24 @@ class EAMLoadDialog(QtWidgets.QFileDialog):
             self._cmb_format.addItem(fmt, userData=fmt)
         self._cmb_format.currentIndexChanged.connect(self._on_format_changed)
 
+        # Electrograms are optional: reading them takes seconds to tens of
+        # seconds and adds tens of MB to a saved bundle, so they are off
+        # unless asked for. The channel choice comes later, once the map is
+        # known (see EGMChannelDialog).
+        self._chk_egm = QtWidgets.QCheckBox("Load electrograms")
+        self._chk_egm.setChecked(False)
+        self._chk_egm.setToolTip(
+            "Also read the electrograms of every point (reference, mapping "
+            "catheter, chosen extra channels) and the mapping catheter's "
+            "electrode positions. You choose the channels after picking the map."
+        )
+
         layout = self.layout()
         if isinstance(layout, QtWidgets.QGridLayout):
             row = layout.rowCount()
             layout.addWidget(QtWidgets.QLabel("EAM format:"), row, 0)
             layout.addWidget(self._cmb_format, row, 1)
+            layout.addWidget(self._chk_egm, row + 1, 1)
 
         # The EAM-format combo above is the content filter here, so the
         # built-in 'Files of type' row (a single 'All files (*)') is
@@ -159,6 +172,10 @@ class EAMLoadDialog(QtWidgets.QFileDialog):
     # ------------------------------------------------------------------
     def selected_format(self) -> str:
         return str(self._cmb_format.currentData())
+
+    def load_electrograms(self) -> bool:
+        """True when the user ticked **Load electrograms**."""
+        return self._chk_egm.isChecked()
 
     def selected_directory(self) -> str:
         return self.directory().absolutePath()

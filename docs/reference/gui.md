@@ -20,6 +20,7 @@ Qt panels and dialogs. Widgets expose signals and hold no business logic.
 ::: ccdaf.gui.field_select_dialog
 ::: ccdaf.gui.mapping_select_dialog
 ::: ccdaf.gui.eam_load_dialog
+::: ccdaf.gui.egm_channel_dialog
 ::: ccdaf.gui.eam_export_dialog
 ::: ccdaf.gui.tissue_property_dialog
 ::: ccdaf.gui.carp_export_dialog
