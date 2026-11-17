@@ -28,8 +28,8 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from ccdaf.core.orifice_labels import (
-    UNITS, Opening, OrificeOptions, find_openings, guess_unit,
-    label_open_boundary, rms_radius,
+    UNITS, Opening, OrificeOptions, guess_unit, label_open_boundary,
+    label_openings_widening, rms_radius, small_endocardia,
 )
 from ccdaf.core.surface_labels import (
     LabelOptions, Plane, SurfaceLabels, detect_base_plane,
@@ -381,20 +381,23 @@ class SurfaceLabelsDialog(QtWidgets.QDialog):
     def _find_and_check(self, *_args, report: bool = True) -> bool:
         if self._refuse_if_truncated(report):
             return False
+        # Found and labelled in one go: when a valve opening is too wide for
+        # the closing ball, the openings are searched again with a larger
+        # one, and the list shows the openings the labels were built at.
         self._busy(True)
         try:
-            found = find_openings(self._dataset, self.orifice_options())
+            labels = label_openings_widening(self._dataset,
+                                             self.orifice_options())
         except ValueError as exc:
             self._openings = []
             self._list_openings()
             return self._failed(str(exc), report)
         finally:
             self._busy(False)
-        self._openings = found.openings
+        self._openings = list(labels.openings)
         self._list_openings()
-        if not self._openings:
-            return self._failed("No valve openings were found.", report)
-        return self._check_openings(report=report)
+        self._accept_labels(labels, "")
+        return True
 
     def _list_openings(self) -> None:
         self.lst_openings.clear()
@@ -427,7 +430,14 @@ class SurfaceLabelsDialog(QtWidgets.QDialog):
             return self._failed(str(exc), report)
         finally:
             self._busy(False)
-        self._accept_labels(labels, "")
+        small = small_endocardia(labels, self.orifice_options().min_endo_share)
+        prefix = ""
+        if small:
+            prefix = (f"Check these labels: the {' and the '.join(small)} of the "
+                      f"boundary is very little. A valve opening may be missing "
+                      f"from the list, and its cavity labelled epicardium. Press "
+                      f"'Detect again' to search with larger closing balls.\n\n")
+        self._accept_labels(labels, prefix)
         return True
 
     def _on_plane_edited(self, *_args) -> None:

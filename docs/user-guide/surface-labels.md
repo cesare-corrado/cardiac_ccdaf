@@ -117,10 +117,15 @@ nothing to do with the base.
   A mitral and an aortic valve lying side by side can come back as one
   opening. That is fine: the base there is one ring instead of two.
 - **Detect again**: find the openings again, with the units above, then label.
+  If the labels are refused (see
+  [When a valve opening is too wide](#when-a-valve-opening-is-too-wide)), the
+  search is made again with a larger ball, and the list shows the openings
+  the labels were built at.
 - **Remove selected**: drop an opening found where there is none, then press
   *Check these openings*.
 - **Check these openings**: build a ring at each listed opening and report,
-  writing nothing. The preview draws the rings in red and a yellow marker at
+  writing nothing. If an endocardium holds under 12% of the boundary, the
+  report starts with a warning: an opening may be missing from the list. The preview draws the rings in red and a yellow marker at
   the centre of each opening. If the labels had to be cut through a hole in
   the wall (see [Holes through the wall](#holes-through-the-wall)), a magenta
   marker shows each cut, and the report lists them.
@@ -153,6 +158,34 @@ Edges shared by more than two faces (a defect some meshes from segmentation
 have) do not count as connections. On the example ventricle 18 such edges join
 the epicardium directly to an endocardium, and counting them would keep the
 surface in one piece whatever is cut.
+
+### When a valve opening is too wide
+
+The 30 mm ball fills a pool only if it can bridge the pool's openings. A
+valve opening wider than the ball is not bridged. The pool then fills only in
+part, and the ring is built deep inside the cavity instead of at its valves.
+The surface still splits into three, so nothing fails, but most of that
+cavity is labelled epicardium and its endocardium is a small patch at the
+apex. Such labels can also pass the checks that the UVC make.
+
+So the labels are refused when either endocardium holds under 12% of the
+boundary area, and the openings are searched again with a 40 mm ball, then a
+50 mm one. The first labels that pass are kept, and the report says which
+ball gave them and why the smaller one was refused. If no ball works, the
+labelling fails and the message gives what each ball did.
+
+**Measured on 31 ventricles with valve openings**
+
+| Closing ball | Hearts with both endocardia over 12% | LV endocardium on the other hearts (% area) |
+|---|---:|---|
+| 30 mm | 27 of 31 | 3.9, 5.7, 7.3, 7.8 |
+| 40 mm | 31 of 31 | none |
+
+At 40 mm, the 27 hearts that 30 mm labelled correctly change by 0.4% of
+area or less. Correct labels hold 19% or more of the boundary in each
+endocardium, so 12% leaves a margin on both sides. The search starts at
+30 mm, so a heart that labels correctly at 30 mm keeps exactly the labels it
+had before.
 
 ### Holes through the wall
 

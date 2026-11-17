@@ -38,7 +38,8 @@ import pyvista as pv
 
 from ccdaf.core.orifice_labels import (
     UNITS, OrificeOptions, find_openings, guess_unit, label_open_boundary,
-    label_ventricles, rms_radius, _as_read_back, _manifold_adjacency,
+    label_openings_widening, label_ventricles, rms_radius, small_endocardia,
+    _as_read_back, _manifold_adjacency,
 )
 from ccdaf.core.surface_labels import (
     BASE, EPI, LABEL_MASK_FIELD, LV_ENDO, RV_ENDO, UNLABELLED, Plane,
@@ -465,17 +466,38 @@ def qapp():
     yield QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-def _dialog(grid):
-    """The dialog, with the pool threshold lowered for the small fixture."""
+def _dialog(grid, **changes):
+    """The dialog, with the pool threshold lowered for the small fixture,
+    and any other option given changed too."""
     from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
 
     class Dialog(SurfaceLabelsDialog):
         def orifice_options(self):
             options = super().orifice_options()
             options.min_pool_ml = OPTIONS["min_pool_ml"]
+            for key, value in changes.items():
+                setattr(options, key, value)
             return options
 
     return Dialog(grid)
+
+
+def test_the_dialog_retries_with_a_larger_ball(qapp, block):
+    dlg = _dialog(block, closing_mm=8.0, closing_retry_mm=(30.0,))
+    dlg._show("Valve openings")
+    assert dlg._find_and_check()
+    assert dlg.result() is not None and dlg.btn_ok.isEnabled()
+    assert dlg.lst_openings.count() == 2
+    assert "30 mm closing ball instead" in dlg.report.toPlainText()
+
+
+def test_the_dialog_warns_of_a_small_endocardium(qapp, block, labels):
+    # Openings checked as listed are labelled, but a small share is flagged.
+    dlg = _dialog(block, min_endo_share=0.2)
+    dlg._openings = list(labels.openings)
+    assert dlg._check_openings()
+    text = dlg.report.toPlainText()
+    assert text.startswith("Check these labels") and "LV endocardium" in text
 
 
 def test_the_dialog_falls_back_to_the_openings(qapp, block):
@@ -664,3 +686,66 @@ def test_nothing_is_reported_when_no_surface_is_joined_to_another():
                      points=np.array([[-50.0, -50.0, -50.0]]))
     assert ol.find_passages(_shell(), openings=[far]) == []
     assert "Nothing joins" in ol.describe_passages([])
+
+
+# ------------------------------------------- closing ball too small to bridge
+# The block's necks are 16 and 18 mm wide. A closing ball of 8 mm radius
+# cannot bridge them, so no pool forms and no opening is found; 30 mm can.
+TOO_SMALL = dict(OPTIONS, closing_mm=8.0)
+
+
+def test_the_endocardia_of_good_labels_are_not_small(labels):
+    assert small_endocardia(labels, 0.12) == []
+
+
+def test_a_small_endocardium_is_named_with_its_share(labels):
+    # Each cavity holds about 17% of the block's boundary.
+    small = small_endocardia(labels, 0.2)
+    assert [s.split(" ")[0] for s in small] == ["LV", "RV"]
+    assert all(s.endswith("%") for s in small)
+
+
+def test_no_retry_is_made_when_the_first_ball_works(block, labels):
+    result = label_openings_widening(block, OrificeOptions(**OPTIONS))
+    assert "closing ball" not in result.note
+    assert np.array_equal(result.face_labels, labels.face_labels)
+
+
+def test_a_larger_ball_is_tried_when_the_first_bridges_nothing(block, labels):
+    options = OrificeOptions(**TOO_SMALL, closing_retry_mm=(30.0,))
+    with pytest.raises(ValueError):
+        label_open_boundary(block, None, options)
+    result = label_openings_widening(block, options)
+    assert np.array_equal(result.face_labels, labels.face_labels)
+    assert "8 mm closing ball" in result.note
+    assert "30 mm closing ball instead" in result.note
+
+
+def test_the_automatic_choice_retries_with_a_larger_ball(block):
+    options = OrificeOptions(**TOO_SMALL, closing_retry_mm=(30.0,))
+    assert label_ventricles(block, options).method == "openings"
+
+
+def test_labels_with_a_small_endocardium_are_refused_at_every_ball(block):
+    options = OrificeOptions(**OPTIONS, closing_retry_mm=(40.0,),
+                             min_endo_share=0.2)
+    with pytest.raises(ValueError) as caught:
+        label_openings_widening(block, options)
+    message = str(caught.value)
+    assert "30 mm closing ball" in message and "40 mm closing ball" in message
+    assert "LV endocardium" in message and "under 20%" in message
+
+
+def test_without_retries_a_failure_is_refused_at_once(block):
+    with pytest.raises(ValueError, match="8 mm closing ball"):
+        label_openings_widening(
+            block, OrificeOptions(**TOO_SMALL, closing_retry_mm=()))
+
+
+@pytest.mark.parametrize("bad", [
+    dict(closing_retry_mm=(5.0,)), dict(min_endo_share=-0.1),
+    dict(min_endo_share=0.5),
+])
+def test_impossible_retry_options_are_refused(bad):
+    with pytest.raises(ValueError):
+        OrificeOptions(**bad).validate()

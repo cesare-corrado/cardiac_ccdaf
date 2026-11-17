@@ -80,7 +80,7 @@ must resolve the thinnest wall in absolute terms.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -94,7 +94,7 @@ from scipy.spatial import cKDTree
 from vtk.util.numpy_support import vtk_to_numpy
 
 from ccdaf.core.surface_labels import (
-    BASE, MASK_BITS, UNLABELLED, LabelOptions, Plane, SurfaceLabels, _as_boundary,
+    BASE, LV_ENDO, MASK_BITS, NAMES, RV_ENDO, UNLABELLED, LabelOptions, Plane, SurfaceLabels, _as_boundary,
     _areas, _assemble, _close_ring, _faces, _hull_depth, _name_pieces,
     _normals, label_boundary,
 )
@@ -178,6 +178,18 @@ class OrificeOptions:
     min_pool_ml: float = 20.0
     #: Openings smaller than this are noise.
     min_opening_mm2: float = 30.0
+    #: Larger closing radii tried, in order, when the labels from
+    #: ``closing_mm`` are refused (see ``min_endo_share``). A valve opening
+    #: wider than the ball is not bridged: its pool then fills only in
+    #: part, and the ring is built deep inside the cavity instead of at
+    #: its valves. On four of 31 hearts measured, 30 mm left 4 to 8% of the
+    #: boundary as LV endocardium; 40 mm gave 22 to 26%, as on the others.
+    #: Empty: no retry.
+    closing_retry_mm: Tuple[float, ...] = (40.0, 50.0)
+    #: The least share of the boundary area each endocardium may hold. Less
+    #: means most of that cavity was labelled epicardium. 31 hearts held 19%
+    #: or more of each; the four mislabelled ones 8% LV or less.
+    min_endo_share: float = 0.12
 
     def validate(self) -> None:
         if self.mm_per_unit <= 0.0:
@@ -192,6 +204,12 @@ class OrificeOptions:
             raise ValueError("the film width must not be negative")
         if self.min_pool_ml < 0.0 or self.min_opening_mm2 < 0.0:
             raise ValueError("the size thresholds must not be negative")
+        if any(r <= self.opening_mm for r in self.closing_retry_mm):
+            raise ValueError("every retry closing radius must exceed the "
+                             "opening radius")
+        if not 0.0 <= self.min_endo_share < 0.5:
+            raise ValueError("the least endocardium share must be from 0 "
+                             "to 0.5")
 
 
 @dataclass
@@ -607,6 +625,64 @@ def _significant(mask: np.ndarray, fa: np.ndarray, fb: np.ndarray,
     return np.where(sizes >= _SIGNIFICANT_SHARE * sizes.sum())[0], pieces
 
 
+def small_endocardia(labels: SurfaceLabels, min_share: float) -> List[str]:
+    """The endocardia holding less than *min_share* of the boundary area,
+    each as ``"LV endocardium 3.9%"``. Empty when both are plausible.
+
+    A cavity whose valve opening was not bridged is labelled mostly as
+    epicardium, and its endocardium is then a small patch deep inside it.
+    Such labels split into three surfaces like good ones, and can pass
+    every later check, so the share is what tells them apart.
+    """
+    total = sum(labels.areas.values()) or 1.0
+    out = []
+    for key in (LV_ENDO, RV_ENDO):
+        share = labels.areas.get(key, 0.0) / total
+        if share < min_share:
+            out.append(f"{NAMES[key]} {100 * share:.1f}%")
+    return out
+
+
+def label_openings_widening(dataset,
+                            options: Optional[OrificeOptions] = None,
+                            label_options: Optional[LabelOptions] = None
+                            ) -> SurfaceLabels:
+    """:func:`label_open_boundary` with the openings found at
+    ``options.closing_mm``, then at each ``closing_retry_mm`` in turn,
+    until the labels split into three surfaces whose endocardia each hold
+    ``min_endo_share`` of the boundary.
+
+    When a retry was needed, the note on the result says why and which
+    radius gave the labels. When none works, the ``ValueError`` gives what
+    every radius did.
+    """
+    options = options or OrificeOptions()
+    options.validate()
+    failures: List[str] = []
+    for radius in (options.closing_mm, *options.closing_retry_mm):
+        attempt = replace(options, closing_mm=radius)
+        try:
+            labels = label_open_boundary(dataset, None, attempt,
+                                         label_options)
+        except ValueError as exc:
+            failures.append(f"With a {radius:g} mm closing ball, {exc}")
+            continue
+        small = small_endocardia(labels, options.min_endo_share)
+        if small:
+            failures.append(
+                f"With a {radius:g} mm closing ball, an endocardium holds under "
+                f"{100 * options.min_endo_share:g}% of the boundary "
+                f"({', '.join(small)}): a valve opening was probably not "
+                f"bridged, and its cavity labelled epicardium "
+                f"({labels.summary()}).")
+            continue
+        if failures:
+            labels.note = ("\n".join(failures) + f"\nLabelled with a {radius:g} "
+                           f"mm closing ball instead.\n\n" + labels.note).strip()
+        return labels
+    raise ValueError("\n".join(failures))
+
+
 def label_ventricles(dataset,
                      options: Optional[OrificeOptions] = None,
                      label_options: Optional[LabelOptions] = None
@@ -622,7 +698,7 @@ def label_ventricles(dataset,
         return label_boundary(dataset, None, label_options)
     except ValueError as flat:
         try:
-            return label_open_boundary(dataset, None, options, label_options)
+            return label_openings_widening(dataset, options, label_options)
         except ValueError as open_:
             raise ValueError(
                 f"As a truncated mesh: {flat} With valve openings: {open_}"
@@ -1063,5 +1139,6 @@ def describe_cuts(cuts: List[Passage], scale: float = 1.0) -> str:
 
 __all__ = ["UNITS", "TYPICAL_RMS_RADIUS_MM", "MAX_VOXELS", "OrificeOptions",
            "Opening", "OpeningSearch", "rms_radius", "guess_unit",
-           "find_openings", "label_open_boundary", "label_ventricles",
+           "find_openings", "label_open_boundary", "label_openings_widening",
+           "small_endocardia", "label_ventricles",
            "Passage", "find_passages", "describe_passages", "describe_cuts"]
