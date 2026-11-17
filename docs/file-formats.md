@@ -111,8 +111,8 @@ A *placement* is one catheter location: one Carto
 | `channel_names` | Trace column order: reference, point bipoles, their unipoles, extra channels |
 | `gain` | mV per raw count (0.003 in the exports seen) |
 | `woi` | Window of interest `(from, to)` in ms, relative to the reference annotation |
-| `traces` | int16, (placements, channels, samples); samples at 1 kHz. Stored zlib-compressed in the file |
-| `missing_value` | int16 fill for a channel absent from a placement's ECG file |
+| `traces` | int16, (placements, channels, samples); samples at 1 kHz, as recorded (the recorder clips at −32768 and 32767, so both are real, saturated samples). Stored zlib-compressed in the file |
+| `channel_missing` | bool, (placements, channels): True where the channel is not in that placement's ECG file (its trace is then all 0) |
 | `reference_annotation` | Per placement: the sample (counted from 0) where the reference activates |
 | `catheters` | One entry per catheter, keyed by connector (only the mapping catheter for now) |
 | `warnings` | Notes from the import (missing splines, skipped points, …) |
@@ -127,6 +127,7 @@ Each `catheters` entry:
 | `bipole_electrodes` | The two electrode indices of each bipole |
 | `bipole_column` | Trace column of each bipole |
 | `point_link` | (placements, bipoles): the bipole's row in `electrodes` (`_car.txt`), or −1 when it is not a point there |
+| `point_electrode` | int8, (placements, bipoles): 1 when the point sits on the bipole's second electrode, else 0. |
 
 Time on a trace: `t (ms) = sample − reference_annotation[placement]`.
 

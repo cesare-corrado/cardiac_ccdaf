@@ -23,6 +23,7 @@ No display, no Qt.
 import pickle
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -30,10 +31,11 @@ import numpy as np
 import pytest
 
 from ccdaf.io.carto_egm import (
-    _block_labels, _blocks, load_carto_egm, pack_egm, scan_carto_egm, unpack_egm,
+    _block_labels, _blocks, load_carto_egm, nearest_bipole, pack_egm,
+    placement_anchors, scan_carto_egm, unpack_egm,
 )
 from ccdaf.io.carto_functions import (
-    MISSING_TRACE, get_exported_points, get_point_info, read_ecg_file,
+    get_exported_points, get_point_info, read_ecg_file,
     read_ecg_header, read_electrode_positions,
 )
 
@@ -50,8 +52,9 @@ def electrode_xyz(placement: int, k: int) -> list:
 
 
 def write_point_xml(folder: Path, pid: int, start: int, uni_k: int,
-                    ref_ann: int = 2000, cycle: bool = False):
-    bip = f"20A_{uni_k}-{uni_k + 1}"
+                    ref_ann: int = 2000, cycle: bool = False,
+                    bip: Optional[str] = None):
+    bip = bip or f"20A_{uni_k}-{uni_k + 1}"
     ref_annotations = ('    <ReferenceAnnotations Beat0="2000" Beat-1="1679" '
                        'Beat-2="1347" CycleLength="321" />\n') if cycle else ""
     (folder / f"{MAP}_P{pid}_Point_Export.xml").write_text(
@@ -157,8 +160,18 @@ def test_ecg_channels_match_exactly(carto_map):
     traces, g, present = read_ecg_file(path, ["20A_1", "20A_1-2", "20A_10", "NOPE"])
     assert traces.dtype == np.int16 and traces.shape == (4, N_SAMPLES)
     assert traces[:, 0].tolist() == [names.index("20A_1"), names.index("20A_1-2"),
-                                     names.index("20A_10"), MISSING_TRACE]
+                                     names.index("20A_10"), 0]
     assert present.tolist() == [True, True, True, False]
+
+
+def test_ecg_keeps_saturated_samples(tmp_path):
+    # The recorder clips at the int16 limits: both are real samples.
+    f = tmp_path / "x_ECG_Export_1.txt"
+    f.write_text("ECG_Export_4.1\nRaw ECG to MV (gain) = 0.003\nA(1) B(2)\n"
+                 "-32768 32767\n5 -32768\n")
+    traces, _, present = read_ecg_file(str(f), ["A", "B"])
+    assert traces.tolist() == [[-32768, 5], [32767, -32768]]
+    assert present.tolist() == [True, True]
 
 
 def test_ecg_rejects_values_outside_int16(tmp_path):
@@ -216,10 +229,9 @@ def test_load_traces_columns_and_missing_extra(carto_map):
     for ip in range(3):
         for col, name in enumerate(names):
             got = int(egm["traces"][ip, col, 0])
-            if name == "V1" and ip == 2:
-                assert got == MISSING_TRACE                     # not in that file
-            else:
-                assert got == 100 * ip + ecg_order.index(name)
+            missing = name == "V1" and ip == 2                # not in that file
+            assert bool(egm["channel_missing"][ip, col]) == missing
+            assert got == (0 if missing else 100 * ip + ecg_order.index(name))
     assert any("V1 missing in 1" in w for w in egm["warnings"])
     assert egm["gain"] == pytest.approx(0.003) and egm["woi"] == (-151, 89)
     assert egm["reference_annotation"].tolist() == [2000, 2000, 2000]
@@ -252,6 +264,54 @@ def test_load_positions_and_links(carto_map):
                                           [-1, 2, -1, 3],
                                           [-1, -1, 4, -1]]
     assert not any("numbering" in w for w in egm["warnings"])
+
+
+def move_point_3_to_electrode_6(folder: Path):
+    """Point 3 (placement 1, bipole 20A_5-6) taken on the bipole's second
+    electrode, as Carto does for some points: unipole 20A_6, _car.txt at 6."""
+    write_point_xml(folder, 3, 2000, 6, bip="20A_5-6")
+    car = folder / f"{MAP}_car.txt"
+    old = "\t".join(["P", "0", "3", "0"] + [str(v) for v in electrode_xyz(1, 5)])
+    new = "\t".join(["P", "0", "3", "0"] + [str(v) for v in electrode_xyz(1, 6)])
+    assert old in car.read_text()
+    car.write_text(car.read_text().replace(old, new))
+
+
+def test_point_on_second_electrode(carto_map):
+    move_point_3_to_electrode_6(carto_map)
+    scan = scan_carto_egm(str(carto_map), MAP)
+    # The bipole still spans electrodes 5 and 6; it is not read as 6-7.
+    assert scan.bipoles == ["20A_1-2", "20A_5-6", "20A_7-8", "20A_11-12"]
+    assert scan.bipole_electrodes == [(1, 2), (5, 6), (7, 8), (11, 12)]
+    egm = load_carto_egm(scan)
+    cat = egm["catheters"][CONN]
+    assert cat["point_link"][1].tolist() == [-1, 2, -1, 3]
+    assert cat["point_electrode"].tolist() == [[0, 0, 0, 0],
+                                               [0, 1, 0, 0],
+                                               [0, 0, 0, 0]]
+    assert not any("numbering" in w for w in egm["warnings"])
+    # Shown, and picked, where the point is.
+    assert placement_anchors(egm, 1)[1].tolist() == electrode_xyz(1, 6)
+    assert placement_anchors(egm, 1)[3].tolist() == electrode_xyz(1, 11)
+    assert nearest_bipole(egm, electrode_xyz(1, 6)) == (1, 1)
+
+
+def test_points_on_both_electrodes_of_one_bipole(carto_map):
+    # Point 6 uses 20A_2 of bipole 20A_1-2 at another placement than point 1,
+    # which uses 20A_1. Both belong to the same bipole.
+    write_point_xml(carto_map, 6, 2000, 2, bip="20A_1-2")
+    pts = carto_map / f"{MAP}_Points_Export.xml"
+    pts.write_text(pts.read_text().replace(
+        "</Points>", f'    <Point ID="6" File_Name="{MAP}_P6_Point_Export.xml" />\n</Points>'))
+    scan = scan_carto_egm(str(carto_map), MAP)
+    assert scan.bipole_electrodes[0] == (1, 2)
+    assert len(scan.bipoles) == 4
+
+
+def test_point_off_its_bipole_raises(carto_map):
+    write_point_xml(carto_map, 3, 2000, 9, bip="20A_5-6")
+    with pytest.raises(ValueError, match="20A_5-6"):
+        scan_carto_egm(str(carto_map), MAP)
 
 
 def test_point_on_another_catheter_is_skipped(carto_map):
@@ -318,6 +378,9 @@ def test_egm_rides_in_the_bundle(carto_map, tmp_path):
     assert np.array_equal(cat["positions"], egm["catheters"][conn]["positions"],
                           equal_nan=True)
     assert cat["point_link"].tolist() == egm["catheters"][conn]["point_link"].tolist()
+    assert cat["point_electrode"].tolist() == \
+        egm["catheters"][conn]["point_electrode"].tolist()
+    assert np.array_equal(back["channel_missing"], egm["channel_missing"])
     assert back["channel_names"] == egm["channel_names"]
 
 

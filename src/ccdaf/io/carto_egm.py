@@ -69,7 +69,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from ccdaf.io.carto_functions import (
-    MISSING_TRACE, get_exported_points, get_point_info, load_carto_electrodes,
+    get_exported_points, get_point_info, load_carto_electrodes,
     read_ecg_file, read_ecg_header, read_electrode_positions,
 )
 
@@ -198,21 +198,24 @@ def scan_carto_egm(directory: str, map_name: str,
                         f"({', '.join(sorted({p.uni for p in other}))}): no EGM stored")
     points = [p for p in points if _split_number(p.uni)[0] == mapping_prefix]
 
-    # Point bipoles and their two electrodes. The second electrode is the
-    # number after the dash when the name has one ('20A_7-8'), otherwise the
-    # next number ('MCC_Dx_BiPolar_27' with unipole 'MCC_Dx_UniPolar_31' -> 32).
-    first: Dict[str, int] = {}
+    # Point bipoles and their two electrodes. A point sits on either electrode
+    # of its bipole (its unipole says which), so the pair comes from the
+    # bipole name when it has a dash ('20A_7-8' -> 7, 8). Otherwise the first
+    # electrode is the lowest unipole seen and the second the next number
+    # ('MCC_Dx_BiPolar_27' with unipole 'MCC_Dx_UniPolar_31' -> 31, 32).
+    unis: Dict[str, set] = {}
     for p in points:
-        n = _split_number(p.uni)[1]
-        if first.setdefault(p.bip, n) != n:
-            raise ValueError(f"bipole {p.bip} has two first electrodes "
-                             f"({first[p.bip]} and {n})")
-    bipoles = sorted(first, key=lambda b: first[b])
-    pairs: List[Tuple[int, int]] = []
-    for b in bipoles:
-        n = first[b]
-        m = re.search(rf"{n}-(?:{re.escape(mapping_prefix)})?(\d+)$", b)
-        pairs.append((n, int(m.group(1)) if m else n + 1))
+        unis.setdefault(p.bip, set()).add(_split_number(p.uni)[1])
+    pair_of: Dict[str, Tuple[int, int]] = {}
+    for b, seen in unis.items():
+        m = re.search(rf"(\d+)-(?:{re.escape(mapping_prefix)})?(\d+)$", b)
+        pair = (int(m.group(1)), int(m.group(2))) if m else (min(seen), min(seen) + 1)
+        if not seen <= set(pair):
+            raise ValueError(f"bipole {b} (electrodes {pair[0]}, {pair[1]}) has "
+                             f"points on electrodes {sorted(seen)}")
+        pair_of[b] = pair
+    bipoles = sorted(pair_of, key=lambda b: pair_of[b])
+    pairs: List[Tuple[int, int]] = [pair_of[b] for b in bipoles]
     electrodes = sorted({e for pair in pairs for e in pair})
 
     start_times = sorted({p.start_time for p in points})
@@ -432,8 +435,8 @@ def load_carto_egm(scan: EGMScan, extra_channels: Sequence[str] = (),
             continue
         block, g, present = read_ecg_file(path, wanted)
         if traces is None:
-            traces = np.full((n_p, len(wanted), block.shape[1]), MISSING_TRACE,
-                             dtype=np.int16)
+            traces = np.zeros((n_p, len(wanted), block.shape[1]), dtype=np.int16)
+            channel_missing = np.ones((n_p, len(wanted)), dtype=bool)
             gain = g
         if g != gain:
             raise ValueError(f"{os.path.basename(path)}: gain {g} differs from {gain}")
@@ -441,6 +444,7 @@ def load_carto_egm(scan: EGMScan, extra_channels: Sequence[str] = (),
             raise ValueError(f"{os.path.basename(path)}: {block.shape[1]} samples, "
                              f"expected {traces.shape[2]}")
         traces[ip] = block
+        channel_missing[ip] = ~present
         for name, ok in zip(wanted, present):
             if not ok:
                 missing[name] += 1
@@ -454,11 +458,14 @@ def load_carto_egm(scan: EGMScan, extra_channels: Sequence[str] = (),
 
     bip_index = {b: i for i, b in enumerate(scan.bipoles)}
     link = np.full((n_p, n_bip), -1, dtype=np.int32)
+    on_second = np.zeros((n_p, n_bip), dtype=np.int8)
     for p in scan.points:
         r = car_row.get(p.point_id, -1)
         if r < 0 and car_row:
             warnings.append(f"point {p.point_id} is not in _car.txt")
         link[placement_of[p.start_time], bip_index[p.bip]] = r
+        if _split_number(p.uni)[1] == scan.bipole_electrodes[bip_index[p.bip]][1]:
+            on_second[placement_of[p.start_time], bip_index[p.bip]] = 1
 
     if progress is not None:
         progress(n_p, n_p, "Reading catheter positions")
@@ -494,6 +501,7 @@ def load_carto_egm(scan: EGMScan, extra_channels: Sequence[str] = (),
                                       dtype=np.int32).reshape(-1, 2),
         "bipole_column": np.arange(1, 1 + n_bip, dtype=np.int32),
         "point_link": link,
+        "point_electrode": on_second,
     }
     egm = {
         "version": EGM_FORMAT_VERSION,
@@ -501,8 +509,8 @@ def load_carto_egm(scan: EGMScan, extra_channels: Sequence[str] = (),
         "gain": float(gain),
         "woi": woi,
         "channel_names": channel_names,
-        "missing_value": int(MISSING_TRACE),
         "traces": traces,
+        "channel_missing": channel_missing,
         "reference_annotation": ref_ann,
         "catheters": {connector: catheter},
         "warnings": warnings,
@@ -590,6 +598,14 @@ def placement_bipoles(egm: dict, placement: int
     return pos[pairs[:, 0]], pos[pairs[:, 1]], cat["point_link"][placement] >= 0
 
 
+def placement_anchors(egm: dict, placement: int) -> np.ndarray:
+    """(n_bipoles, 3) where each bipole of *placement* is shown: on the
+    electrode its point sits on, or on the first electrode without a point."""
+    first, second, _ = placement_bipoles(egm, placement)
+    on_second = np.asarray(mapping_catheter(egm)["point_electrode"][placement]) == 1
+    return np.where(on_second[:, None], second, first)
+
+
 def nearest_bipole(egm: dict, xyz: Sequence[float],
                    car_points: Optional[np.ndarray] = None,
                    placement: Optional[int] = None) -> Optional[Tuple[int, int]]:
@@ -609,13 +625,14 @@ def nearest_bipole(egm: dict, xyz: Sequence[float],
         ok = rows < len(car_points)
         ip, ib, cand = ip[ok], ib[ok], np.asarray(car_points, dtype=float)[rows[ok]]
     else:
-        e1 = np.asarray(cat["bipole_electrodes"])[ib, 0]
-        cand = np.asarray(cat["positions"], dtype=float)[ip, e1]
+        pairs = np.asarray(cat["bipole_electrodes"], dtype=int).reshape(-1, 2)
+        e = pairs[ib, np.asarray(cat["point_electrode"])[ip, ib].astype(int)]
+        cand = np.asarray(cat["positions"], dtype=float)[ip, e]
     keys = list(zip(ip.tolist(), ib.tolist()))
     if placement is not None:
-        first, _, _ = placement_bipoles(egm, placement)
-        keys += [(placement, b) for b in range(len(first))]
-        cand = np.vstack([cand.reshape(-1, 3), first])
+        anchors = placement_anchors(egm, placement)
+        keys += [(placement, b) for b in range(len(anchors))]
+        cand = np.vstack([cand.reshape(-1, 3), anchors])
     ok = np.isfinite(cand).all(axis=1)
     if not ok.any():
         return None

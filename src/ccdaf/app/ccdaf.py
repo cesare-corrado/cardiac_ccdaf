@@ -94,7 +94,8 @@ from ccdaf.gui.save_mesh_dialog import SaveMeshDialog, FORMAT_PICKLE
 from ccdaf.gui.eam_export_dialog import EAMExportDialog
 from ccdaf.core.eam_export import EXPORT_BINARY, export_binary, export_vtk
 from ccdaf.io.carto_egm import (
-    egm_positions, load_carto_egm, nearest_bipole, placement_bipoles,
+    egm_positions, load_carto_egm, nearest_bipole, placement_anchors,
+    placement_bipoles,
     scan_carto_egm, set_egm_positions,
 )
 from ccdaf.gui.egm_channel_dialog import EGMChannelDialog
@@ -216,7 +217,8 @@ EAM_ABOVE_COLOR = "magenta"
 # EAM electrodes, drawn as Gaussian points.
 EAM_ELECTRODE_COLOR = (100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0)
 EAM_ELECTRODE_RADIUS_FRAC = 0.008     # of the mesh's bounding-box diagonal
-# Electrogram view: the picked placement's bipoles, at their first electrode.
+# Electrogram view: the picked placement's bipoles, on their point's electrode
+# (the first electrode when the bipole has no point).
 # Blue = a _car.txt point, red = not a point. Both are bigger than the grey
 # electrode blobs so they sit on top of them, and carry a thick black outline
 # so they stay visible on the strong blues and reds of a colour map.
@@ -2152,10 +2154,11 @@ class CCDAF(QtWidgets.QMainWindow):
         self._focus_3d()
         ip, sel = self._egm_sel
         first, second, has_point = placement_bipoles(egm, ip)
+        anchors = placement_anchors(egm, ip)
         b = self.loader.mesh.bounds
         diag = float(np.linalg.norm([b[1]-b[0], b[3]-b[2], b[5]-b[4]]))
         r = max(EAM_ELECTRODE_RADIUS_FRAC * diag, 1e-6)
-        known = np.isfinite(first).all(axis=1)
+        known = np.isfinite(anchors).all(axis=1)
 
         def outlined(mesh, color):
             self._egm_actors.append(self.plotter.add_mesh(
@@ -2166,7 +2169,7 @@ class CCDAF(QtWidgets.QMainWindow):
         def spheres(mask, radius, color):
             idx = np.nonzero(mask)[0]
             if len(idx):
-                outlined(pv.PolyData(first[idx]).glyph(
+                outlined(pv.PolyData(anchors[idx]).glyph(
                     geom=pv.Sphere(radius=radius), scale=False, orient=False), color)
 
         others = known.copy()
@@ -2182,8 +2185,14 @@ class CCDAF(QtWidgets.QMainWindow):
             d = second[sel] - first[sel]
             n = float(np.linalg.norm(d))
             if self.egm_panel.show_direction() and np.isfinite(n) and n > 0:
-                outlined(pv.Arrow(start=first[sel], direction=d / n,
-                                  scale=EGM_ARROW_SCALE * EGM_PICKED_SCALE * r), "white")
+                # Always electrode 1 -> 2: out of a sphere on electrode 1, or
+                # ending on the surface of a sphere on electrode 2 (the point
+                # sits there), so the tip is not hidden inside it.
+                length = EGM_ARROW_SCALE * EGM_PICKED_SCALE * r
+                on_second = not np.array_equal(anchors[sel], first[sel])
+                back = length + EGM_PICKED_SCALE * r
+                start = anchors[sel] - d / n * back if on_second else anchors[sel]
+                outlined(pv.Arrow(start=start, direction=d / n, scale=length), "white")
 
     def _clear_scalar_bars(self) -> None:
         """Drop every scalar bar on the plotter.

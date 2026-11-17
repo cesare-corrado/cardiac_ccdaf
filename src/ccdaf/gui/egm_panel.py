@@ -10,7 +10,7 @@ Layout, top to bottom:
   picked bipole's direction arrow in 3D), one tick per trace type
   (Reference, Bipolar, Unipolar, Extra) with its own **−** / **+** gain, and
   **WOI** / **Full** to reset the time window;
-* the matplotlib navigation toolbar (zoom, pan);
+* the matplotlib navigation toolbar (zoom, pan; time axis only);
 * the **reference** trace, pinned so it never scrolls away. It carries the
   time axis: ms, with 0 at the reference annotation;
 * the other traces in a scroll area, one fixed-height row each: one group per
@@ -18,7 +18,10 @@ Layout, top to bottom:
 
 Each trace type has one vertical scale shared by all its rows, so amplitudes
 compare by eye (a low-voltage bipole looks small); the gain buttons scale a
-whole type. The window of interest is shaded, 0 ms is a dashed line, and a
+whole type. The y axis has no units (each row has its own baseline), so the
+first row of each type carries a scale bar ("1 mV") that follows the gain,
+and the toolbar readout gives the channel, time and value in mV under the
+mouse, on the reference strip too. The window of interest is shaded, 0 ms is a dashed line, and a
 bipole that is a point carries a tick at its LAT.
 
 The selected bipole's rows get a shaded background, and the panel scrolls to
@@ -57,6 +60,12 @@ SCALE_PERCENTILE = 99.5
 SCALE_ROW_FRACTION = 0.45
 SCALE_PLACEMENTS = 60      # placements sampled for the scale
 SCALE_SAMPLE_STEP = 2      # every 2nd ms: deflections last several ms
+# Scale bar: the largest of these values (mV) that fits in this much of a row,
+# at this distance from the left edge of the plot (fraction of its width).
+SCALE_BAR_STEPS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0,
+                   50.0, 100.0)
+SCALE_BAR_MAX_ROW = 0.8
+SCALE_BAR_X = 0.012
 
 # Colours. Two highlight shades: on a dark window background a pale yellow
 # band would glare and wash the traces out.
@@ -74,6 +83,18 @@ class _Row:
     column: int                  # trace column
     label: str
     bipole: Optional[int]        # the bipole group the row belongs to
+
+
+def scale_bar_mv(units_per_mv: float) -> float:
+    """The scale-bar value (mV) for a type drawn at *units_per_mv* row
+    heights per mV: the largest round value no taller than
+    SCALE_BAR_MAX_ROW of a row (the smallest one if none fits)."""
+    fits = [v for v in SCALE_BAR_STEPS if v * units_per_mv <= SCALE_BAR_MAX_ROW]
+    return fits[-1] if fits else SCALE_BAR_STEPS[0]
+
+
+def _mv_text(v: float) -> str:
+    return f"{v:g} mV"
 
 
 def _is_dark(widget: QtWidgets.QWidget) -> bool:
@@ -98,6 +119,7 @@ class EGMPanel(QtWidgets.QWidget):
         self._gain: Dict[str, float] = {t: 1.0 for t in TRACE_TYPES}
         self._rows: List[_Row] = []
         self._xlim: Optional[Tuple[float, float]] = None
+        self._ylim: Tuple[float, float] = (-0.5, 0.5)
         self._syncing = False
 
         outer = QtWidgets.QVBoxLayout(self)
@@ -156,12 +178,16 @@ class EGMPanel(QtWidgets.QWidget):
         self._ref_canvas = FigureCanvasQTAgg(self._ref_fig)
         self._ref_canvas.setFixedHeight(REF_PX)
         self._ref_ax = self._ref_fig.add_axes((0, 0, 1, 1))
+        # The toolbar belongs to the trace canvas; the reference strip feeds
+        # its readout by hand.
+        self._ref_canvas.mpl_connect("motion_notify_event", self._on_ref_motion)
 
         self._fig = Figure(figsize=(4, 4))
         self._canvas = FigureCanvasQTAgg(self._fig)
         self._ax = self._fig.add_axes((0, 0, 1, 1))
         self._canvas.mpl_connect("button_press_event", self._on_click)
         self._ax.callbacks.connect("xlim_changed", self._on_xlim)
+        self._ax.callbacks.connect("ylim_changed", self._on_ylim)
 
         self.toolbar = NavigationToolbar2QT(self._canvas, self)
         outer.addWidget(self.toolbar)
@@ -229,18 +255,19 @@ class EGMPanel(QtWidgets.QWidget):
 
     def _type_scales(self, egm: dict) -> Dict[str, float]:
         """Row units per mV for each type, from the whole map's amplitudes."""
-        traces, gain, missing = egm["traces"], egm["gain"], egm["missing_value"]
+        traces, gain = egm["traces"], egm["gain"]
         # A subsample is plenty for a percentile, and keeps a 90-channel map
         # from allocating hundreds of MB here.
         step = max(1, traces.shape[0] // SCALE_PLACEMENTS)
         traces = traces[::step, :, ::SCALE_SAMPLE_STEP]
+        recorded = ~np.asarray(egm["channel_missing"])[::step]
         out = {}
         for kind, cols in self._type_columns(egm).items():
             if not cols:
                 out[kind] = 1.0
                 continue
-            v = traces[:, cols, :]
-            v = np.abs(v[v != missing].astype(np.float32)) * gain
+            v = traces[:, cols, :][recorded[:, cols]]
+            v = np.abs(v.astype(np.float32)) * gain
             amp = float(np.percentile(v, SCALE_PERCENTILE)) if v.size else 0.0
             out[kind] = SCALE_ROW_FRACTION / amp if amp > 0 else 1.0
         return out
@@ -309,9 +336,9 @@ class EGMPanel(QtWidgets.QWidget):
         return np.arange(n, dtype=float) - ref
 
     def _trace_mv(self, column: int) -> Optional[np.ndarray]:
-        raw = self._egm["traces"][self._placement, column]
-        if np.all(raw == self._egm["missing_value"]):
+        if self._egm["channel_missing"][self._placement, column]:
             return None
+        raw = self._egm["traces"][self._placement, column]
         return raw.astype(float) * self._egm["gain"]
 
     def _style_axes(self, ax, dark: bool) -> None:
@@ -347,6 +374,9 @@ class EGMPanel(QtWidgets.QWidget):
             ax.plot(t, y * self._base_scale[REF] * self._gain[REF],
                     color=colors[REF], lw=0.8)
         self._draw_woi(ax)
+        if y is not None:
+            self._draw_scale_bar(ax, 0.0, REF, colors[REF])
+        ax.format_coord = self._ref_coord
         ax.set_ylim(-0.5, 0.5)
         ax.set_yticks([0.0])
         ax.set_yticklabels([self._egm["channel_names"][0]])
@@ -373,12 +403,16 @@ class EGMPanel(QtWidgets.QWidget):
             ax.axhspan(-max(sel_rows) - 0.5, -min(sel_rows) + 0.5, lw=0, zorder=0.5,
                        color=HIGHLIGHT_DARK if dark else HIGHLIGHT_LIGHT)
         labels = []
+        barred = set()
         for i, r in enumerate(self._rows):
             y = self._trace_mv(r.column)
             if y is None:
                 labels.append(f"{r.label} (not recorded)")
                 continue
             labels.append(r.label)
+            if r.kind not in barred:
+                barred.add(r.kind)
+                self._draw_scale_bar(ax, -float(i), r.kind, colors[r.kind])
             ax.plot(t, -i + y * self._base_scale[r.kind] * self._gain[r.kind],
                     color=colors[r.kind], lw=0.8, zorder=2)
             if r.kind == BIP and link is not None and link[r.bipole] >= 0:
@@ -386,16 +420,70 @@ class EGMPanel(QtWidgets.QWidget):
                 if lat is not None:
                     ax.plot([lat, lat], [-i - 0.4, -i + 0.4], color=LAT_COLOR,
                             lw=1.6, zorder=3)
-        ax.set_ylim(-n + 0.5, 0.5)
+        ax.format_coord = self._row_coord
+        self._ylim = (-n + 0.5, 0.5)
+        ax.set_ylim(*self._ylim)
         ax.set_yticks([-i for i in range(len(self._rows))])
         ax.set_yticklabels(labels)
         ax.tick_params(axis="x", labelbottom=False)
         self._syncing = True
         ax.set_xlim(*xlim)
         self._syncing = False
+        # clear() replaced the axes' callback registry, so the links are made
+        # again: the reference strip follows the toolbar's time range, and the
+        # rows stay put. Only now: earlier, the autoscaling of the half-built
+        # plot would fire them.
+        ax.callbacks.connect("xlim_changed", self._on_xlim)
+        ax.callbacks.connect("ylim_changed", self._on_ylim)
         self._place_axes(ax, self._canvas, top_px=0)
         self._ref_canvas.draw_idle()
         self._canvas.draw_idle()
+
+    def _units_per_mv(self, kind: str) -> float:
+        return self._base_scale[kind] * self._gain[kind]
+
+    def _draw_scale_bar(self, ax, y0: float, kind: str, color: str) -> None:
+        """A vertical bar of a round mV value, centred on the row at *y0*,
+        near the left edge whatever the time range."""
+        mv = scale_bar_mv(self._units_per_mv(kind))
+        h = mv * self._units_per_mv(kind)
+        tr = ax.get_yaxis_transform()            # x: axes fraction, y: data
+        ax.plot([SCALE_BAR_X, SCALE_BAR_X], [y0 - h / 2, y0 + h / 2],
+                transform=tr, color=color, lw=2.0, solid_capstyle="butt",
+                zorder=4)
+        ax.text(SCALE_BAR_X + 0.006, y0, _mv_text(mv), transform=tr,
+                color=color, fontsize=7, va="center", ha="left", zorder=4)
+
+    def scale_bars(self) -> Dict[str, float]:
+        """The scale-bar value (mV) of each trace type, as now drawn."""
+        return {k: scale_bar_mv(self._units_per_mv(k)) for k in TRACE_TYPES}
+
+    def _readout(self, label: str, column: int, x: float) -> str:
+        """'20A_7-8   t = 12 ms   0.534 mV' for the trace at time *x*."""
+        if self._egm["channel_missing"][self._placement, column]:
+            return f"{label}   not recorded"
+        ref = float(self._egm["reference_annotation"][self._placement])
+        k = int(round(x + ref))
+        traces = self._egm["traces"]
+        if not 0 <= k < traces.shape[2]:
+            return f"{label}   t = {x:.0f} ms"
+        v = float(traces[self._placement, column, k]) * self._egm["gain"]
+        return f"{label}   t = {k - ref:.0f} ms   {v:.3f} mV"
+
+    def _row_coord(self, x: float, y: float) -> str:
+        i = int(round(-y))
+        if not 0 <= i < len(self._rows) or self._placement is None:
+            return ""
+        return self._readout(self._rows[i].label, self._rows[i].column, x)
+
+    def _ref_coord(self, x: float, y: float) -> str:
+        if self._placement is None:
+            return ""
+        return self._readout(self._egm["channel_names"][0], 0, x)
+
+    def _on_ref_motion(self, event) -> None:
+        if event.inaxes is self._ref_ax and event.xdata is not None:
+            self.toolbar.set_message(self._ref_coord(event.xdata, event.ydata))
 
     @staticmethod
     def _place_axes(ax, canvas, top_px: int) -> None:
@@ -421,6 +509,17 @@ class EGMPanel(QtWidgets.QWidget):
         self._xlim = tuple(ax.get_xlim())
         self._ref_ax.set_xlim(*self._xlim)
         self._ref_canvas.draw_idle()
+
+    def _on_ylim(self, ax) -> None:
+        """Pan and zoom act on time only: undo any vertical change. Rows move
+        with the scroll bar, amplitudes with the gain buttons."""
+        if self._syncing or tuple(ax.get_ylim()) == self._ylim:
+            return
+        self._syncing = True
+        try:
+            ax.set_ylim(*self._ylim)
+        finally:
+            self._syncing = False
 
     def _bump(self, kind: str, factor: float) -> None:
         self._gain[kind] *= factor

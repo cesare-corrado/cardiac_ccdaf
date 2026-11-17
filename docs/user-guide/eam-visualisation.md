@@ -106,13 +106,18 @@ resize it. Untick it to close the panel.
 left-click near an electrode in the 3D view. The nearest `_car.txt` point is
 picked, and the panel shows the electrograms of its catheter placement (the
 catheter at that location). The 3D view then also shows that placement's
-bipoles, each at its first electrode:
+bipoles:
 
-- **blue** — a point (in `_car.txt`);
-- **red** — a bipole Carto did not keep as a point;
-- the **picked** bipole is larger, with a white arrow from its first to its
-  second electrode (the bipole direction). Untick **Show bipole** at the top of
-  the panel to hide the arrow.
+- **blue** — a point (in `_car.txt`), drawn where the point is. Carto puts a
+  point on either electrode of its bipole, so this is the first or the second
+  electrode;
+- **red** — a bipole Carto did not keep as a point, drawn at its first
+  electrode;
+- the **picked** bipole is larger, with a white arrow that always points from
+  the bipole's first electrode to its second (the bipole direction). For a
+  point on the second electrode, the arrow ends at the sphere instead of
+  starting from it. Untick **Show bipole** at the top of the panel to hide the
+  arrow.
 
 The blue and red bipoles can be picked too. Picking a point of another placement
 replaces them with that placement's bipoles. Like the other picking tools,
@@ -125,12 +130,28 @@ replaces them with that placement's bipoles. Like the other picking tools,
   has one vertical scale for all its rows, so amplitudes can be compared by eye
   (a low-voltage bipole looks small).
 - **WOI** zooms to the window of interest, **Full** shows the whole recording;
-  the toolbar zooms and pans.
+  the toolbar zooms and pans the time axis only (rows move with the scroll bar,
+  amplitudes with **−** / **+**). The reference trace always follows the time
+  range of the traces below it.
 - The **reference** trace, pinned at the top with the time axis: ms, with 0 at
   the reference activation.
 - The other traces, scrolling: one group per bipole (the bipolar trace, then its
   two unipoles), then the extra channels. A channel that was not recorded at this
   placement keeps its row, labelled *not recorded*.
+
+**Units.** The vertical axis has no units: each row has its own baseline, and
+each type its own scale. Two things give the amplitude:
+
+- a **scale bar** on the first row of each type (for example *1 mV*): a round
+  value that fits in a row. It follows **−** / **+**;
+- the **readout** at the right of the toolbar: the channel, the time and the
+  value in mV of the trace under the mouse, for example
+  `20A_7-8   t = 12 ms   0.534 mV`. It works on the reference trace too.
+
+A trace taller than its row runs into its neighbours, and the reference trace
+is cut at the edge of its strip; press **−** to bring it back. Values at the
+recorder's limits (about ±98 mV) are stored as recorded: they are saturated
+samples, not missing data.
 
 The window of interest is shaded, 0 ms is a dashed line, and a bipole that is a
 point has a red tick at its LAT. The picked bipole's rows have a shaded
