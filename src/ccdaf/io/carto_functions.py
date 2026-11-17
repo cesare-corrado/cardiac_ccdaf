@@ -324,12 +324,6 @@ def get_point_info(pFName: str, studyfolder: str) -> dict:
              'Impedances': [Rate, Number] })
 
 
-# Fill value for a trace that is not in a given ECG file. Raw counts seen so
-# far stay within about +/-1100, far from the int16 limit, so the most
-# negative int16 can never be a real sample.
-MISSING_TRACE = np.iinfo(np.int16).min
-
-
 def _ecg_channel_name(header_token: str) -> str:
     """ 'CS1-CS2(101)' -> 'CS1-CS2': the header appends the channel number in brackets """
     k = header_token.rfind('(')
@@ -357,8 +351,10 @@ def read_ecg_file(ECGFname: str, channels: list) -> tuple:
     ''' Reads the EGM file with name ECGFname and returns the raw traces of the
     requested channels (2.5 s at 1 kHz in the exports seen so far):
         * traces:  np.int16 array (len(channels), n_samples) of raw counts;
-                   multiply by gain to get mV. A channel missing from this file
-                   is filled with MISSING_TRACE.
+                   multiply by gain to get mV. The recorder clips at the int16
+                   limits, so -32768 and 32767 are real (saturated) samples.
+                   A channel missing from this file is filled with 0; only
+                   *present* tells it apart.
         * gain:    float, mV per count
         * present: bool array (len(channels),), False for a missing channel
     Channels are matched by exact name (the header "(n)" suffix removed), so
@@ -373,11 +369,12 @@ def read_ecg_file(ECGFname: str, channels: list) -> tuple:
         raise ValueError(f"{os.path.basename(ECGFname)}: {data.size} values do not fill "
                          f"{len(names)} channels")
     data  = data.reshape(-1, len(names))
-    if data.size and (data.min() <= MISSING_TRACE or data.max() > np.iinfo(np.int16).max):
+    lim = np.iinfo(np.int16)
+    if data.size and (data.min() < lim.min or data.max() > lim.max):
         raise ValueError(f"{os.path.basename(ECGFname)}: raw values outside the int16 range")
     index   = {n: i for i, n in enumerate(names)}
     present = np.array([c in index for c in channels], dtype=bool)
-    traces  = np.full((len(channels), data.shape[0]), MISSING_TRACE, dtype=np.int16)
+    traces  = np.zeros((len(channels), data.shape[0]), dtype=np.int16)
     for j, c in enumerate(channels):
         if present[j]:
             traces[j] = data[:, index[c]]

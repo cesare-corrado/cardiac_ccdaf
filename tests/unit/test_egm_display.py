@@ -110,6 +110,91 @@ def test_panel_marks_a_channel_missing_from_the_placement(qapp, egm):
     assert labels[-1] == "V1 (not recorded)"
 
 
+def test_panel_draws_a_saturated_channel(qapp, egm):
+    # A trace stuck at the recorder's limit is a real recording, not a gap.
+    col = egm["channel_names"].index("V1")
+    egm["traces"][0, col] = -32768
+    p = _panel(qapp, egm)
+    p.show_bipole(0, 0)
+    labels = [str(t.get_text()) for t in p._ax.get_yticklabels()]
+    assert labels[-1] == "V1"
+
+
+def test_reference_follows_toolbar_zoom_after_redraws(qapp, egm):
+    # Zoom and pan act on the trace axes; the reference strip must follow,
+    # also after the panel has been redrawn (a new pick, a gain change).
+    p = _panel(qapp, egm)
+    p.show_bipole(0, 0)
+    p.show_bipole(1, 1)
+    p._ax.set_xlim(-20.0, 30.0)                # what the toolbar does
+    assert p._ref_ax.get_xlim() == pytest.approx((-20.0, 30.0))
+    p._bump("Bipolar", 1.5)                    # a redraw keeps the range
+    assert p._ax.get_xlim() == pytest.approx((-20.0, 30.0))
+    p._ax.set_xlim(0.0, 10.0)
+    assert p._ref_ax.get_xlim() == pytest.approx((0.0, 10.0))
+
+
+def test_pan_and_zoom_move_time_only(qapp, egm):
+    p = _panel(qapp, egm)
+    p.show_bipole(0, 0)
+    rows = p._ax.get_ylim()
+    p._ax.set_xlim(-1990.0, -1960.0)
+    p._ax.set_ylim(rows[0] + 2.0, rows[1] + 2.0)      # a vertical pan
+    assert p._ax.get_ylim() == pytest.approx(rows)
+    assert p._ax.get_xlim() == pytest.approx((-1990.0, -1960.0))
+    assert p._ref_ax.get_xlim() == pytest.approx((-1990.0, -1960.0))
+    p._bump("Bipolar", 1.5)                            # still locked after a redraw
+    p._ax.set_ylim(-1.0, 0.0)
+    assert p._ax.get_ylim() == pytest.approx(rows)
+    # The toolbar's own code paths: a diagonal pan drag and a zoom box.
+    ax = p._ax
+    x0 = ax.get_xlim()
+    cx, cy = ax.transAxes.transform((0.5, 0.5))
+    ax.start_pan(cx, cy, 1)
+    ax.drag_pan(1, None, cx + 40, cy + 40)
+    ax.end_pan()
+    assert ax.get_ylim() == pytest.approx(rows)
+    assert ax.get_xlim() != pytest.approx(x0)            # time did move
+    ax._set_view_from_bbox((cx - 30, cy - 30, cx + 30, cy + 30))
+    assert ax.get_ylim() == pytest.approx(rows)
+    assert p._ref_ax.get_xlim() == pytest.approx(ax.get_xlim())
+
+
+def test_scale_bar_value():
+    from ccdaf.gui.egm_panel import SCALE_BAR_MAX_ROW, scale_bar_mv
+    assert scale_bar_mv(1.0) == 0.5            # 1 mV would be a full row
+    assert scale_bar_mv(0.01) == 50.0          # a very small trace scale
+    assert scale_bar_mv(1e4) == 0.01           # nothing fits: the smallest
+    for u in (0.003, 0.4, 2.5, 37.0):
+        assert scale_bar_mv(u) * u <= SCALE_BAR_MAX_ROW
+
+
+def test_scale_bars_follow_the_gain(qapp, egm):
+    from ccdaf.gui.egm_panel import BIP, REF, SCALE_BAR_MAX_ROW
+    p = _panel(qapp, egm)
+    before = p.scale_bars()
+    p._bump(BIP, 10.0)
+    after = p.scale_bars()
+    assert after[BIP] < before[BIP] and after[REF] == before[REF]
+    assert after[BIP] * p._units_per_mv(BIP) <= SCALE_BAR_MAX_ROW
+    texts = [t.get_text() for t in p._ax.texts]
+    assert f"{after[BIP]:g} mV" in texts       # drawn on the first bipolar row
+
+
+def test_readout_gives_channel_time_and_mv(qapp, egm):
+    # Synthetic traces: every sample is 100 * placement + the channel's
+    # position in the ECG file (20A_1-2 is 13th from 0, CS1-CS2 0th), 50
+    # samples, reference annotation at sample 2000 (so t runs -2000..-1951).
+    p = _panel(qapp, egm)
+    p.show_bipole(1, 0)
+    assert p._row_coord(-1990.0, 0.0) == "20A_1-2   t = -1990 ms   0.339 mV"
+    assert p._ref_coord(-1980.2, 0.0) == "CS1-CS2   t = -1980 ms   0.300 mV"
+    assert p._ref_coord(0.0, 0.0) == "CS1-CS2   t = 0 ms"      # past the end
+    p.show_bipole(2, 0)
+    v1 = p.row_labels().index("V1")
+    assert p._row_coord(0.0, -float(v1)) == "V1   not recorded"
+
+
 def test_panel_click_selects_the_bipole(qapp, egm):
     p = _panel(qapp, egm)
     got = []
