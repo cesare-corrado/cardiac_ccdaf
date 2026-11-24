@@ -56,6 +56,8 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra as _sp_dijkstra
 from scipy.spatial import cKDTree
 
+from ccdaf.core import surface_repair
+
 
 # ---------------------------------------------------------------------------
 class ClipMode(Enum):
@@ -69,6 +71,18 @@ class ClipMode(Enum):
 class ClipResult:
     mesh: pv.PolyData
     n_removed: int
+    tidied: str = ""          # what tidying the rim did, in words ("" = nothing)
+
+
+def tidy_rim(mesh: pv.PolyData):
+    """Tidy the saw-tooth rim a clip leaves: drop ears and slivers on the
+    openings (and the points they leave unused), and split pinched points.
+    Returns the tidied surface and what was done, in words."""
+    out, rep = surface_repair.run(mesh, surface_repair.trim_rims, surface_repair.split_pinches)
+    parts = [(rep.get("ears_removed", 0), "ears"), (rep.get("rim_slivers_removed", 0), "slivers"),
+             (rep.get("pinches_split", 0), "pinched points split")]
+    words = ", ".join(f"{n} {w}" for n, w in parts if n)
+    return out, (f"rim tidied ({words})" if words else "")
 
 
 # ---------------------------------------------------------------------------
@@ -828,6 +842,7 @@ class ClippingTool:
             return None
 
         kept = mesh.extract_cells(kept_idx).extract_surface(algorithm='dataset_surface')
+        kept, tidied = tidy_rim(kept)
 
         if not self._validate_mesh(kept):
             self._status(
@@ -849,9 +864,10 @@ class ClippingTool:
 
         self._status(
             f"PV clip done — removed {n_removed} triangles "
-            f"(mesh is now open at the PV ostium)."
+            f"(mesh is now open at the PV ostium)"
+            + (f"; {tidied}." if tidied else ".")
         )
-        return ClipResult(mesh=kept, n_removed=n_removed)
+        return ClipResult(mesh=kept, n_removed=n_removed, tidied=tidied)
 
     # ==================================================================
     # Pose memory
@@ -1098,6 +1114,7 @@ class ClippingTool:
             return ClipResult(mesh=self.get_mesh(), n_removed=0)
 
         kept = mesh.extract_cells(np.where(keep_mask)[0]).extract_surface(algorithm='dataset_surface')
+        kept, tidied = tidy_rim(kept)
 
         if not self._validate_mesh(kept):
             self._status(
@@ -1113,9 +1130,10 @@ class ClippingTool:
         n_removed = int(mesh.n_cells - kept_count)
         self._status(
             f"Clip done — removed {n_removed} triangles "
-            f"(mesh is now open where the geometry cut it)."
+            f"(mesh is now open where the geometry cut it)"
+            + (f"; {tidied}." if tidied else ".")
         )
-        return ClipResult(mesh=kept, n_removed=n_removed)
+        return ClipResult(mesh=kept, n_removed=n_removed, tidied=tidied)
 
     # ==================================================================
     # Geometry helpers

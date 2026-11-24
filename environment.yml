@@ -31,6 +31,11 @@ dependencies:
   # trimesh.fix_normals() needs networkx (an optional extra of trimesh);
   # decimate raises ModuleNotFoundError without it.
   - networkx>=3.0
+  # Sparse Cholesky (CHOLMOD) for the atrial coordinates: about 5x faster
+  # than SciPy's solver on the template warp. Its BLAS threads are capped
+  # with threadpoolctl; without the cap CHOLMOD is slower than SciPy.
+  - scikit-sparse>=0.5
+  - threadpoolctl>=3.0
   - pytest>=7.0
   - pip
   - pip:

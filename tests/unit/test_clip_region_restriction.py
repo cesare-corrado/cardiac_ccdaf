@@ -105,9 +105,13 @@ def test_sphere_swallowing_the_whole_mesh_removes_only_the_tagged_region():
 
     assert res.n_removed == int(np.sum(_tags(before) == PV_TAG))
     survivors = _tags(holder["mesh"])
-    assert survivors.size == int(np.sum(_tags(before) == BODY_LABEL))
-    # Not one body triangle went, though every one of them was inside.
+    # Every body triangle was inside, yet the clip took none of them; only
+    # tidying the new rim drops a few at its very edge (ears and slivers),
+    # and the result says so.
+    n_body = int(np.sum(_tags(before) == BODY_LABEL))
     assert np.all(survivors == BODY_LABEL)
+    assert 0.9 * n_body <= survivors.size <= n_body
+    assert (survivors.size == n_body) == (res.tidied == "")
 
 
 def test_sphere_still_respects_its_own_geometry():

@@ -87,13 +87,31 @@ are settable from scripts:
 
 ## Clean
 
-Merge duplicate points, drop disconnected points, remove non-manifold and
-degenerate cells, drop connected components too small to be anatomy, orient
-normals, and repair low-quality triangles while preserving the region labels. The first five are topology work; the last is
-vertex relocation and is also available on its own as
-`ccdaf.core.mesh_postprocessor.improve_quality`, for when you want the repair
-without the topology passes — after a resample, say, where those passes would
-renumber points for nothing.
+Merge duplicate points, drop disconnected points, remove duplicate,
+non-manifold and degenerate cells, drop connected components too small to be
+anatomy, orient normals, and repair low-quality triangles while preserving the
+region labels. Then three connectivity repairs that move no point: split
+pinched points, cut thin tunnels, and (tick box **flip edges**, on by default)
+flip edges. The quality repair is vertex relocation and is also available on
+its own as `ccdaf.core.mesh_postprocessor.improve_quality`, for when you want
+the repair without the topology passes — after a resample, say, where those
+passes would renumber points for nothing.
+
+**The connectivity repairs in Clean**
+
+| Repair | What it does |
+|---|---|
+| Duplicate triangles | A triangle listed twice is usually a zero-area flap hanging off the wall by one edge. The flap goes whole; a duplicate that is part of the wall keeps one copy, so no hole opens. |
+| Pinched points | A point where the rim passes twice (a bow tie) gets one copy per side, with the same fields. |
+| Thin tunnels | A thin bridge of tissue left by the segmentation makes a tunnel. It is cut along its shortest loop, if that loop is under 15 mm, and both cut ends are closed with a fan of triangles that takes the label round the loop. The fan's centre point gets the mean of its neighbours' fields. A wider tunnel is left, and the status bar says so. |
+| Flip edges | See [Flip edges](#flip-edges). |
+
+The status bar reports what each one did. Labels listed under **preserve
+labels** are never dropped or flipped.
+
+These are the same repairs **Compute UAC** applies before it lays the atrium
+flat (see [Universal atrial coordinates](uac.md#repairs-to-the-surface)), so a
+cleaned atrium needs none.
 
 !!! note "Enclosed cavities survive"
 
@@ -160,6 +178,30 @@ the PV ostia and mitral-valve rims.
     trade-off, and it has its own stage — **Smooth** — so that reshaping the
     surface is always something you asked for rather than a side effect of
     fixing triangles.
+
+## Flip edges
+
+Re-cut long thin pairs of triangles along their other diagonal. An edge is
+flipped when the two angles facing it sum to more than 180 degrees (it breaks
+the Delaunay condition), so the pair is thinner than it needs to be. Only pairs
+with the same label that lie within 10 degrees of each other are flipped, so the
+shape of the surface and the label borders stay. No point moves and every field
+is kept. Flipping repeats until no edge qualifies, so running it twice does
+nothing more.
+
+The same flips run as the last step of **Clean** (tick box **Clean also flips
+edges**, under Clean, on by default, greyed out when Clean is off). To flip
+without cleaning, untick **Clean** and tick **Flip edges only (without
+Clean)**, for example to keep the point numbering Clean's other passes would
+change.
+
+The number in the status bar is the count of edges that got a new diagonal. On
+a surface made from voxels it can be large (about 7% of the edges on a 400,000
+triangle atrium), because the voxel grid gives every square the same diagonal.
+
+Why it matters: a thin triangle has an angle close to 180 degrees, and in a
+flat map such as the [atrial coordinates](uac.md) it can be squeezed to nothing
+and fold.
 
 ## Fill holes
 

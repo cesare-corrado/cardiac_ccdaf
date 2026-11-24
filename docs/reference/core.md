@@ -7,6 +7,7 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.seed_geometry
 ::: ccdaf.core.seed_state_machine
 ::: ccdaf.core.mesh_postprocessor
+::: ccdaf.core.surface_repair
 ::: ccdaf.core.field_transfer
 ::: ccdaf.core.segmentation
 ::: ccdaf.core.eam_loader
@@ -26,6 +27,16 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.ventricular_fibres
 ::: ccdaf.core.eikonal
 ::: ccdaf.core.uvc
+::: ccdaf.core.uac
+::: ccdaf.core.uac.pipeline
+::: ccdaf.core.uac.template
+::: ccdaf.core.uac.mesh_ops
+::: ccdaf.core.uac.tunnels
+::: ccdaf.core.uac.extension
+::: ccdaf.core.uac.cut
+::: ccdaf.core.uac.flatten
+::: ccdaf.core.uac.slim
+::: ccdaf.core.uac.solvers
 ::: ccdaf.core.volume_from_segmentation
 ::: ccdaf.core.tissue_property
 ::: ccdaf.core.carp_export

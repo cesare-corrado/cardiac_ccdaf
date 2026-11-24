@@ -143,3 +143,21 @@ def test_every_pv_label_is_a_single_region_afterwards():
     out = tagger.reduce_to_single_components(tags)
     for lbl in LABELS.values():
         assert _n_regions(tagger, out, lbl) in (0, 1)
+
+
+def test_a_body_island_inside_a_vein_joins_that_vein():
+    """Body is reduced to one patch too, as the atrial coordinates need."""
+    _, tagger = _make()
+    adj = tagger._tri_adj
+    tags = np.full(adj.shape[0], BODY_LABEL, dtype=np.int32)
+    vein = _grow_patch(adj, 0, 300)
+    tags[list(vein)] = 13
+    # a cell whose two rings of neighbours are all vein, so turning it into
+    # body leaves the vein in one piece
+    inner = next(c for c in sorted(vein)
+                 if all(set(adj[n].indices) <= vein for n in adj[c].indices)
+                 and set(adj[c].indices) <= vein)
+    tags[inner] = BODY_LABEL                       # a body cell cut off inside the vein
+    out = tagger.reduce_to_single_components(tags)
+    assert out[inner] == 13
+    assert _n_regions(tagger, out, BODY_LABEL) == 1

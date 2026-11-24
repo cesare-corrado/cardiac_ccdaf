@@ -36,6 +36,10 @@ dependencies = [
     # trimesh.fix_normals() needs networkx, which trimesh only declares as an
     # optional extra — decimate raises ModuleNotFoundError without it.
     "networkx>=3.0",
+    # Caps the BLAS threads of the sparse Cholesky behind the atrial
+    # coordinates (scikit-sparse, installed by environment.yml; with pip it
+    # needs SuiteSparse, and without it the coordinates use SciPy's solver).
+    "threadpoolctl>=3.0",
     # Tetrahedral remeshing (MMG3D), for the volumetric workflow. A hard
     # dependency rather than an extra: without it a volume can only be
     # looked at and saved, which is not a workflow. The wrapper is MIT and

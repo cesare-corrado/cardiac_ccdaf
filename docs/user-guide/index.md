@@ -35,6 +35,7 @@ before tagging, tag before clipping, and so on.
 | Actions → Label ventricular surfaces | Split a ventricle's boundary, truncated or with its valves open, into base, epicardium, LV and RV endocardium | [Surface labels](surface-labels.md) |
 | Actions → Generate fibres | Set fibre and sheet directions in a labelled ventricle (`fiber`, `sheet`) | [Fibres](fibres.md) |
 | Actions → Compute UVC | Universal ventricular coordinates of a labelled, LV/RV-tagged ventricle (`uvc_ven`, `uvc_z`, `uvc_rho`, `uvc_phi`) | [Universal ventricular coordinates](uvc.md) |
+| Actions → Compute UAC | Universal atrial coordinates of a labelled left-atrial surface (`uac_alpha`, `uac_beta`), and its flat map | [Universal atrial coordinates](uac.md) |
 | Export → Carp | Write the mesh as CARP `.pts`, `.elem` and `.lon` files for simulation | [Export](export.md) |
 
 ## Views
