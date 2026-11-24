@@ -2,15 +2,20 @@
 RegionTagger
 ============
 
-Multi-source geodesic segmentation of a left-atrial surface mesh.
+Multi-source geodesic segmentation of an atrial surface mesh.
 
-Given a triangular `pyvista.PolyData` and user-provided seed points
-(4 pulmonary veins + 1 appendage), this module assigns per-triangle
-labels to the cell-data array ``elemTag``:
+Given a triangular `pyvista.PolyData` and user-provided seed points, this
+module assigns per-triangle labels to the cell-data array ``elemTag``.
+Left atrium (4 pulmonary veins + appendage):
 
-    LSPV = 11,  LIPV = 13,  RSPV = 15,  RIPV = 17,  LAA = 19
+    LSPV = 11,  LIPV = 13,  RSPV = 15,  RIPV = 17,  LAA = 19,  body 1
 
-Background body triangles remain at the initialization value (1).
+Right atrium (3 vessels + appendage):
+
+    SVC = 21,  IVC = 23,  CS = 25,  RAA = 27,  body 2
+
+The labels come from :mod:`ccdaf.core.atrial_labels`. Background triangles
+take the atrium's body label.
 
 Method
 ------
@@ -40,18 +45,15 @@ import numpy as np
 import pyvista as pv
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra
+from ccdaf.core import atrial_labels as al
 from ccdaf.core.mesh_loader import BODY_LABEL, UNASSIGNED
 
 # ---------------------------------------------------------------------------
 # Label conventions (from Claude.md)
 # ---------------------------------------------------------------------------
-LABELS: Dict[str, int] = {
-    "LSPV": 11,
-    "LIPV": 13,
-    "RSPV": 15,
-    "RIPV": 17,
-    "LAA":  19,
-}
+#: The left-atrial regions (the default atrium); the right-atrial ones are
+#: ``atrial_labels.RA.regions``.
+LABELS: Dict[str, int] = dict(al.LA.regions)
 
 
 
@@ -76,6 +78,14 @@ class TaggerConfig:
     ripv_radius_factor: float = 25.0
     # LAA radius factor (lobed pouch — typically expands more than PV tubes).
     laa_radius_factor:  float = 25.0
+    # Right atrium: the three vessels and the appendage. The cavae and the
+    # appendage are wider than the pulmonary veins, the coronary sinus
+    # narrower; on the 16 labelled right atria of the published fibre atlas
+    # these factors matched the published labels best (Dice 0.6 to 0.9).
+    svc_radius_factor:  float = 50.0
+    ivc_radius_factor:  float = 50.0
+    cs_radius_factor:   float = 25.0
+    raa_radius_factor:  float = 50.0
 
     # Optional hard overrides (world units). If set (non-None), they
     # take precedence over the corresponding factor for that seed.
@@ -103,6 +113,10 @@ class TaggerConfig:
             ("rspv_radius_factor", self.rspv_radius_factor),
             ("ripv_radius_factor", self.ripv_radius_factor),
             ("laa_radius_factor",  self.laa_radius_factor),
+            ("svc_radius_factor",  self.svc_radius_factor),
+            ("ivc_radius_factor",  self.ivc_radius_factor),
+            ("cs_radius_factor",   self.cs_radius_factor),
+            ("raa_radius_factor",  self.raa_radius_factor),
         )
         bad = [name for name, v in factor_fields
                if not (isinstance(v, (int, float)) and np.isfinite(v) and v > 0.0)]
@@ -132,14 +146,26 @@ _RADIUS_FACTOR_ATTR: Dict[str, str] = {
     "RSPV": "rspv_radius_factor",
     "RIPV": "ripv_radius_factor",
     "LAA":  "laa_radius_factor",
+    "SVC":  "svc_radius_factor",
+    "IVC":  "ivc_radius_factor",
+    "CS":   "cs_radius_factor",
+    "RAA":  "raa_radius_factor",
 }
+
+#: Appendages: lobed pouches, capped by ``laa_radius_abs`` when it is set.
+_APPENDAGES = frozenset(("LAA", "RAA"))
 
 
 # ---------------------------------------------------------------------------
 # RegionTagger
 # ---------------------------------------------------------------------------
 class RegionTagger:
-    """Geodesic multi-source tagger for the LA surface mesh."""
+    """Geodesic multi-source tagger for an atrial surface mesh.
+
+    It tags one atrium at a time: :meth:`tag` takes the atrium
+    (:data:`ccdaf.core.atrial_labels.LA` by default), whose regions and body
+    every pass then uses. The smoothing and island passes read the atrium
+    from the label they are given."""
 
     def __init__(
         self,
@@ -151,6 +177,7 @@ class RegionTagger:
 
         self.mesh: pv.PolyData = mesh
         self.config: TaggerConfig = config or TaggerConfig()
+        self.atrium: al.Atrium = al.LA
 
         self._points: np.ndarray = np.asarray(mesh.points, dtype=float)
         self._triangles: np.ndarray = self._extract_triangles(mesh)
@@ -169,14 +196,17 @@ class RegionTagger:
     def tag(
         self,
         seeds: Mapping[str, int | Sequence[float]],
+        atrium: Optional[al.Atrium] = None,
     ) -> np.ndarray:
         """Segment the mesh and write labels into ``mesh.cell_data['elemTag']``.
 
         Parameters
         ----------
         seeds
-            Mapping ``{name -> seed}`` with names in ``LABELS``.
+            Mapping ``{name -> seed}`` with the atrium's region names.
             A seed may be either a vertex index (int) or an (x,y,z) coordinate.
+        atrium
+            Which atrium's labels to write (default: the left atrium).
 
         Returns
         -------
@@ -186,6 +216,7 @@ class RegionTagger:
         # Guard against any post-construction mutation of the config: if a
         # GUI slider pushed a factor <= 0 after init, reject before work.
         self.config._validate()
+        self.atrium = atrium or al.LA
 
         seed_vertices = self._resolve_seeds(seeds)
 
@@ -205,7 +236,7 @@ class RegionTagger:
         
 
         # PV labels of interest
-        pv_labels = {LABELS["LSPV"], LABELS["LIPV"], LABELS["RSPV"], LABELS["RIPV"], LABELS["LAA"]}
+        pv_labels = set(self.atrium.regions.values())
         
         # 2. Identify "Multi-tag" vertices
         # We find vertices where the incident triangles have >1 unique PV label
@@ -223,7 +254,7 @@ class RegionTagger:
         tri_label = self._fill_holes(tri_label)
         
         # Write back into the mesh.
-        elem_tag = np.full(self.mesh.n_cells, BODY_LABEL, dtype=np.int32)
+        elem_tag = np.full(self.mesh.n_cells, self.atrium.body, dtype=np.int32)
         assigned = tri_label != UNASSIGNED
         elem_tag[assigned] = tri_label[assigned]
         self.mesh.cell_data["elemTag"] = elem_tag
@@ -324,7 +355,7 @@ class RegionTagger:
         """Normalize seeds to vertex indices; ignore non-segmentation seeds."""
         out: Dict[str, int] = {}
         for name, seed in seeds.items():
-            if name not in LABELS:
+            if name not in self.atrium.regions:
                 # e.g. the mitral seed is stored alongside but not tagged here.
                 continue
             if np.isscalar(seed):
@@ -336,7 +367,7 @@ class RegionTagger:
                 idx = int(np.argmin(np.sum((self._points - p) ** 2, axis=1)))
             out[name] = idx
 
-        missing = set(LABELS) - set(out)
+        missing = set(self.atrium.regions) - set(out)
         if missing:
             raise ValueError(f"missing required seeds: {sorted(missing)}")
         return out
@@ -388,10 +419,10 @@ class RegionTagger:
              for LAA) if set.
           2. Per-seed factor from TaggerConfig * median edge length.
         """
-        if name == "LAA":
+        if name in _APPENDAGES:
             if self.config.laa_radius_abs is not None:
                 return float(self.config.laa_radius_abs)
-            return self.config.laa_radius_factor * self._median_edge
+            return getattr(self.config, _RADIUS_FACTOR_ATTR[name]) * self._median_edge
 
         # Pulmonary veins: a single abs override covers all four if set;
         # otherwise read the vein-specific factor.
@@ -575,8 +606,8 @@ class RegionTagger:
     # ------------------------------------------------------------------
     # Label assignment
     # ------------------------------------------------------------------
-    @staticmethod
     def _vertex_voronoi(
+        self,
         dist: np.ndarray,
         radii: np.ndarray,
         names: Sequence[str],
@@ -590,7 +621,7 @@ class RegionTagger:
 
         label = np.full(n, UNASSIGNED, dtype=np.int32)
         reachable = np.isfinite(best_dist)
-        label_lookup = np.array([LABELS[nm] for nm in names], dtype=np.int32)
+        label_lookup = np.array([self.atrium.regions[nm] for nm in names], dtype=np.int32)
         label[reachable] = label_lookup[best[reachable]]
         return label
 
@@ -642,7 +673,7 @@ class RegionTagger:
         centroids = None  # lazy: computed once if the nearest-tri fallback fires
 
         for name in names:
-            lbl = LABELS[name]
+            lbl = self.atrium.regions[name]
             mask = out == lbl
             if not np.any(mask):
                 continue
@@ -679,7 +710,7 @@ class RegionTagger:
     def reduce_to_single_components(self, tri_label: np.ndarray) -> np.ndarray:
         """Each PV label, and the body, as one connected patch, seed-free.
 
-        For every label in :data:`LABELS` and for the body, keep its largest
+        For every label of each atrium present (regions and body), keep its largest
         connected component and reassign each smaller island to the majority
         label bordering it — BODY when it borders nothing else, which is the
         usual case (a stray triangle sitting in the body); a body island cut
@@ -697,7 +728,8 @@ class RegionTagger:
         correction to keep an export from carrying one.
         """
         out = np.asarray(tri_label).copy()
-        for lbl in (*LABELS.values(), BODY_LABEL):
+        present = set(np.unique(out).tolist())
+        for lbl in (v for a in al.ATRIA for v in a.values if v in present):
             mask = out == lbl
             if not np.any(mask):
                 continue
@@ -711,7 +743,8 @@ class RegionTagger:
                 if c == keep:
                     continue
                 island = global_idx[comp == c]
-                out[island] = self._border_majority_label(island, out)
+                out[island] = self._border_majority_label(island, out,
+                                                          al.atrium_of(lbl).body)
         return out
 
     def geodesic_path(self, a: int, b: int) -> list[int]:
@@ -764,13 +797,14 @@ class RegionTagger:
         :meth:`_erode_every_pv`).
         """
         out = np.asarray(tri_label).copy()
-        if label == BODY_LABEL:
-            return self._erode_every_pv(out)
-        if label not in LABELS.values():
+        a = al.atrium_of(label)
+        if a is None:
             return out
+        if label == a.body:
+            return self._erode_every_pv(out, a)
         is_label = (out == label).astype(np.int64)
-        is_bg = (out == BODY_LABEL) | (out == UNASSIGNED)
-        is_other_pv = np.isin(out, list(LABELS.values())) & (out != label)
+        is_bg = (out == a.body) | (out == UNASSIGNED)
+        is_other_pv = ~is_bg & (out != label)
         n_label = self._tri_adj.dot(is_label)
         n_other = self._tri_adj.dot(is_other_pv.astype(np.int64))
         out[is_bg & (n_label >= 2) & (n_other == 0)] = label
@@ -788,13 +822,14 @@ class RegionTagger:
         it is a dilation of all of them at once (see :meth:`_dilate_every_pv`).
         """
         out = np.asarray(tri_label).copy()
-        if label == BODY_LABEL:
-            return self._dilate_every_pv(out)
-        if label not in LABELS.values():
+        a = al.atrium_of(label)
+        if a is None:
             return out
-        is_bg = ((out == BODY_LABEL) | (out == UNASSIGNED)).astype(np.int64)
+        if label == a.body:
+            return self._dilate_every_pv(out, a)
+        is_bg = ((out == a.body) | (out == UNASSIGNED)).astype(np.int64)
         n_bg = self._tri_adj.dot(is_bg)
-        out[(out == label) & (n_bg >= 2)] = BODY_LABEL
+        out[(out == label) & (n_bg >= 2)] = a.body
         return out
 
     # -- body as a smoothing target -------------------------------------
@@ -809,23 +844,23 @@ class RegionTagger:
     # come within a triangle of each other the result depends on the order
     # LABELS happens to be written in. Both passes below read their neighbour
     # counts from one snapshot of the input, which makes them order-free.
-    def _erode_every_pv(self, tri_label: np.ndarray) -> np.ndarray:
+    def _erode_every_pv(self, tri_label: np.ndarray, a: al.Atrium = al.LA) -> np.ndarray:
         """Body grows: a PV cell with >=2 background neighbours reverts."""
         out = np.asarray(tri_label).copy()
-        is_bg = ((out == BODY_LABEL) | (out == UNASSIGNED)).astype(np.int64)
+        is_bg = ((out == a.body) | (out == UNASSIGNED)).astype(np.int64)
         n_bg = self._tri_adj.dot(is_bg)
-        out[np.isin(out, list(LABELS.values())) & (n_bg >= 2)] = BODY_LABEL
+        out[np.isin(out, list(a.regions.values())) & (n_bg >= 2)] = a.body
         return out
 
-    def _dilate_every_pv(self, tri_label: np.ndarray) -> np.ndarray:
+    def _dilate_every_pv(self, tri_label: np.ndarray, a: al.Atrium = al.LA) -> np.ndarray:
         """Body shrinks: a background cell with >=2 neighbours of exactly one
         PV label joins it. A cell caught between two regions keeps the seam
         guard of :meth:`dilate_label` — it borders another PV label, so no
         label may claim it, and the two cannot merge."""
         base = np.asarray(tri_label)
         out = base.copy()
-        pvs = list(LABELS.values())
-        is_bg = (base == BODY_LABEL) | (base == UNASSIGNED)
+        pvs = list(a.regions.values())
+        is_bg = (base == a.body) | (base == UNASSIGNED)
         n_pv = self._tri_adj.dot(np.isin(base, pvs).astype(np.int64))
         for label in pvs:
             n_label = self._tri_adj.dot((base == label).astype(np.int64))
@@ -833,7 +868,7 @@ class RegionTagger:
         return out
 
     def _border_majority_label(self, cells: np.ndarray,
-                               tri_label: np.ndarray) -> int:
+                               tri_label: np.ndarray, body: int = BODY_LABEL) -> int:
         """Majority label among the cells bordering ``cells`` but not in it.
 
         A component's external edge-neighbours never share its label (they
@@ -842,7 +877,7 @@ class RegionTagger:
         """
         external = np.setdiff1d(np.unique(self._tri_adj[cells, :].indices), cells)
         if external.size == 0:
-            return BODY_LABEL
+            return int(body)
         vals, counts = np.unique(tri_label[external], return_counts=True)
         return int(vals[int(np.argmax(counts))])
 
@@ -853,7 +888,7 @@ class RegionTagger:
         """
         out = tri_label.copy()
         # Define what we consider "background" (holes)
-        is_background = (out == UNASSIGNED) | (out == BODY_LABEL)
+        is_background = (out == UNASSIGNED) | (out == self.atrium.body)
         
         if not np.any(is_background):
             return out
@@ -886,7 +921,7 @@ class RegionTagger:
             # 3. Check labels of external neighbors
             neighbor_labels = out[external_neighbors]
             # Exclude background labels from the "rim" check
-            rim_labels = neighbor_labels[(neighbor_labels != UNASSIGNED) & (neighbor_labels != BODY_LABEL)]
+            rim_labels = neighbor_labels[(neighbor_labels != UNASSIGNED) & (neighbor_labels != self.atrium.body)]
             
             unique_rim_labels = np.unique(rim_labels)
             

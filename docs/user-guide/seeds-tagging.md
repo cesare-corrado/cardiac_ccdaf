@@ -6,19 +6,22 @@ The **Seed type** dropdown at the top of the panel chooses which set of
 surface points you are placing — and, with it, what the rest of the workflow
 offers:
 
-- **seed_LA** (default) — the six anatomical landmarks below that drive region
-  tagging. Exported under the `seed_LA` key.
-- **landmarks_LA_UAC** — four left-atrium landmarks for a universal-atrial-
-  coordinate step: `LSPV_BODY_JCN`, `RSPV_BODY_JCN`, `SEPTAL_WALL`,
-  `LATERAL_WALL`. Picked, saved and exported exactly like seeds, but under the
-  `landmarks_LA_UAC` key, and **not** used for tagging.
-- **seed_RA** — the right atrium. No points are defined yet: choosing it says
-  what the mesh is and switches the left-atrial tools off.
+- **seed_LA** (default) — the left atrium: the six anatomical landmarks below
+  that drive region tagging. Exported under the `seed_LA` key.
+- **seed_RA** — the right atrium: five seeds (see
+  [Right atrium](#right-atrium)), the same tagging, correction and clipping
+  with the right-atrial labels. Exported under the `seed_RA` key.
 
-The sets are independent: you can complete several in one session — switching
+The sets are independent: you can complete both in one session — switching
 the dropdown keeps each set's picks — and a saved bundle carries every
 completed set at once. The rest of this section describes the default
-**seed_LA** set.
+**seed_LA** set; the right atrium works the same way.
+
+!!! note "`landmarks_LA_UAC` removed"
+
+    An earlier version offered a `landmarks_LA_UAC` set of four left-atrial
+    landmarks. The atrial coordinates are computed without them, so the set is
+    gone. A file that still carries it loads; that set is ignored.
 
 !!! note "Renamed from `seed`"
 
@@ -36,13 +39,13 @@ so when there is nothing to offer.
 
 | Seed type | Pick points | Tagging | Manual correction | Clipping |
 |---|---|---|---|---|
-| `seed_LA` | 6 seeds | LSPV, LIPV, RSPV, RIPV, LAA radii | body, LSPV, LIPV, RSPV, RIPV, LAA | LSPV, LIPV, RSPV, RIPV, MV |
-| `landmarks_LA_UAC` | 4 landmarks | — | — | — |
-| `seed_RA` | — | — | — | — |
+| `seed_LA` | 6 seeds | LSPV, LIPV, RSPV, RIPV, LAA radii | LA body, LSPV, LIPV, RSPV, RIPV, LAA | LSPV, LIPV, RSPV, RIPV, MV |
+| `seed_RA` | 5 seeds | SVC, IVC, CS, RAA radii | RA body, SVC, IVC, CS, RAA | SVC, IVC, CS, TV |
 
-Switch back to `seed_LA` to correct or clip: those tools act on the tagging
-that seed set produced. Values you tuned — a radius factor, the active label,
-the clip region — are remembered across the switch.
+The tools act on the atrium of the chosen seed type: switch to `seed_LA` to
+correct or clip a left atrium, to `seed_RA` for a right one. Values you tuned
+(a radius factor, the active label, the clip region) are remembered for each
+seed type across the switch.
 
 **Run automatic tagging** acts on the chosen seed type and no other, so
 changing the dropdown never re-runs another set's tagging behind your back.
@@ -106,3 +109,37 @@ The regions and their labels:
 </figure>
 
 After tagging, refine the result in [Manual correction](manual-correction.md).
+
+## Right atrium
+
+Choose **seed_RA** and place five seeds, **in order**:
+
+| # | Seed | Meaning |
+|---|---|---|
+| 1 | SVC | Superior vena cava (inside it) |
+| 2 | IVC | Inferior vena cava (inside it) |
+| 3 | CS  | Coronary sinus (inside it) |
+| 4 | RAA | Right atrial appendage (inside it) |
+| 5 | TV  | Tricuspid valve (centre); used for clipping, not tagged |
+
+Tagging writes these labels to `elemTag`:
+
+**Right-atrial labels**
+
+| Region | `elemTag` |
+|---|---:|
+| RA body | 2 |
+| SVC | 21 |
+| IVC | 23 |
+| CS | 25 |
+| RAA | 27 |
+
+The right-atrial body is 2, not the left atrium's 1, so a mesh that holds both
+atria keeps them apart. The legend and its colours follow the labels present:
+a left atrium, a right atrium, or both.
+
+The radius factors start at 50 for the venae cavae and the appendage, which
+are wider than the pulmonary veins, and at 25 for the narrower coronary sinus.
+On the 16 labelled right atria of the published fibre atlas, these starting
+values gave regions that overlap the published ones by a Dice coefficient of
+about 0.6 to 0.9. Tune them before running, as for the left atrium.

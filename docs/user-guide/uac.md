@@ -2,10 +2,13 @@
 
 **Actions → Compute UAC…**
 
-Gives every point of a labelled left-atrial surface two coordinates on a fixed
-unit square, so the same place in different atria has the same coordinates.
-The veins and the appendage land in the same place for every patient. The
-coordinates are written as point arrays and can be shown like any other field.
+Gives every point of a labelled atrial surface, left or right, two coordinates
+on a fixed unit square, so the same place in different atria has the same
+coordinates. The veins and the appendage land in the same place for every
+patient. The coordinates are written as point arrays and can be shown like any
+other field. Which atrium it is comes from the labels; the right atrium is
+described in [Right atrium](#right-atrium). A surface that carries labels of
+both atria is refused for now: the two together are not supported yet.
 
 **The two coordinates and their ranges**
 
@@ -181,6 +184,51 @@ solver installed is used, without asking:
 3. SciPy's built-in solver, always present and slowest.
 
 The report says which one ran. All three give the same coordinates.
+
+## Right atrium
+
+On a surface tagged as a right atrium ([Seeds & tagging](seeds-tagging.md#right-atrium)),
+Compute UAC runs the right-atrial version of the same method: the same repairs,
+virtual extensions of short vessels, cut, first map and warp to a template,
+with the right atrium's cut and template.
+
+**What it needs:** all five right-atrial labels (RA body 2, SVC 21, IVC 23,
+CS 25, RAA 27), the surface open at the tricuspid valve and at the end of the
+SVC, IVC and CS.
+
+**The two coordinates on the right atrium**
+
+| Array | Coordinate | Range |
+|---|---|---|
+| `uac_alpha` | lateral to septal, over the roof | 0 at the lateral tricuspid valve, 0.5 on the roof between the venae cavae, 1 at the septal tricuspid valve |
+| `uac_beta` | IVC to SVC | 0 on the IVC side, 1 on the SVC side |
+
+This is the published convention for the right atrium. The cut runs along the
+roof between the venae cavae and from each cava to the tricuspid valve; it
+splits the atrium into a lateral half, which holds the appendage, and a septal
+half, which holds the coronary sinus.
+
+**The right-atrial template, from the published fibre atlas**
+
+| Structure | Place on the square | Size |
+|---|---|---|
+| SVC ostium | half-ellipse on the roof, centre (0.5, 0.885) | 0.115 along beta, 0.11 across alpha |
+| IVC ostium | half-ellipse on the roof, centre (0.5, 0.115) | same |
+| SVC, IVC ends | circles at (0.555, 0.885), (0.555, 0.115) | radius 0.02 |
+| CS ostium, end | circles at (0.85, 0.38) | radius 0.03, 0.015 |
+| RAA ostium | ellipse at (0.135, 0.839) | 0.075 along alpha, 0.069 along beta |
+
+These places were measured on the 16 labelled right atria of the published
+fibre atlas (Roney et al., 2021), whose coordinates put each structure at a
+fixed place. On those 16 atria the run gave 0 folded triangles and every ring
+within 0.008 of its place; its coordinates differ from the published ones by
+a median of 2 to 8 mm per atrium, about as much as on the left atrium.
+
+The window, the report, Undo and **Save flat map…** work as for the left
+atrium. A right atrium whose superior vena cava and inferior vena cava are
+labelled the wrong way round is refused: the appendage lies nearer the SVC.
+
+Atrial fibres are not yet mapped on a right atrium.
 
 ## Atrial fibres
 

@@ -50,8 +50,9 @@ returns a surface whatever the file held, reducing a volume to its boundary.
 - **`.json`** — human-readable `{"seed_LA": {name: [x, y, z], ...}}`. Stores
   **coordinates only**, no vertex ids, so seeds reload onto a clipped or refined
   mesh (each snapped to the nearest surface point). Every seed type uses the
-  same layout under its own key — **landmarks_LA_UAC** under
-  `landmarks_LA_UAC`, and so on.
+  same layout under its own key: the right-atrial seeds under `seed_RA`. A
+  file that still carries the retired `landmarks_LA_UAC` set loads, with that
+  set ignored.
 - **`.pkl`** — the seeds alongside a Carto-dict surface.
 
 !!! note "The `seeds` key was renamed"
@@ -87,8 +88,7 @@ A set appears **only when it has been completed**. That is load-bearing, not
 tidiness: nothing in the file says which anatomy it holds, so an absent key has
 to mean absent. A ventricular mesh therefore carries no `seed_LA` key, and an
 atrial one carries no right-atrial key, rather than each carrying an empty one
-that a reader would take at face value. A seed type with no points defined
-(`seed_RA` today) is never written at all.
+that a reader would take at face value.
 
 **Other cell fields.** The Carto surface dictionary only has room for vertex
 values, so every other chosen cell field (`tissueTag`, and `Normals` if ticked)

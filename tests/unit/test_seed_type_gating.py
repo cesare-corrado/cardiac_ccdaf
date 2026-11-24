@@ -45,14 +45,20 @@ from PyQt5 import QtWidgets
 
 from ccdaf.app.ccdaf import CCDAF
 from ccdaf.core.seed_profiles import (
-    LANDMARKS_LA_UAC_PROFILE, SEED_LA_PROFILE, SEED_PROFILE_ORDER,
-    SEED_RA_PROFILE,
+    SEED_LA_PROFILE, SEED_PROFILE_ORDER, SEED_RA_PROFILE, SeedProfile,
 )
 from ccdaf.gui.clipping_widget import ClippingWidget
 from ccdaf.gui.manual_correction_widget import ManualCorrectionWidget
 from ccdaf.gui.postprocessing_widget import PostprocessingWidget
 from ccdaf.gui.volume_postprocessing_widget import VolumePostprocessingWidget
 from ccdaf.gui.tagging_widget import TaggingWidget
+
+
+#: A seed type with no points, radii, labels or regions: what every panel
+#: must switch itself off for. No shipped profile is empty any more, so the
+#: gating is exercised with this one.
+EMPTY = SeedProfile(type_id="empty", label="empty", export_key="empty",
+                    order=(), prompts={}, colors={})
 
 
 @pytest.fixture(scope="module")
@@ -93,7 +99,7 @@ def test_run_button_needs_a_profile_that_tags(panels):
     assert tagging.btn_tag.isEnabled()
 
     # Complete seeds are not enough: the seed type has to tag something.
-    for profile in (LANDMARKS_LA_UAC_PROFILE, SEED_RA_PROFILE):
+    for profile in (EMPTY,):
         _apply(profile, panels)
         tagging.set_seeds_complete(True)
         assert not tagging.btn_tag.isEnabled()
@@ -105,7 +111,8 @@ def test_tuned_radius_survives_a_round_trip(panels):
     tagging.spn_radius["LAA"].setValue(42.0)
 
     _apply(SEED_RA_PROFILE, panels)
-    assert tagging.radius_factors() == {}      # nothing of another set leaks
+    # only the right atrium's radii: nothing of the other set leaks
+    assert tuple(tagging.radius_factors()) == SEED_RA_PROFILE.radius_names
 
     _apply(SEED_LA_PROFILE, panels)
     assert tagging.radius_factors()["LAA"] == pytest.approx(42.0)
@@ -128,7 +135,7 @@ def test_manual_cannot_be_activated_without_labels(panels):
     assert manual.btn_edit_toggle.isEnabled()
     assert manual.current_label() is not None
 
-    _apply(SEED_RA_PROFILE, panels)
+    _apply(EMPTY, panels)
     assert manual.current_label() is None
     manual.set_active(True)               # refused, not obeyed
     assert not manual.btn_edit_toggle.isEnabled()
@@ -180,7 +187,7 @@ def test_clipping_is_dead_without_regions(panels):
     clipping.chk_active.setChecked(True)
     assert clipping.btn_start.isEnabled()
 
-    for profile in (LANDMARKS_LA_UAC_PROFILE, SEED_RA_PROFILE):
+    for profile in (EMPTY,):
         _apply(profile, panels)
         assert clipping.selected_region() == ""
         assert not clipping.chk_active.isEnabled()
@@ -222,7 +229,10 @@ def test_label_entries_follow_the_profile():
     entries = CCDAF._label_entries(SEED_LA_PROFILE)
     assert [v for v, _ in entries] == [int(v) for v in SEED_LA_PROFILE.label_values]
     assert all(name for _, name in entries)          # every label is named
-    assert CCDAF._label_entries(SEED_RA_PROFILE) == []
+    ra = CCDAF._label_entries(SEED_RA_PROFILE)
+    assert [v for v, _ in ra] == [21, 23, 25, 27, 2]
+    assert [n for _, n in ra] == ["SVC", "IVC", "CS", "RAA", "RA body"]
+    assert CCDAF._label_entries(EMPTY) == []
 
 
 # ----------------------------------------------------------- volume mode

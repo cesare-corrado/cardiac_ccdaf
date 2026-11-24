@@ -46,8 +46,10 @@ MODE_CONTOUR = "contour"
 MODE_SPHERE = "sphere"
 MODE_PLANE = "plane"
 
-#: The region that has no tagged surface, and so no contour.
-NO_CONTOUR_REGION = "MV"
+#: The regions with no tagged surface, and so no contour: the valves (the
+#: mitral of the left atrium, the tricuspid of the right).
+NO_CONTOUR_REGIONS = ("MV", "TV")
+NO_CONTOUR_REGION = NO_CONTOUR_REGIONS[0]          # kept for older callers
 
 
 def _tip(*lines: str) -> str:
@@ -106,6 +108,7 @@ class ClippingWidget(QtWidgets.QGroupBox):
         # offer none, so a switch away and back does not silently re-point
         # the panel at whichever region happens to come first.
         self._last_region = str(region_names[0]) if region_names else ""
+        self._region_by_type: dict = {}
         # Guards the widget→panel→widget round trip while a pose is being
         # written in from the 3D widget.
         self._syncing = False
@@ -398,7 +401,10 @@ class ClippingWidget(QtWidgets.QGroupBox):
         previous = self.selected_region()
         if previous:
             self._last_region = previous
-        wanted = self._last_region
+            # remembered per seed type (left and right atria each keep theirs)
+            self._region_by_type[getattr(self, "_follows", "")] = previous
+        wanted = self._region_by_type.get(follows, self._last_region)
+        self._follows = follows
 
         self.cmb_region.blockSignals(True)
         self.cmb_region.clear()
@@ -507,28 +513,29 @@ class ClippingWidget(QtWidgets.QGroupBox):
         it selectable would only trade the grey for an error box. Whichever
         combo the user changes last, the *other* one is the one adjusted, so
         neither selection is silently overruled."""
-        region_is_mv = self.selected_region() == NO_CONTOUR_REGION
+        region = self.selected_region()
+        region_is_mv = region in NO_CONTOUR_REGIONS
         mode_is_contour = self.selected_mode() == MODE_CONTOUR
 
-        no_contour_tip = (
-            f"{NO_CONTOUR_REGION} carries no tagged surface region, so the "
-            f"contour snake has nothing to travel on. Use a sphere or a plane."
-        )
+        def no_contour_tip(name):
+            return (f"{name} carries no tagged surface region, so the contour "
+                    f"snake has nothing to travel on. Use a sphere or a plane.")
 
         # Mode combo: forbid contour while MV is the region.
         item = self.cmb_mode.model().item(
             self.cmb_mode.findData(MODE_CONTOUR))
         if item is not None:
             item.setEnabled(not region_is_mv)
-            item.setToolTip(no_contour_tip if region_is_mv else "")
+            item.setToolTip(no_contour_tip(region) if region_is_mv else "")
 
-        # Region combo: forbid MV while contour is the mode.
-        idx = self.cmb_region.findData(NO_CONTOUR_REGION)
-        if idx >= 0:
-            item = self.cmb_region.model().item(idx)
-            if item is not None:
-                item.setEnabled(not mode_is_contour)
-                item.setToolTip(no_contour_tip if mode_is_contour else "")
+        # Region combo: forbid a valve while contour is the mode.
+        for valve in NO_CONTOUR_REGIONS:
+            idx = self.cmb_region.findData(valve)
+            if idx >= 0:
+                item = self.cmb_region.model().item(idx)
+                if item is not None:
+                    item.setEnabled(not mode_is_contour)
+                    item.setToolTip(no_contour_tip(valve) if mode_is_contour else "")
 
     def _on_selection_changed(self) -> None:
         """Announce the new region/mode pair, and remember the region.
@@ -563,4 +570,5 @@ __all__ = [
     "MODE_SPHERE",
     "MODE_PLANE",
     "NO_CONTOUR_REGION",
+    "NO_CONTOUR_REGIONS",
 ]

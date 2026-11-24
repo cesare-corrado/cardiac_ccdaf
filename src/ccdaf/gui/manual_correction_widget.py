@@ -51,6 +51,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         # silently re-points the editor at whichever label sorts first,
         # which is the change this panel exists not to make behind the
         # user's back.
+        self._label_by_type: dict = {}
         self._last_label: Optional[int] = (
             int(label_entries[0][0]) if label_entries else None)
 
@@ -267,7 +268,11 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         previous = self.current_label()
         if previous is not None:
             self._last_label = int(previous)
-        wanted = self._last_label
+            # remembered per seed type, so the left and right atria each
+            # come back to the label last used on them
+            self._label_by_type[getattr(self, "_follows", "")] = int(previous)
+        wanted = self._label_by_type.get(follows, self._last_label)
+        self._follows = follows
 
         self.cmb_label.blockSignals(True)
         self.cmb_label.clear()

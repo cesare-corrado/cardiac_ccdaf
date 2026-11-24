@@ -148,7 +148,7 @@ def export_binary(path: str, mesh: pv.PolyData,
 
     ``point_sets`` and ``include_elem_tag`` extend the payload for the
     File → Save bundle. ``point_sets`` maps a seed profile's ``export_key``
-    to its ``{name: xyz}`` mapping — ``"seed_LA"``, ``"landmarks_LA_UAC"``,
+    to its ``{name: xyz}`` mapping — ``"seed_LA"``, ``"seed_RA"``,
     and whatever anatomy is added next — and only non-empty sets are
     written, so a bundle never claims a set the session does not hold. An
     ``"elemTag"`` key (the cell tags, which the Carto surface dict cannot

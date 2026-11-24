@@ -216,6 +216,10 @@ def apply(mesh: pv.PolyData, layer: str, thickness=None):
         raise ValueError(f"unknown layer {layer!r}")
     if ALPHA not in mesh.point_data or BETA not in mesh.point_data:
         raise ValueError("The atrium has no UAC: compute UAC first.")
+    if LABEL in mesh.cell_data:
+        from ccdaf.core.uac import which_atrium
+        if which_atrium(mesh.cell_data[LABEL]) != "LA":
+            raise ValueError("Atrial fibres are mapped on a left atrium only, for now.")
     out = mesh.copy()
     reports = []
     for lay in (("endo", "epi") if layer == "bilayer" else (layer,)):

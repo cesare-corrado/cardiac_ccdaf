@@ -33,14 +33,11 @@ import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import splu
 
+from ccdaf.core.uac import layout as lay
 from ccdaf.core.uac.cut import Anatomy, Cut
 from ccdaf.core.uac.mesh_ops import order_loops, path_length, unique_edges
 from ccdaf.core.uac.slim import slim
 from ccdaf.core.uac.solvers import SpdSolver
-from ccdaf.core.uac.template import (
-    END_C, END_R, GAP, INF_R, LAA, LAA_C, LAA_RA, LAA_RB, LIPV, LIPV_C, LSPV, LSPV_C,
-    RIPV, RIPV_C, RSPV, RSPV_C, SUP_RA, SUP_RB,
-)
 
 POSTERIOR, ANTERIOR = 0, 1
 
@@ -147,7 +144,12 @@ def flatten_half(P: np.ndarray, t: np.ndarray, tag: np.ndarray, is_real: np.ndar
                  cut: Cut, anat: Anatomy, side: int, *, retry_if_degenerate: bool,
                  solver: Optional[SpdSolver] = None, iters: int = 100,
                  should_stop: Optional[Callable[[], bool]] = None,
-                 on_iteration: Optional[Callable[[int], None]] = None) -> HalfMap:
+                 on_iteration: Optional[Callable[[int], None]] = None,
+                 layout: Optional[lay.Layout] = None) -> HalfMap:
+    """Lay half ``side`` of the cut atrium flat and warp it onto
+    ``layout`` (the left atrium's by default)."""
+    tpl = layout or lay.LA
+    GAP = tpl.gap
     tri_ids = np.where(cut.piece == side)[0]
     tri = t[tri_ids]
     nodes, loc = np.unique(tri, return_inverse=True)
@@ -167,9 +169,36 @@ def flatten_half(P: np.ndarray, t: np.ndarray, tag: np.ndarray, is_real: np.ndar
     iP1, iP2, iP4, iP3 = (cut.corners[k] for k in ("P1", "P2", "P4", "P3"))
     lenc = path_length(P, cutn)
 
+    Llat, Ltop, Lsep = lenc[iP1], lenc[iP3] - lenc[iP1], lenc[-1] - lenc[iP3]
+    iX = int(np.searchsorted(lenc, lenc[iP1] - GAP * Ltop))
+    iY = int(np.searchsorted(lenc, lenc[iP3] + GAP * Ltop))
+    iX = min(max(iX, 1), iP1 - 1)
+    iY = max(min(iY, len(cutn) - 2), iP3 + 1)
+    brk = [(iX, 1.0), (iP1, 1.0 - GAP), (iP2, tpl.far_c[0] - tpl.sup_ra),
+           (iP4, tpl.near_c[0] + tpl.sup_ra), (iP3, GAP), (iY, 0.0)]
+
+    def cut_targets() -> Dict[int, tuple]:
+        """Template place of each cut point of this half (local index): the
+        side lines by arc length, the roof through the template's breakpoints."""
+        out: Dict[int, tuple] = {}
+        for i, v in enumerate(cutn):
+            if int(v) not in g2l:
+                continue
+            lv = g2l[int(v)]
+            if i <= iX:
+                out[lv] = (1.0, y0 + (0.5 - y0) * lenc[i] / lenc[iX])
+                continue
+            if i >= iY:
+                out[lv] = (0.0, 0.5 + (y0 - 0.5) * (lenc[i] - lenc[iY]) / (lenc[-1] - lenc[iY]))
+                continue
+            for (j0, a0), (j1, a1) in zip(brk[:-1], brk[1:]):
+                if j0 <= i <= j1:
+                    f = (lenc[i] - lenc[j0]) / max(lenc[j1] - lenc[j0], 1e-12)
+                    out[lv] = (a0 + (a1 - a0) * f, 0.5)
+        return out
+
     # ---- first map: boundary on the half-square by arc length
     fixed, val = [], []
-    Llat, Ltop, Lsep = lenc[iP1], lenc[iP3] - lenc[iP1], lenc[-1] - lenc[iP3]
     for i, v in enumerate(cutn):
         if int(v) not in g2l:
             continue
@@ -202,7 +231,8 @@ def flatten_half(P: np.ndarray, t: np.ndarray, tag: np.ndarray, is_real: np.ndar
         c = len(Xf)
         Xf = np.vstack([Xf, X[lp].mean(0)])
         tf = np.vstack([tf, np.c_[lp, np.roll(lp, -1), np.full(len(lp), c)]])
-    U1 = harmonic(mvc_matrix(Xf, tf), fixed, val)[: len(nodes)]
+    W = mvc_matrix(Xf, tf)
+    U1 = harmonic(W, fixed, val)[: len(nodes)]
     sa = signed_areas(U1, tl)
     maj = np.sign(np.median(sa))
     bad = int(((np.sign(sa) == -maj) | (np.abs(sa) < 1e-14)).sum())
@@ -211,26 +241,20 @@ def flatten_half(P: np.ndarray, t: np.ndarray, tag: np.ndarray, is_real: np.ndar
 
     # ---- template targets
     fx: Dict[int, tuple] = {int(g): tuple(v) for g, v in zip(fixed, val)}
-    iX = int(np.searchsorted(lenc, lenc[iP1] - GAP * Ltop))
-    iY = int(np.searchsorted(lenc, lenc[iP3] + GAP * Ltop))
-    iX = min(max(iX, 1), iP1 - 1)
-    iY = max(min(iY, len(cutn) - 2), iP3 + 1)
-    brk = [(iX, 1.0), (iP1, 1.0 - GAP), (iP2, LSPV_C[0] - SUP_RA), (iP4, RSPV_C[0] + SUP_RA),
-           (iP3, GAP), (iY, 0.0)]
-    for i, v in enumerate(cutn):
-        if int(v) not in g2l:
-            continue
-        lv = g2l[int(v)]
-        if i <= iX:
-            fx[lv] = (1.0, y0 + (0.5 - y0) * lenc[i] / lenc[iX])
-            continue
-        if i >= iY:
-            fx[lv] = (0.0, 0.5 + (y0 - 0.5) * (lenc[i] - lenc[iY]) / (lenc[-1] - lenc[iY]))
-            continue
-        for (j0, a0), (j1, a1) in zip(brk[:-1], brk[1:]):
-            if j0 <= i <= j1:
-                f = (lenc[i] - lenc[j0]) / max(lenc[j1] - lenc[j0], 1e-12)
-                fx[lv] = (a0 + (a1 - a0) * f, 0.5)
+    fx.update(cut_targets())
+    # With ``exact_cut``, the warp starts from a second harmonic map whose
+    # cut points are already at their template places (same weights, same
+    # convex boundary, so it does not fold either); the warp then never moves
+    # them, and both halves hold every cut point at exactly the same place.
+    U_init = None
+    if tpl.exact_cut:
+        U0 = harmonic(W, fixed, np.array([fx[int(g)] for g in fixed]))[: len(nodes)]
+        sa0 = signed_areas(U0, tl)
+        ok1 = (np.sign(sa) == maj) & (np.abs(sa) >= 1e-14)
+        # only the sign matters to the warp (a very thin but unflipped start is
+        # fine: its energy is large and finite)
+        if (np.sign(sa0[ok1]) == maj).all():
+            U_init = U0
     cut_set = set(int(v) for v in cutn)
     groups: Dict[str, np.ndarray] = {}
 
@@ -278,23 +302,22 @@ def flatten_half(P: np.ndarray, t: np.ndarray, tag: np.ndarray, is_real: np.ndar
         groups[f"arc {L}"] = cl[1:-1]
 
     tag_half = tag[tri_ids]
-    if side == POSTERIOR:
-        for L, cen in ((LIPV, LIPV_C), (RIPV, RIPV_C)):
-            ids = np.array([g2l[int(v)] for v in anat.ring[L] if int(v) in g2l])
-            closed(ids, cen, INF_R, INF_R)
-            groups[f"ring {L}"] = ids
-    else:
-        ids = np.array([g2l[int(v)] for v in anat.ring[LAA] if int(v) in g2l])
-        closed(ids, LAA_C, LAA_RA, LAA_RB)
-        groups[f"ring {LAA}"] = ids
-        for L, cen in ((LSPV, LSPV_C), (RSPV, RSPV_C)):
-            upper_arc(L, cen, SUP_RA, SUP_RB)
+    for L, ring in tpl.closed.items():
+        if ring.side != side:
+            continue
+        ids = np.array([g2l[int(v)] for v in anat.ring[L] if int(v) in g2l])
+        closed(ids, ring.c, ring.ra, ring.rb)
+        groups[f"ring {L}"] = ids
+    if side == ANTERIOR:
+        for L, cen in ((tpl.roof_far, tpl.far_c), (tpl.roof_near, tpl.near_c)):
+            upper_arc(L, cen, tpl.sup_ra, tpl.sup_rb)
     ends = {}
     for lp in holes:
         m = np.isin(tl, lp).sum(1) >= 2
         L = int(np.bincount(tag_half[m]).argmax())
-        if L in END_C:
-            closed(lp, END_C[L], END_R, END_R)
+        if L in tpl.ends:
+            ec, er = tpl.ends[L]
+            closed(lp, ec, er, er)
             ends[L] = np.asarray(lp)
             groups[f"end {L}"] = np.asarray(lp)
     keys = np.array(list(fx))
@@ -304,10 +327,10 @@ def flatten_half(P: np.ndarray, t: np.ndarray, tag: np.ndarray, is_real: np.ndar
     soft = ~np.isin(keys, fixed)
     lm, lm_tg = keys[soft], targets[soft]
     pos = {int(v): i for i, v in enumerate(lm)}
-    circles = [(np.array([pos[int(v)] for v in lp if int(v) in pos]), np.array(END_C[L]), END_R)
-               for L, lp in ends.items()]
+    circles = [(np.array([pos[int(v)] for v in lp if int(v) in pos]), np.array(tpl.ends[L][0]),
+                tpl.ends[L][1]) for L, lp in ends.items()]
     hard_tg = np.array([fx[int(v)] for v in fixed])
-    U, hist, _ = slim(U1, tl, lm, lm_tg, fixed, hard_tg, circles=circles, iters=iters,
+    U, hist, _ = slim(U1, tl, lm, lm_tg, fixed, hard_tg, circles=circles, iters=iters, init=U_init,
                       solver=solver, should_stop=should_stop, on_iteration=on_iteration)
     sa = signed_areas(U, tl)
     folded = np.sign(sa) == -np.sign(np.median(sa))
@@ -320,8 +343,8 @@ def flatten_half(P: np.ndarray, t: np.ndarray, tag: np.ndarray, is_real: np.ndar
         if not len(ids):
             continue
         if name.startswith("end"):
-            c = np.array(END_C[int(name.split()[1])])
-            mm = np.abs(np.linalg.norm(U[ids] - c, axis=1) - END_R)
+            c, er = tpl.ends[int(name.split()[1])]
+            mm = np.abs(np.linalg.norm(U[ids] - np.array(c), axis=1) - er)
         else:
             mm = np.linalg.norm(U[ids] - np.array([fx[int(v)] for v in ids]), axis=1)
         miss[name] = float(mm.max())

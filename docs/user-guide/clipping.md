@@ -45,14 +45,15 @@ still the way to finish tagging deliberately.
 Every clip is the same three choices, in this order:
 
 1. **Region** — the anatomical point being clipped: `LSPV`, `LIPV`, `RSPV`,
-   `RIPV` or `MV`.
+   `RIPV` or `MV` on a left atrium (seed type `seed_LA`); `SVC`, `IVC`, `CS` or
+   `TV` on a right atrium (`seed_RA`).
 2. **Mode** — how to cut it: **Contour**, **Sphere** or **Plane**.
 3. **Start** → place it → **Apply clip**.
 
-`MV` and **Contour** cannot be combined, and the panel greys the pairing out
-rather than letting you press Start into an error: the contour snake walks a
-tagged surface region, and the mitral valve is deliberately not tagged. Clip it
-with a sphere or a plane.
+A valve (`MV`, `TV`) and **Contour** cannot be combined, and the panel greys
+the pairing out rather than letting you press Start into an error: the contour
+snake walks a tagged surface region, and the valves are deliberately not
+tagged. Clip them with a sphere or a plane.
 
 The three buttons mean whatever the region and mode say they mean:
 
@@ -117,8 +118,9 @@ selected region — see the note below.
 !!! note "A clip only ever removes the selected region"
     The widget says *where* to cut; the region says *what* may be cut. A
     sphere on the `LSPV` that also encloses the body, the `LIPV` or the
-    appendage leaves all of them standing — only `LSPV` triangles go. `MV`,
-    which carries no tag of its own, clips the body it sits on. The red
+    appendage leaves all of them standing — only `LSPV` triangles go. A valve,
+    which carries no tag of its own, clips the body it sits on: `MV` the left
+    atrial body (1), `TV` the right atrial body (2). The red
     overlay shows exactly this, so what is highlighted is what will be
     removed.
 
