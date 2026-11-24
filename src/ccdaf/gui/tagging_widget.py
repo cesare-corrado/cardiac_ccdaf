@@ -24,10 +24,17 @@ from PyQt5 import QtCore, QtWidgets
 
 
 #: Starting value of a radius factor, as a multiple of the median edge
-#: length. Per-seed rather than global in the tagger, but they start
-#: together: the caps are tuned by eye against the ostia, so a common
-#: starting point is one fewer thing to explain.
+#: length, for a region the tagger has no default for. Every region the
+#: tagger knows starts at its own default (:func:`radius_default`): 25 for
+#: the left-atrial veins and appendage, 50 for the venae cavae and the right
+#: appendage, 25 for the coronary sinus.
 RADIUS_DEFAULT: float = 25.0
+
+
+def radius_default(name: str) -> float:
+    """The tagger's default radius factor for region *name*."""
+    from ccdaf.core.region_tagger import TaggerConfig
+    return float(getattr(TaggerConfig(), f"{name.lower()}_radius_factor", RADIUS_DEFAULT))
 
 #: Range of a radius factor. The floor is above zero because a cap of
 #: zero tags nothing, which is a state the box should not be able to
@@ -92,7 +99,7 @@ class TaggingWidget(QtWidgets.QGroupBox):
         sp.setDecimals(1)
         sp.setRange(*RADIUS_RANGE)
         sp.setSingleStep(1.0)
-        sp.setValue(RADIUS_DEFAULT)
+        sp.setValue(radius_default(name))
         sp.setToolTip(
             f"{name}: radius cap = factor × median edge length.\n"
             f"Tune before running automatic tagging."

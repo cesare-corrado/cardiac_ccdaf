@@ -7,9 +7,10 @@ Fix the `elemTag` labels after automatic tagging. Pick the **active Label**
 
     Which labels the dropdown offers comes from the **Seed type** chosen in
     the [Seed selection](seeds-tagging.md) panel, named at the top of this one.
-    A seed type with no labels of its own — `landmarks_LA_UAC`, `seed_RA` —
-    leaves nothing to correct, so the whole panel is disabled. Switch back to
-    `seed_LA` to carry on; the label you had is remembered.
+    `seed_LA` offers the left-atrial labels (LA body 1, LSPV 11, LIPV 13,
+    RSPV 15, RIPV 17, LAA 19), `seed_RA` the right-atrial ones (RA body 2,
+    SVC 21, IVC 23, CS 25, RAA 27). The label you had is remembered for each
+    seed type.
 
 The two picking tools are **mutually exclusive** — turning one on turns the
 other off, because both drive the surface picker. So do

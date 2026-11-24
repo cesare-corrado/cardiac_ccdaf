@@ -36,10 +36,25 @@ import pytest
 from ccdaf.app.ccdaf import (
     FALLBACK_TAG_COLORS, LABEL_COLORS, _region_legend,
 )
+from ccdaf.core import atrial_labels as al
 from ccdaf.core.mesh_loader import BODY_LABEL
 
 
-ATRIAL = sorted(LABEL_COLORS)
+ATRIAL = sorted(al.LA.values)          # the left atrium's legend
+RIGHT = sorted(al.RA.values)
+
+
+def test_a_right_atrial_tagging_gets_its_own_legend():
+    for tags in (RIGHT, [2, 21, 27]):
+        ordered, colours, names = _region_legend(np.asarray(tags))
+        assert ordered == RIGHT
+        assert colours == [LABEL_COLORS[t] for t in RIGHT]
+        assert names[0] == "RA body" and "SVC" in names.values()
+    # a mesh with both atria tagged shows both legends
+    ordered, _, names = _region_legend(np.asarray([1, 11, 2, 21]))
+    assert ordered == sorted(ATRIAL + RIGHT)
+    # the colours are the ones the exported labels mean, never another's
+    assert len(set(LABEL_COLORS.values())) == len(LABEL_COLORS)
 
 
 def test_an_atrial_tagging_keeps_the_anatomical_legend():
@@ -47,7 +62,7 @@ def test_an_atrial_tagging_keeps_the_anatomical_legend():
         ordered, colours, names = _region_legend(np.asarray(tags))
         assert ordered == ATRIAL
         assert colours == [LABEL_COLORS[t] for t in ATRIAL]
-        assert names[0] == "body"
+        assert names[0] == "LA body"
         assert "LSPV" in names.values()
 
 

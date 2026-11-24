@@ -70,8 +70,9 @@ from ccdaf.interaction.seed_selector import SeedSelector, Seed
 from ccdaf.core.seed_profiles import (
     SeedProfile, SEED_PROFILES, SEED_PROFILE_ORDER, DEFAULT_PROFILE,
 )
-from ccdaf.core.region_tagger import RegionTagger, LABELS
-from ccdaf.interaction.manual_editor import ManualEditor, ALLOWED_LABELS, EditState
+from ccdaf.core.region_tagger import RegionTagger
+from ccdaf.core import atrial_labels
+from ccdaf.interaction.manual_editor import ManualEditor, EditState
 from ccdaf.interaction.clipping_tool import ClippingTool, ClipMode
 from ccdaf.gui.postprocessing_widget import PostprocessingWidget
 from ccdaf.gui.volume_postprocessing_widget import VolumePostprocessingWidget
@@ -148,14 +149,9 @@ from ccdaf.app.views import VIEWS, ViewSpec, title_actor_name
 #: segments inside the wall, high enough to keep the shape readable.
 FIBRE_SURFACE_OPACITY: float = 0.25
 
-LABEL_COLORS: Dict[int, str] = {
-    BODY_LABEL: "#d9d9d9",
-    11: "#e41a1c",
-    13: "#377eb8",
-    15: "#4daf4a",
-    17: "#984ea3",
-    19: "#ff7f00",
-}
+#: Legend colour of every atrial label (both atria), from the one table
+#: the tagging writes with, so the colours always match the exported tags.
+LABEL_COLORS: Dict[int, str] = dict(atrial_labels.COLORS)
 
 
 # Colours for tags the atrial table above does not know — a ventricular
@@ -188,7 +184,7 @@ _SEG_COLOR_LIST = [SEG_LABEL_COLORS[i] for i in range(9)]
 
 # The non-body labels: their presence in ``elemTag`` is what distinguishes a
 # mesh that carries a tagging from one the loader has only seeded with body.
-_PV_LABELS = tuple(lbl for lbl in ALLOWED_LABELS if lbl != BODY_LABEL)
+_PV_LABELS = atrial_labels.REGION_LABELS
 
 # Fields whose values are labels rather than measurements. A colour ramp
 # over these would be meaningless, so the visualisation widget hands them
@@ -484,6 +480,11 @@ class CCDAF(QtWidgets.QMainWindow):
 
         # --- Actions menu: data derived on the working mesh -------------
         actions_menu = menubar.addMenu("&Actions")
+        # Re-read what each action needs every time the menu opens: tagging,
+        # a manual edit, an undo or a clip change the labels without loading
+        # a new mesh, and an item must not stay enabled on labels that no
+        # longer fit it (e.g. Compute UAC on a surface now holding both atria).
+        actions_menu.aboutToShow.connect(self._sync_menu_actions)
         # A disabled item says why through its tooltip.
         actions_menu.setToolTipsVisible(True)
         self.act_assign_tissue = QtWidgets.QAction("Assign tissue property…", self)
@@ -2920,6 +2921,10 @@ class CCDAF(QtWidgets.QMainWindow):
     # ==================================================================
     # Tagging
     # ==================================================================
+    def _atrium(self) -> "atrial_labels.Atrium":
+        """The atrium the chosen seed type works on."""
+        return atrial_labels.RA if self._current_profile().atrium == "RA" else atrial_labels.LA
+
     def _seed_selector(self) -> Optional[SeedSelector]:
         """The selector tagging and clipping act on: the chosen seed type's.
 
@@ -2968,7 +2973,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Running geodesic tagging…")
         QtWidgets.QApplication.processEvents()
         try:
-            self.tagger.tag(seed_sel.seeds_for_tagging())
+            self.tagger.tag(seed_sel.seeds_for_tagging(), atrium=self._atrium())
             self._mark_dirty()
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Tagging failed", str(exc))
@@ -3237,7 +3242,9 @@ class CCDAF(QtWidgets.QMainWindow):
             self._start_plane_clip(region)
 
     def _start_contour_clip(self, region: str) -> None:
-        pv_label = LABELS.get(region)
+        tag = atrial_labels.region_tag(region)
+        # a valve has no surface region of its own to run a contour on
+        pv_label = tag if tag in atrial_labels.REGION_LABELS else None
         if pv_label is None:
             QtWidgets.QMessageBox.warning(
                 self, "No contour for this region",
@@ -3271,7 +3278,9 @@ class CCDAF(QtWidgets.QMainWindow):
         mesh: a region that is not in the tagging has nothing to clip, and
         cutting geometrically instead would be the very over-clip this
         guards against."""
-        tag = LABELS.get(region, BODY_LABEL)
+        tag = atrial_labels.region_tag(region)
+        if tag is None:
+            tag = BODY_LABEL
         mesh = self.loader.mesh if self.loader is not None else None
         tags = (None if mesh is None or "elemTag" not in mesh.cell_data
                 else np.unique(mesh.cell_data["elemTag"]))
@@ -3790,6 +3799,9 @@ class CCDAF(QtWidgets.QMainWindow):
             can_af, af_why = False, "Atrial fibres are mapped on an atrial surface."
         elif not uac_core.has_coordinates(self.loader.mesh):
             can_af, af_why = False, "Compute UAC first (Actions > Compute UAC)."
+        elif ("elemTag" in self.loader.mesh.cell_data
+              and uac_core.which_atrium(self.loader.mesh.cell_data["elemTag"]) != "LA"):
+            can_af, af_why = False, "Atrial fibres are mapped on a left atrium only, for now."
         else:
             can_af, af_why = True, "Map the average atlas fibres through the UAC."
         self.act_atrial_fibres.setEnabled(can_af)
@@ -6320,8 +6332,11 @@ def _region_legend(tags: np.ndarray, anatomical: bool = True):
     Returns ``(tags_in_order, colours, {index: name})``.
     """
     present = {int(t) for t in np.unique(tags)}
-    if anatomical and present and present <= set(LABEL_COLORS):
-        ordered = sorted(LABEL_COLORS)
+    atria = atrial_labels.legend_atria(present) if anatomical and present else None
+    if atria:
+        # Every label of each atrium tagged (a fresh mesh, body 1 only, is
+        # the left atrium); both legends when the mesh holds both.
+        ordered = sorted(v for a in atria for v in a.values)
         colours = [LABEL_COLORS[t] for t in ordered]
         names = {j: _label_name(t) for j, t in enumerate(ordered)}
         return ordered, colours, names
@@ -6363,8 +6378,7 @@ def _label_values(mesh, field: str):
 
 
 def _label_name(tag: int) -> str:
-    inverse = {v: k for k, v in LABELS.items()}
-    return inverse.get(tag, "body" if tag == BODY_LABEL else str(tag))
+    return atrial_labels.NAMES.get(int(tag), str(tag))
 
 
 # ---------------------------------------------------------------------------

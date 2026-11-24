@@ -14,21 +14,24 @@ That last part is why the profile is the single source of truth rather
 than three panels each hard-coding the atrium: adding an anatomy is
 adding a profile, not editing every panel that mentions a pulmonary vein.
 
-Three profiles ship:
+Two profiles ship:
 
 * :data:`SEED_LA_PROFILE` — the six-seed left-atrium workflow
   (LSPV, LIPV, RSPV, RIPV, LAA, MV). It feeds region tagging, offers the
   five radius factors, the six ``elemTag`` labels and the five clip
   regions, and is written under the ``"seed_LA"`` key.
-* :data:`LANDMARKS_LA_UAC_PROFILE` — four left-atrium landmarks used for
-  a universal-atrial-coordinate step (LSPV_BODY_JCN, RSPV_BODY_JCN,
-  SEPTAL_WALL, LATERAL_WALL). Picked, saved and exported exactly like
-  seeds, under the ``"landmarks_LA_UAC"`` key, and never tagged. Seed
-  selection is all it offers: no radii, no labels, no clip regions.
-* :data:`SEED_RA_PROFILE` — the right atrium, with no points defined
-  yet. A signpost: choosing it says what the mesh is and switches every
-  atrial-left tool off, and it reserves the slot the right-atrial seeds
-  will occupy.
+* :data:`SEED_RA_PROFILE` — the five-seed right-atrium workflow (SVC, IVC,
+  CS, RAA, TV), the same tools with the right-atrial labels (body 2, SVC
+  21, IVC 23, CS 25, RAA 27; see :mod:`ccdaf.core.atrial_labels`), written
+  under ``"seed_RA"``.
+
+Choosing a profile is what decides which atrium every panel works on: the
+Tagging, Manual-correction and Clipping panels show only that atrium's
+radii, labels and regions.
+
+A file that still carries the retired ``"landmarks_LA_UAC"`` set loads
+unchanged; that set is ignored (the atrial coordinates need no manual
+landmarks).
 
 The sets are independent: a session can complete several, and a saved
 bundle can carry every non-empty one at once.
@@ -63,6 +66,11 @@ LA_LABEL_VALUES: Tuple[int, ...] = (11, 13, 15, 17, 19, 1)
 #: Regions the left-atrial clipping panel offers: the four veins, which
 #: carry their own tag, and the mitral valve, which sits on the body.
 LA_CLIP_REGIONS: Tuple[str, ...] = ("LSPV", "LIPV", "RSPV", "RIPV", "MV")
+
+#: Right-atrial labels in dropdown order (vessels, appendage, body) and the
+#: regions its clipping offers: the three vessels and the tricuspid valve.
+RA_LABEL_VALUES: Tuple[int, ...] = (21, 23, 25, 27, 2)
+RA_CLIP_REGIONS: Tuple[str, ...] = ("SVC", "IVC", "CS", "TV")
 
 
 @dataclass(frozen=True)
@@ -101,6 +109,9 @@ class SeedProfile:
         Regions the Clipping panel offers. Empty disables clipping.
     legacy_keys
         Older on-disk spellings of ``export_key`` still accepted on read.
+    atrium
+        ``"LA"`` or ``"RA"``: whose labels tagging, correction and
+        clipping use (:mod:`ccdaf.core.atrial_labels`).
     """
 
     type_id: str
@@ -116,6 +127,7 @@ class SeedProfile:
     label_values: Tuple[int, ...] = ()
     clip_regions: Tuple[str, ...] = ()
     legacy_keys: FrozenSet[str] = field(default_factory=frozenset)
+    atrium: str = "LA"
 
     @property
     def count(self) -> int:
@@ -183,63 +195,44 @@ SEED_LA_PROFILE = SeedProfile(
 )
 
 
-# -- Left-atrium UAC landmarks ------------------------------------------
-LANDMARKS_LA_UAC_PROMPT: Dict[str, str] = {
-    "LSPV_BODY_JCN": "Click at the LSPV–body junction (LSPV_BODY_JCN)",
-    "RSPV_BODY_JCN": "Click at the RSPV–body junction (RSPV_BODY_JCN)",
-    "SEPTAL_WALL":   "Click on the septal wall (SEPTAL_WALL)",
-    "LATERAL_WALL":  "Click on the lateral wall (LATERAL_WALL)",
+# -- The five-seed right-atrium workflow --------------------------------
+RA_SEED_PROMPT: Dict[str, str] = {
+    "SVC": "Click INSIDE the superior vena cava (SVC)",
+    "IVC": "Click INSIDE the inferior vena cava (IVC)",
+    "CS":  "Click INSIDE the coronary sinus (CS)",
+    "RAA": "Click INSIDE the right atrial appendage (RAA)",
+    "TV":  "Click NEAR the center of the tricuspid valve (TV)",
 }
 
-LANDMARKS_LA_UAC_COLOR: Dict[str, str] = {
-    "LSPV_BODY_JCN": "#1b9e77",
-    "RSPV_BODY_JCN": "#d95f02",
-    "SEPTAL_WALL":   "#7570b3",
-    "LATERAL_WALL":  "#e7298a",
+RA_SEED_COLOR: Dict[str, str] = {
+    "SVC": "#a65628",
+    "IVC": "#f781bf",
+    "CS":  "#17becf",
+    "RAA": "#e6ab02",
+    "TV":  "#bcbd22",
 }
 
-LANDMARKS_LA_UAC_PROFILE = SeedProfile(
-    type_id="landmarks_LA_UAC",
-    label="landmarks_LA_UAC",
-    export_key="landmarks_LA_UAC",
-    order=("LSPV_BODY_JCN", "RSPV_BODY_JCN", "SEPTAL_WALL", "LATERAL_WALL"),
-    prompts=LANDMARKS_LA_UAC_PROMPT,
-    colors=LANDMARKS_LA_UAC_COLOR,
-    pv_names=frozenset(),
-    no_tag_names=frozenset(),
-    tags=False,
-    # Picking landmarks is all this set does. No radii (it does not tag),
-    # no labels (no manual correction) and no clip regions: the tools that
-    # act on a tagging belong to the seed set that produced it, and a
-    # landmark set is not that. Switch back to seed_LA to correct or clip.
-    radius_names=(),
-    label_values=(),
-    clip_regions=(),
-)
-
-
-# -- Right atrium (signpost) --------------------------------------------
 SEED_RA_PROFILE = SeedProfile(
     type_id="seed_RA",
     label="seed_RA",
     export_key="seed_RA",
-    # No points yet. Choosing this type says what the mesh is and turns
-    # the left-atrial tools off; the right-atrial seeds fill the slot when
-    # they are defined.
-    order=(),
-    prompts={},
-    colors={},
-    tags=False,
-    radius_names=(),
-    label_values=(),
-    clip_regions=(),
+    order=("SVC", "IVC", "CS", "RAA", "TV"),
+    prompts=RA_SEED_PROMPT,
+    colors=RA_SEED_COLOR,
+    # The tubular vessels get the same snap-inside prior as the veins.
+    pv_names=frozenset(("SVC", "IVC", "CS")),
+    no_tag_names=frozenset(("TV",)),
+    tags=True,
+    radius_names=("SVC", "IVC", "CS", "RAA"),
+    label_values=RA_LABEL_VALUES,
+    clip_regions=RA_CLIP_REGIONS,
+    atrium="RA",
 )
 
 
 # Dropdown / registry order: the default set first.
 SEED_PROFILE_ORDER: Tuple[SeedProfile, ...] = (
     SEED_LA_PROFILE,
-    LANDMARKS_LA_UAC_PROFILE,
     SEED_RA_PROFILE,
 )
 SEED_PROFILES: Dict[str, SeedProfile] = {p.type_id: p for p in SEED_PROFILE_ORDER}
@@ -265,7 +258,6 @@ def profile_for_key(key: str) -> "SeedProfile | None":
 __all__ = [
     "SeedProfile",
     "SEED_LA_PROFILE",
-    "LANDMARKS_LA_UAC_PROFILE",
     "SEED_RA_PROFILE",
     "SEED_PROFILE_ORDER",
     "SEED_PROFILES",
@@ -274,5 +266,9 @@ __all__ = [
     "SEED_COLOR",
     "LA_LABEL_VALUES",
     "LA_CLIP_REGIONS",
+    "RA_LABEL_VALUES",
+    "RA_CLIP_REGIONS",
+    "RA_SEED_PROMPT",
+    "RA_SEED_COLOR",
     "profile_for_key",
 ]

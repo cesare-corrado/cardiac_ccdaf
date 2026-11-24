@@ -75,11 +75,19 @@ class UacDialog(QtWidgets.QDialog):
         self._digest = digest(*self._inputs)
 
         layout = QtWidgets.QVBoxLayout(self)
+        if uac.which_atrium(self._inputs[2]) == "RA":
+            axes = ("Right atrium. Universal atrial coordinates: alpha from the lateral "
+                    "tricuspid valve (0) over the roof (0.5) to the septal tricuspid valve "
+                    "(1), beta from the IVC (0) to the SVC (1). Venae cavae, coronary sinus "
+                    "and appendage land in the same place for every patient. ")
+        else:
+            axes = ("Left atrium. Universal atrial coordinates: alpha from septal (0) to "
+                    "lateral (1), beta from the posterior mitral valve (0) over the roof "
+                    "(0.5) to the anterior mitral valve (1). Veins and appendage land in "
+                    "the same place for every patient. ")
         intro = QtWidgets.QLabel(
-            "<i>Universal atrial coordinates: alpha from septal (0) to lateral (1), "
-            "beta from the posterior mitral valve (0) over the roof (0.5) to the "
-            "anterior mitral valve (1). Veins and appendage land in the same place "
-            "for every patient. Fully automatic, from the elemTag labels; a run takes "
+            "<i>" + axes +
+            "Fully automatic, from the elemTag labels; a run takes "
             "a few minutes. The surface is repaired first (label islands, duplicate "
             "triangles, ears and slivers on openings, edge flips, pinched points, thin "
             "tunnels) and the repaired surface replaces it.</i>")

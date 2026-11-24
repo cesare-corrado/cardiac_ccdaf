@@ -21,9 +21,11 @@ The contract:
 * ``read_bundle`` rejects a pickle that is not a bundle;
 * a bundle's point-set key is readable by the seed loader too, so the
   two entry points interoperate;
-* the LA-UAC landmark set rides in the same bundle under its own
-  ``"landmarks_LA_UAC"`` key, alongside the seeds, and round-trips
+* the right-atrial seeds ride in the same bundle under their own
+  ``"seed_RA"`` key, alongside the left-atrial ones, and round-trip
   independently;
+* a bundle that still carries the retired ``"landmarks_LA_UAC"`` set
+  loads, with that set ignored;
 * other cell fields (``tissueTag``, …) ride under one ``"cell_fields"`` key,
   never override ``elemTag``, must have one value per cell, and a bundle
   written before the key existed loads exactly as before.
@@ -45,11 +47,11 @@ from ccdaf.core.eam_export import export_binary
 from ccdaf.core.eam_loader import read_bundle
 from ccdaf.core.seed_io import load_point_set, load_seeds
 from ccdaf.core.seed_profiles import (
-    LANDMARKS_LA_UAC_PROFILE, SEED_LA_PROFILE,
+    SEED_LA_PROFILE, SEED_RA_PROFILE,
 )
 
 LA = SEED_LA_PROFILE.export_key                 # "seed_LA"
-UAC = LANDMARKS_LA_UAC_PROFILE.export_key       # "landmarks_LA_UAC"
+RA = SEED_RA_PROFILE.export_key                 # "seed_RA"
 
 
 def _mesh() -> pv.PolyData:
@@ -63,7 +65,7 @@ def _mesh() -> pv.PolyData:
 
 
 SEEDS = {"LSPV": [5.0, 0.0, 0.0], "MV": [0.0, 0.0, -5.0]}
-LANDMARKS = {"LSPV_BODY_JCN": [0.0, 5.0, 0.0], "SEPTAL_WALL": [-5.0, 0.0, 0.0]}
+RA_SEEDS = {"SVC": [0.0, 5.0, 0.0], "TV": [-5.0, 0.0, 0.0]}
 
 
 def test_plain_export_is_unchanged(tmp_path):
@@ -86,7 +88,7 @@ def test_bundle_round_trip(tmp_path):
     assert back.n_cells == mesh.n_cells
     assert electrodes is None
     # None supplied → key absent → no entry, rather than an empty one.
-    assert LANDMARKS_LA_UAC_PROFILE.type_id not in point_sets
+    assert SEED_RA_PROFILE.type_id not in point_sets
 
     lat0 = np.asarray(mesh.point_data["LAT"], dtype=float)
     lat1 = np.asarray(back.point_data["LAT"], dtype=float)
@@ -123,24 +125,37 @@ def test_electrodes_round_trip(tmp_path):
     assert np.allclose(np.asarray(electrodes["data"])[:, 1:4], pts)
 
 
-def test_landmarks_round_trip_alongside_seeds(tmp_path):
+def test_left_and_right_seeds_round_trip_together(tmp_path):
     # Both point sets ride in one bundle under their own keys and come back
     # independently, matching the "coexist / both exported" behaviour.
     path = tmp_path / "both.pkl"
-    export_binary(path, _mesh(), point_sets={LA: SEEDS, UAC: LANDMARKS})
+    export_binary(path, _mesh(), point_sets={LA: SEEDS, RA: RA_SEEDS})
 
     with open(path, "rb") as fh:
         payload = pickle.load(fh)
-    assert LA in payload and UAC in payload
+    assert LA in payload and RA in payload
     assert "seeds" not in payload      # new files use the new spelling
 
     _, point_sets, _, _ = read_bundle(path)
     seeds = point_sets[SEED_LA_PROFILE.type_id]
-    landmarks = point_sets[LANDMARKS_LA_UAC_PROFILE.type_id]
+    right = point_sets[SEED_RA_PROFILE.type_id]
     assert set(seeds) == set(SEEDS)
-    assert set(landmarks) == set(LANDMARKS)
-    for name in LANDMARKS:
-        assert np.allclose(landmarks[name], LANDMARKS[name])
+    assert set(right) == set(RA_SEEDS)
+    for name in RA_SEEDS:
+        assert np.allclose(right[name], RA_SEEDS[name])
+
+
+def test_a_retired_landmarks_set_is_ignored(tmp_path):
+    """A bundle written when ``landmarks_LA_UAC`` existed still loads."""
+    path = tmp_path / "old_landmarks.pkl"
+    export_binary(path, _mesh(), point_sets={LA: SEEDS})
+    with open(path, "rb") as fh:
+        payload = pickle.load(fh)
+    payload["landmarks_LA_UAC"] = {"SEPTAL_WALL": np.array([1.0, 2.0, 3.0])}
+    with open(path, "wb") as fh:
+        pickle.dump(payload, fh)
+    _, point_sets, _, _ = read_bundle(path)
+    assert set(point_sets) == {SEED_LA_PROFILE.type_id}
 
 
 def test_empty_sets_are_not_written(tmp_path):
@@ -151,7 +166,7 @@ def test_empty_sets_are_not_written(tmp_path):
     seeds would be read back as a set that exists.
     """
     path = tmp_path / "empty.pkl"
-    export_binary(path, _mesh(), point_sets={LA: {}, UAC: None})
+    export_binary(path, _mesh(), point_sets={LA: {}, RA: None})
     with open(path, "rb") as fh:
         payload = pickle.load(fh)
     assert set(payload) == {"surface", "electrodes"}
@@ -191,12 +206,12 @@ def test_legacy_seeds_key_is_read_as_seed_la(tmp_path):
     assert set(points) == set(SEEDS)
 
 
-def test_plain_export_has_no_landmarks_key(tmp_path):
+def test_plain_export_has_no_seed_keys(tmp_path):
     path = tmp_path / "plain.pkl"
     export_binary(path, _mesh())
     with open(path, "rb") as fh:
         payload = pickle.load(fh)
-    assert UAC not in payload
+    assert LA not in payload and RA not in payload
 
 
 def test_read_bundle_rejects_non_bundle(tmp_path):

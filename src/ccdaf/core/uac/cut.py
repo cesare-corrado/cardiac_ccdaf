@@ -70,7 +70,7 @@ class Anatomy:
 
 
 def label_rings(P: np.ndarray, t: np.ndarray, tag: np.ndarray,
-                labels=VEINS + (LAA,)) -> Dict[int, np.ndarray]:
+                labels=VEINS + (LAA,), names=None) -> Dict[int, np.ndarray]:
     """The border loop of each label (the longest, if there are several)."""
     n = len(P)
     e, own = edge_table(t)
@@ -83,7 +83,8 @@ def label_rings(P: np.ndarray, t: np.ndarray, tag: np.ndarray,
     for L in labels:
         loops = order_loops(ea[(ta == L) != (tb == L)])
         if not loops:
-            raise CutError(f"The {NAMES[L]} label has no border with the rest of the atrium.")
+            raise CutError(f"The {(names or NAMES).get(L, L)} label has no border with the "
+                           "rest of the atrium.")
         out[L] = max(loops, key=len)
     return out
 
@@ -115,6 +116,13 @@ def anatomy(P: np.ndarray, t: np.ndarray, tag: np.ndarray) -> Anatomy:
     if missing:
         raise CutError("Labels missing: " + ", ".join(missing) + ". The atrium needs "
                        "body 1, LSPV 11, LIPV 13, RSPV 15, RIPV 17 and LAA 19.")
+    return build_anatomy(P, t, tag, VEINS + (LAA,))
+
+
+def build_anatomy(P: np.ndarray, t: np.ndarray, tag: np.ndarray, labels, *,
+                  body_label: int = BODY, names=None, valve: str = "mitral valve") -> Anatomy:
+    """Rings of ``labels``, the valve (the longest open boundary next to
+    ``body_label`` triangles) and per-point label sets, for any atrium."""
     n = len(P)
     node_tags: Dict[int, Set[int]] = defaultdict(set)
     for k in range(3):
@@ -122,7 +130,7 @@ def anatomy(P: np.ndarray, t: np.ndarray, tag: np.ndarray) -> Anatomy:
             node_tags[int(v)].add(int(g))
     body = np.zeros(n, bool)
     for v, s in node_tags.items():
-        body[v] = BODY in s
+        body[v] = body_label in s
     ue, inv, cnt = unique_edges(t)
     bnd_e = ue[cnt == 1]
     on_boundary = np.zeros(n, bool)
@@ -133,12 +141,12 @@ def anatomy(P: np.ndarray, t: np.ndarray, tag: np.ndarray) -> Anatomy:
     mv_loops = []
     for lp in order_loops(bnd_e):
         sel = side_is_bnd & np.isin(edge_table(t)[0], lp).all(1)
-        if sel.any() and np.bincount(tag[own[sel]]).argmax() == BODY:
+        if sel.any() and np.bincount(tag[own[sel]]).argmax() == body_label:
             mv_loops.append(lp)
     if not mv_loops:
-        raise CutError("No mitral valve opening: the atrium needs an open boundary "
+        raise CutError(f"No {valve} opening: the atrium needs an open boundary "
                        "next to body tissue.")
-    ring = label_rings(P, t, tag)
+    ring = label_rings(P, t, tag, labels, names)
     return Anatomy(ring, max(mv_loops, key=len), node_tags, body, on_boundary)
 
 
@@ -189,6 +197,40 @@ def close_pockets(path: np.ndarray, nbrs, ok_node: np.ndarray, window: int = 30)
                 changed = True
             i += 1
     return np.array(p)
+
+
+def split_by_cut(t: np.ndarray, n: int, cut: np.ndarray):
+    """Pieces of the triangles once the surface is cut along the path
+    ``cut``: ``(number of pieces, piece of each triangle)``. Triangles are
+    joined across every shared side that is not a step of the path."""
+    cut_edges = set((min(a, b), max(a, b)) for a, b in zip(cut[:-1].tolist(), cut[1:].tolist()))
+    e_all, own = edge_table(t)
+    keep = np.array([(a, b) not in cut_edges for a, b in e_all.tolist()])
+    key = e_all[keep, 0] * n + e_all[keep, 1]
+    o = np.argsort(key, kind="stable")
+    ks = key[o]
+    d_ = np.where(ks[1:] == ks[:-1])[0]
+    ta, tb = own[keep][o][d_], own[keep][o][d_ + 1]
+    A = sp.csr_matrix((np.ones(len(ta)), (ta, tb)), shape=(len(t), len(t)))
+    return connected_components(A, directed=False)
+
+
+def tidy_cut(cut: np.ndarray, edgeset, nbrs, ok_node: np.ndarray) -> np.ndarray:
+    """Erase loops from a joined cut path, then drop corners and close
+    pockets (see :func:`shortcut` and :func:`close_pockets`)."""
+    if len(set(cut.tolist())) != len(cut):      # loop erasure
+        out_, pos_ = [], {}
+        for v in cut:
+            if v in pos_:
+                k_ = pos_[v]
+                for w in out_[k_ + 1:]:
+                    pos_.pop(w, None)
+                out_ = out_[: k_ + 1]
+            else:
+                pos_[v] = len(out_)
+                out_.append(v)
+        cut = np.array(out_)
+    return shortcut(close_pockets(shortcut(cut, edgeset), nbrs, ok_node), edgeset)
 
 
 # ---------------------------------------------------------------- the cut
@@ -332,37 +374,14 @@ def find_cut(P: np.ndarray, t: np.ndarray, tag: np.ndarray, anat: Anatomy, *,
             if s[0] != parts[-1][-1]:
                 raise CutError("cut segments do not join")
             parts.append(s[1:])
-        cut = np.concatenate(parts)
-        if len(set(cut.tolist())) != len(cut):      # loop erasure
-            out_, pos_ = [], {}
-            for v in cut:
-                if v in pos_:
-                    k_ = pos_[v]
-                    for w in out_[k_ + 1:]:
-                        pos_.pop(w, None)
-                    out_ = out_[: k_ + 1]
-                else:
-                    pos_[v] = len(out_)
-                    out_.append(v)
-            cut = np.array(out_)
-        cut = shortcut(close_pockets(shortcut(cut, edgeset), nbrs, body_or_ring), edgeset)
+        cut = tidy_cut(np.concatenate(parts), edgeset, nbrs, body_or_ring)
         idx = {int(v): i for i, v in enumerate(cut)}
 
         def pos(v):
             return idx[v] if v in idx else int(np.argmin(np.linalg.norm(P[cut] - P[v], axis=1)))
 
         corners = {"P1": pos(p1), "P2": pos(p2), "P4": pos(p4), "P3": pos(p3)}
-        # split the triangles across the cut
-        cut_edges = set((min(a, b), max(a, b)) for a, b in zip(cut[:-1].tolist(), cut[1:].tolist()))
-        e_all, own = edge_table(t)
-        keep = np.array([(a, b) not in cut_edges for a, b in e_all.tolist()])
-        key = e_all[keep, 0] * n + e_all[keep, 1]
-        o = np.argsort(key, kind="stable")
-        ks = key[o]
-        d_ = np.where(ks[1:] == ks[:-1])[0]
-        ta, tb = own[keep][o][d_], own[keep][o][d_ + 1]
-        A = sp.csr_matrix((np.ones(len(ta)), (ta, tb)), shape=(len(t), len(t)))
-        ncomp, comp = connected_components(A, directed=False)
+        ncomp, comp = split_by_cut(t, n, cut)
         if ncomp < 2:
             raise CutError("the cut does not split the atrium")
         sizes = np.bincount(comp)
@@ -441,5 +460,5 @@ def diagnose(P, t, tag, anat: Anatomy, attempts) -> str:
     return "No valid cut. " + " ".join(msgs)
 
 
-__all__ = ["CutError", "Anatomy", "anatomy", "check_sides", "label_rings", "Cut", "find_cut", "diagnose",
-           "shortcut", "close_pockets"]
+__all__ = ["CutError", "Anatomy", "anatomy", "build_anatomy", "check_sides", "label_rings", "Cut", "find_cut", "diagnose",
+           "shortcut", "close_pockets", "split_by_cut", "tidy_cut"]

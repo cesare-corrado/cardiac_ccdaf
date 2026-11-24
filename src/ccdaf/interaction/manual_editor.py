@@ -30,13 +30,16 @@ from typing import TYPE_CHECKING, Callable, Deque, Optional, Set
 import numpy as np
 import pyvista as pv
 
-from ccdaf.core.mesh_loader import BODY_LABEL, UNASSIGNED
+from ccdaf.core import atrial_labels as al
+from ccdaf.core.mesh_loader import BODY_LABEL, UNASSIGNED  # noqa: F401
 
 if TYPE_CHECKING:
     from ccdaf.core.region_tagger import RegionTagger
 
 
-ALLOWED_LABELS = (11, 13, 15, 17, 19, BODY_LABEL)
+#: Every atrial label (both atria): the panel offers the current seed
+#: type's, and the editor accepts any of them.
+ALLOWED_LABELS = tuple(v for a in al.ATRIA for v in a.values)
 
 
 class EditState(Enum):
@@ -168,10 +171,10 @@ class ManualEditor:
         """Commit any pending batch and exit the editor entirely."""
         if self._pending:
             self.commit_pending()
-        # assign body_label to unassigned
+        # unassigned cells become the body of the atrium being edited
         tags = np.asarray(self.mesh.cell_data["elemTag"]).copy()
         idx = (tags == UNASSIGNED)
-        tags[idx] = BODY_LABEL
+        tags[idx] = al.body_for(tags[~idx])
         self.mesh.cell_data["elemTag"] = tags   # force VTK update
 
         self.deactivate()
@@ -188,7 +191,11 @@ class ManualEditor:
         # 1. Get current tags from mesh
         tri_label = np.asarray(self.mesh.cell_data["elemTag"]).copy()
         # 2. Identify shared boundaries to prevent regions from merging
-        pv_labels = {11, 13, 15, 17, 19} # From LABELS in region_tagger
+        # the atrium whose labels the mesh carries (the left one by default)
+        present = al.atria_present(tri_label[tri_label != UNASSIGNED])
+        atrium = present[-1] if present else al.LA
+        tagger.atrium = atrium
+        pv_labels = set(atrium.regions.values())
         multi_tag_vertices = tagger._find_shared_pv_vertices(tri_label, pv_labels)
         
         # 3. Mask triangles on the boundary as UNASSIGNED to create a buffer

@@ -44,10 +44,14 @@ import scipy.sparse as sp
 # surface_repair uses this package's mesh helpers, so it is used here as a
 # module (its names are looked up when a run starts, not at import).
 from ccdaf.core import surface_repair as sr
+from ccdaf.core.uac import cut as _cut_la
+from ccdaf.core.uac import layout as lay
 from ccdaf.core.uac import template as tpl
-from ccdaf.core.uac.cut import CutError, anatomy, check_sides, find_cut, label_rings
+from ccdaf.core.uac.cut import CutError, label_rings
 from ccdaf.core.uac.extension import extend_veins
-from ccdaf.core.uac.flatten import ANTERIOR, POSTERIOR, DegenerateFirstMap, HalfMap, flatten_half
+from ccdaf.core.uac.flatten import (
+    ANTERIOR, COLLAPSED, POSTERIOR, DegenerateFirstMap, HalfMap, flatten_half, signed_areas,
+)
 from ccdaf.core.uac.mesh_ops import unique_edges
 from ccdaf.core.uac.slim import Cancelled
 from ccdaf.core.uac.solvers import SpdSolver
@@ -74,6 +78,33 @@ class Options:
     penalty_mm: float = 2.0
     iterations: int = 100
     solver: Optional[str] = None      # None: the fastest available
+
+
+@dataclass(frozen=True)
+class Atrium:
+    """What differs between the atria: the template (in the working frame,
+    see :mod:`ccdaf.core.uac.layout`), the vessels to lengthen, and how the
+    labels are checked and the atrium is cut open."""
+
+    layout: lay.Layout
+    vessels: Tuple[int, ...]
+    sleeve_ratio: Dict[int, float]
+    check_sides: Callable
+    anatomy: Callable
+    find_cut: Callable
+    half_names: Tuple[str, str] = ("Posterior", "Anterior")
+    #: Whether the cut has a second way of placing the roof to fall back on
+    #: when a first map is degenerate.
+    roof_first: bool = True
+
+    @property
+    def names(self) -> Dict[int, str]:
+        return self.layout.names
+
+
+LEFT = Atrium(layout=lay.LA, vessels=tpl.VEINS, sleeve_ratio=tpl.SLEEVE_RATIO,
+              check_sides=_cut_la.check_sides, anatomy=_cut_la.anatomy,
+              find_cut=_cut_la.find_cut)
 
 
 @dataclass
@@ -112,6 +143,7 @@ class UacRun:
     attempt: Attempt
     extension: Dict
     warnings: List[str] = field(default_factory=list)
+    atrium: Atrium = LEFT
 
     @property
     def repair(self) -> Dict:
@@ -130,30 +162,36 @@ class UacRun:
         a = self.attempt
         lines = [self.summary(), ""]
         lines.append(f"Solver: {self.solver}.")
-        lines.append(f"Cut: lateral rule '{a.rule}', barrier {'on' if a.barrier else 'off'}, "
-                     f"roof {'between the closest ostium points' if a.roof_first else 'default'}, "
-                     f"ring penalty {'on' if a.penalty > 0 else 'off'}.")
+        if self.atrium.roof_first:
+            lines.append(f"Cut: lateral rule '{a.rule}', barrier {'on' if a.barrier else 'off'}, "
+                         f"roof {'between the closest ostium points' if a.roof_first else 'default'}, "
+                         f"ring penalty {'on' if a.penalty > 0 else 'off'}.")
+        else:
+            lines.append(f"Cut: shortest lines, barriers {'on' if a.barrier else 'off'}, "
+                         f"ring penalty {'on' if a.penalty > 0 else 'off'}.")
+        names = self.atrium.names
         for h in a.halves:
-            name = "Posterior" if h.side == POSTERIOR else "Anterior"
-            rings = ", ".join(f"{_ring_name(k)} {v:.3f}" for k, v in sorted(h.ring_miss.items()))
+            name = self.atrium.half_names[0 if h.side == POSTERIOR else 1]
+            rings = ", ".join(f"{_ring_name(k, names)} {v:.3f}"
+                              for k, v in sorted(h.ring_miss.items()))
             lines.append(f"{name}: {h.folded_real} folded on tissue, {h.folded_added} on "
                          f"extensions; worst miss per ring: {rings}.")
         for h in a.halves:
             for c in h.collapsed:
                 lines.append(f"Collapsed to a point: a {c['size_mm']} mm patch on the "
-                             f"{tpl.NAMES.get(c['label'], c['label'])} ({c['triangles']} "
+                             f"{names.get(c['label'], c['label'])} ({c['triangles']} "
                              f"triangles), most likely a thin spike in the segmentation. Its "
                              f"points take the coordinates of its base.")
         lines.append(repair_words(self.repair))
-        ext = [f"{tpl.NAMES[L]} +{v['added_mm']} mm" for L, v in self.extension.items()
+        ext = [f"{names[L]} +{v['added_mm']} mm" for L, v in self.extension.items()
                if isinstance(v, dict) and v.get("added_mm")]
         if ext:
-            lines.append("Virtual vein extensions (not tissue, not written): "
+            lines.append("Virtual extensions (not tissue, not written): "
                          + ", ".join(ext) + ".")
         lines += [f"Warning: {w}" for w in self.warnings]
         lines.append("")
-        lines.append("Written: uac_alpha, uac_beta (points on the cut carry their posterior "
-                     "value; the flat map has both).")
+        lines.append("Written: uac_alpha, uac_beta (points on the cut carry their "
+                     f"{self.atrium.half_names[0].lower()} value; the flat map has both).")
         return "\n".join(lines)
 
 
@@ -177,9 +215,9 @@ def repair_words(r: Dict) -> str:
     return "Mesh repaired (Undo puts it back): " + ", ".join(done) + "."
 
 
-def _ring_name(key: str) -> str:
+def _ring_name(key: str, names=None) -> str:
     kind, L = key.split()
-    return f"{tpl.NAMES[int(L)]} {'end' if kind == 'end' else 'ostium'}"
+    return f"{(names or tpl.NAMES)[int(L)]} {'end' if kind == 'end' else 'ostium'}"
 
 
 def _status(cb, text):
@@ -187,24 +225,27 @@ def _status(cb, text):
         cb(text)
 
 
-def _attempt(P, t, tag, is_real, anat, opts, penalty, solver, on_status, should_stop):
+def _attempt(P, t, tag, is_real, anat, opts, penalty, solver, on_status, should_stop,
+             atrium: Atrium = LEFT):
     roof_first = False
     while True:
         _status(on_status, "Cutting the atrium open…")
-        cut = find_cut(P, t, tag, anat, roof_first=roof_first, ring_penalty=penalty,
-                       penalty_mm=opts.penalty_mm)
+        cut = atrium.find_cut(P, t, tag, anat, roof_first=roof_first, ring_penalty=penalty,
+                              penalty_mm=opts.penalty_mm)
         halves = []
         try:
-            for side, name in ((POSTERIOR, "posterior"), (ANTERIOR, "anterior")):
+            for side, name in ((POSTERIOR, atrium.half_names[0].lower()),
+                               (ANTERIOR, atrium.half_names[1].lower())):
                 def tick(it, name=name):
                     if it % 10 == 0:
                         _status(on_status, f"Warping the {name} half onto the template: "
                                            f"iteration {it + 1} of {opts.iterations}…")
                 _status(on_status, f"Flattening the {name} half…")
                 halves.append(flatten_half(P, t, tag, is_real, cut, anat, side,
-                                           retry_if_degenerate=not roof_first, solver=solver,
-                                           iters=opts.iterations, should_stop=should_stop,
-                                           on_iteration=tick))
+                                           retry_if_degenerate=atrium.roof_first and not roof_first,
+                                           solver=solver, iters=opts.iterations,
+                                           should_stop=should_stop, on_iteration=tick,
+                                           layout=atrium.layout))
         except DegenerateFirstMap:
             roof_first = True
             continue
@@ -241,6 +282,17 @@ def compute(points: np.ndarray, triangles: np.ndarray, tags: np.ndarray,
 
     The surface is repaired first (:func:`prepare`); the run's ``surface``
     is that repaired surface, and the coordinates are on its points."""
+    return run_atrium(LEFT, points, triangles, tags, options, on_status=on_status,
+                      should_stop=should_stop)
+
+
+def run_atrium(atrium: Atrium, points: np.ndarray, triangles: np.ndarray, tags: np.ndarray,
+               options: Optional[Options] = None, *,
+               on_status: Optional[Callable[[str], None]] = None,
+               should_stop: Optional[Callable[[], bool]] = None) -> UacRun:
+    """The run of :func:`compute` for any atrium. The coordinates come out
+    in the working frame (``alpha = u``, ``beta = v``, see
+    :mod:`ccdaf.core.uac.layout`)."""
     t0 = time.time()
     opts = options or Options()
     solver = SpdSolver(opts.solver)
@@ -250,23 +302,24 @@ def compute(points: np.ndarray, triangles: np.ndarray, tags: np.ndarray,
     P, t, tag = surf.P, surf.t, surf.tag
     n0 = len(P)
     try:
-        check_sides(P, t, tag)
-        rings0 = label_rings(P, t, tag, tpl.VEINS)
+        atrium.check_sides(P, t, tag)
+        rings0 = label_rings(P, t, tag, atrium.vessels, atrium.names)
     except CutError as exc:
         raise UacError(str(exc)) from None
     _status(on_status, "Extending short veins…")
     n_tri = len(t)
-    P, t, tag, n_added, ext = extend_veins(P, t, tag, rings0, tpl.SLEEVE_RATIO)
+    P, t, tag, n_added, ext = extend_veins(P, t, tag, rings0, atrium.sleeve_ratio)
     is_real = np.r_[np.ones(n_tri, bool), np.zeros(len(t) - n_tri, bool)]
     try:
-        anat = anatomy(P, t, tag)
+        anat = atrium.anatomy(P, t, tag)
     except CutError as exc:
         raise UacError(str(exc)) from None
 
     best, first_error = None, None
     for penalty in ((opts.ring_penalty, 0.0) if opts.ring_penalty > 0 else (0.0,)):
         try:
-            att = _attempt(P, t, tag, is_real, anat, opts, penalty, solver, on_status, should_stop)
+            att = _attempt(P, t, tag, is_real, anat, opts, penalty, solver, on_status, should_stop,
+                           atrium)
         except Cancelled:
             raise UacError("Stopped.") from None
         except CutError as exc:
@@ -283,17 +336,38 @@ def compute(points: np.ndarray, triangles: np.ndarray, tags: np.ndarray,
 
     _match_cut(best)
     alpha, beta = _on_points(best, n0, surf.t)
+    # count folds on the map the stored values draw, so none is missed
+    for h, k in zip(sorted(best.halves, key=lambda h: h.side), stored_folds(alpha, beta, surf.t)):
+        h.folded_real = k
     warnings = []
     if best.folded_real:
         warnings.append(f"{best.folded_real} triangles are folded in the flat map.")
     if best.worst_miss > RETRY_MISS:
-        large = [f"{tpl.NAMES[L]} ({v['ostium_mm']:.0f} mm)" for L, v in ext.items()
+        large = [f"{atrium.names[L]} ({v['ostium_mm']:.0f} mm)" for L, v in ext.items()
                  if isinstance(v, dict) and v.get("ostium_mm", 0) > LARGE_OSTIUM_MM]
         hint = (" Very large ostia, whose labels probably run onto the body: "
                 + ", ".join(large) + "." if large else "")
         warnings.append(f"A ring is {best.worst_miss:.3f} from its template target: check the "
                         f"vein and appendage labels.{hint}")
-    return UacRun(alpha, beta, surf, solver.name, time.time() - t0, best, ext, warnings)
+    return UacRun(alpha, beta, surf, solver.name, time.time() - t0, best, ext, warnings, atrium)
+
+
+def stored_folds(alpha: np.ndarray, beta: np.ndarray, t: np.ndarray) -> Tuple[int, int]:
+    """Folded triangles of the flat map drawn from the stored values
+    (:func:`flat_from_values`), per half ``(posterior, anterior)``: a
+    triangle whose signed area has the sign opposite to most triangles'.
+    A triangle collapsed to a point (longest flat side under
+    :data:`~ccdaf.core.uac.flatten.COLLAPSED`) is not counted."""
+    uv, tri, cells, _ = flat_from_values(alpha, beta, t)
+    sa = signed_areas(uv, tri)
+    e = np.stack([np.linalg.norm(uv[tri[:, k]] - uv[tri[:, (k + 1) % 3]], axis=1)
+                  for k in range(3)], 1).max(1)
+    ok = e >= COLLAPSED
+    if not ok.any():
+        return 0, 0
+    folded = ok & (np.sign(sa) == -np.sign(np.median(sa[ok])))
+    ant = (np.asarray(beta, float)[np.asarray(t)[cells]] > 0.5 + 1e-9).any(1)
+    return int((folded & ~ant).sum()), int((folded & ant).sum())
 
 
 def _match_cut(att: Attempt) -> None:
@@ -372,5 +446,6 @@ def flat_from_values(alpha: np.ndarray, beta: np.ndarray, t: np.ndarray, eps: fl
     return np.vstack(pts), np.vstack(tris), np.concatenate(cells), np.concatenate(src)
 
 
-__all__ = ["ALPHA", "BETA", "Options", "UacRun", "UacError", "compute", "prepare",
+__all__ = ["ALPHA", "BETA", "Options", "UacRun", "UacError", "compute", "prepare", "Atrium",
+           "LEFT", "run_atrium", "stored_folds",
            "flat_from_values", "repair_words", "REPAIRS"]

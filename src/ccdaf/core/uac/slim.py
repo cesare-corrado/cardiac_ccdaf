@@ -103,9 +103,16 @@ def slim(R: np.ndarray, tri: np.ndarray, lm: np.ndarray, tg: np.ndarray,
          iters: int = 100, lam0: float = 1.0, lam_mult: float = 1.2, lam_max: float = 1e7,
          solver: Optional[SpdSolver] = None,
          should_stop: Optional[Callable[[], bool]] = None,
-         on_iteration: Optional[Callable[[int], None]] = None):
+         on_iteration: Optional[Callable[[int], None]] = None,
+         init: Optional[np.ndarray] = None):
     """Warp the rest map ``R`` so ``lm`` points reach ``tg`` and ``hard``
     points sit at ``hard_tg``.
+
+    ``init``: the map to start from (``R`` by default). It must not fold.
+    Starting with the hard points already at their targets keeps them there
+    exactly: each step moves a point only part of the way to the solve's
+    answer, so a hard point that starts elsewhere reaches its target only
+    in the limit.
 
     ``circles``: ``(positions in lm, centre, radius)``; those landmarks slide
     on their circle (their target is the nearest point of it).
@@ -125,8 +132,10 @@ def slim(R: np.ndarray, tri: np.ndarray, lm: np.ndarray, tg: np.ndarray,
     G, a, sgn = _grad_ops(R, tri)
     mirrored = (sgn < 0).sum() > (sgn > 0).sum()
     flip = np.array([-1.0, 1.0])
+    U0 = R.copy() if init is None else np.asarray(init, float).copy()
     if mirrored:                       # work on a positively oriented copy
         R, tg, hard_tg = R * flip, tg * flip, hard_tg * flip
+        U0 = U0 * flip
         if circles:
             circles = [(ix, np.asarray(c) * flip, r) for ix, c, r in circles]
         G, a, sgn = _grad_ops(R, tri)
@@ -172,7 +181,7 @@ def slim(R: np.ndarray, tri: np.ndarray, lm: np.ndarray, tg: np.ndarray,
     perm = ff[Mf.data.astype(np.int64) - 1]
     fh_row, fh_x = fmap[ur[fh]], xfull[uc[fh]]
     r_idx = (tri_k[:, :, None] + np.arange(2)[None, None, :] * n).ravel()
-    U = R.copy()
+    U = U0
     lam = lam0
     hist: List[Tuple[float, float, float, float]] = []
     for it in range(iters):
