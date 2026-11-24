@@ -15,7 +15,7 @@ loaded, surface or volume.
 | **file name** | The prefix of all three files, without a suffix. |
 | **scale factor** | Point coordinates are multiplied by this. CARP works in micrometres, so a mesh in millimetres needs **1000**, the default. |
 | **region tag** | The cell array written as the `.elem` region column. Only whole-numbered arrays are offered, so `tissueTag` and `elemTag` qualify and a measured field does not. It starts on `tissueTag` when the mesh has one. With *(none)* the column is still written, as 0 for every element. |
-| **fibres** | The direction written to `.lon`, or the placeholder. Only the names the project treats as directions are offered (`fiber`, `fibre`). |
+| **fibres** | The direction written to `.lon`, or the placeholder. Only the names the project treats as directions are offered (`fiber`, `fibre`, and the atrial `fibre_endo`, `fibre_epi`). |
 | **sheets** | A second direction per element (`sheet`), which makes the `.lon` header 2. It needs a fibre direction, so it stays greyed until one is chosen. |
 
 ### What the three files hold

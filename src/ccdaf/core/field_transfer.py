@@ -82,8 +82,8 @@ from ccdaf.core.volume_mesh import boundary_surface, tetrahedra
 #: as a fibre orientation. Named rather than guessed from the component
 #: count: a displacement is also three numbers per element and averaging
 #: it as an axis would be just as wrong the other way.
-AXIAL_CELL_FIELDS: frozenset = frozenset({"fiber", "fibre", "sheet",
-                                          "sheet_normal"})
+AXIAL_CELL_FIELDS: frozenset = frozenset({"fiber", "fibre", "fibre_endo",
+                                          "fibre_epi", "sheet", "sheet_normal"})
 
 #: Point fields that say which boundary surface a node lies on, as bit
 #: flags (``surfaceLabelMask``). They are neither measurements nor

@@ -56,7 +56,7 @@ DEFAULT_SCALE = 1000.0
 #: from the component count: a displacement is also three numbers per
 #: element and is not a direction. Mirrors
 #: :data:`ccdaf.core.field_transfer.AXIAL_CELL_FIELDS`.
-FIBRE_FIELDS: Tuple[str, ...] = ("fiber", "fibre")
+FIBRE_FIELDS: Tuple[str, ...] = ("fiber", "fibre", "fibre_endo", "fibre_epi")
 SHEET_FIELDS: Tuple[str, ...] = ("sheet",)
 
 #: The placeholder direction written when the mesh carries no fibres.

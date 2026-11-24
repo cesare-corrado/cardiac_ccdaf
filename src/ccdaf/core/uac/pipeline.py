@@ -45,7 +45,7 @@ import scipy.sparse as sp
 # module (its names are looked up when a run starts, not at import).
 from ccdaf.core import surface_repair as sr
 from ccdaf.core.uac import template as tpl
-from ccdaf.core.uac.cut import CutError, anatomy, find_cut, label_rings
+from ccdaf.core.uac.cut import CutError, anatomy, check_sides, find_cut, label_rings
 from ccdaf.core.uac.extension import extend_veins
 from ccdaf.core.uac.flatten import ANTERIOR, POSTERIOR, DegenerateFirstMap, HalfMap, flatten_half
 from ccdaf.core.uac.mesh_ops import unique_edges
@@ -250,6 +250,7 @@ def compute(points: np.ndarray, triangles: np.ndarray, tags: np.ndarray,
     P, t, tag = surf.P, surf.t, surf.tag
     n0 = len(P)
     try:
+        check_sides(P, t, tag)
         rings0 = label_rings(P, t, tag, tpl.VEINS)
     except CutError as exc:
         raise UacError(str(exc)) from None

@@ -616,21 +616,30 @@ def segments(grid, name: str = FIBRE_FIELD, count: int = 20_000,
     """Line segments along *grid*'s per-element directions, for display.
 
     One segment through the centre of each of *count* randomly sampled
-    elements. Lines rather than arrows because a fibre has no sign. Their
-    length follows the spacing of the sample, ``(V / count) ** (1/3)`` for
-    myocardial volume ``V``, so a denser sample draws shorter segments
-    instead of a thicket.
+    elements (tetrahedra, or triangles of a surface such as an atrium with
+    mapped fibres). Lines rather than arrows because a fibre has no sign.
+    Their length follows the spacing of the sample, ``(V / count) ** (1/3)``
+    for myocardial volume ``V`` (``(A / count) ** (1/2)`` for a surface of
+    area ``A``), so a denser sample draws shorter segments instead of a
+    thicket.
     """
     grid = pv.wrap(grid)
-    tets = tetrahedra(grid)
+    surface = isinstance(grid, pv.PolyData)
+    cells = (grid.faces.reshape(-1, 4)[:, 1:] if surface else tetrahedra(grid))
     directions = np.asarray(grid.cell_data[name], dtype=float)
-    n = len(tets)
+    n = len(cells)
     k = int(min(max(count, 1), n))
     pick = np.sort(np.random.default_rng(seed).choice(n, k, replace=False))
-    p = np.asarray(grid.points, dtype=float)[tets[pick]]
+    p = np.asarray(grid.points, dtype=float)[cells[pick]]
     centre = p.mean(axis=1)
-    volume = np.abs(np.linalg.det(p[:, 1:] - p[:, :1])) / 6.0
-    spacing = (float(volume.mean()) * n / k) ** (1.0 / 3.0)
+    if surface:
+        area = 0.5 * np.linalg.norm(np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1)
+        spacing = (float(area.mean()) * n / k) ** 0.5
+    else:
+        volume = np.abs(np.linalg.det(p[:, 1:] - p[:, :1])) / 6.0
+        spacing = (float(volume.mean()) * n / k) ** (1.0 / 3.0)
+    keep = np.isfinite(directions[pick]).all(1)
+    pick, centre, k = pick[keep], centre[keep], int(keep.sum())
     u = directions[pick]
     u = u / np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-300)
     half = 0.5 * _SEGMENT_SHARE * spacing * u
