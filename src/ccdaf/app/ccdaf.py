@@ -3800,8 +3800,8 @@ class CCDAF(QtWidgets.QMainWindow):
         elif not uac_core.has_coordinates(self.loader.mesh):
             can_af, af_why = False, "Compute UAC first (Actions > Compute UAC)."
         elif ("elemTag" in self.loader.mesh.cell_data
-              and uac_core.which_atrium(self.loader.mesh.cell_data["elemTag"]) != "LA"):
-            can_af, af_why = False, "Atrial fibres are mapped on a left atrium only, for now."
+              and uac_core.which_atrium(self.loader.mesh.cell_data["elemTag"]) == "both"):
+            can_af, af_why = False, uac_core.BOTH_ATRIA
         else:
             can_af, af_why = True, "Map the average atlas fibres through the UAC."
         self.act_atrial_fibres.setEnabled(can_af)

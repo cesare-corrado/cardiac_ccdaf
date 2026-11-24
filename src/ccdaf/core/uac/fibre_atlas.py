@@ -1,8 +1,8 @@
 """
 fibre_atlas.py
 ==============
-The left-atrial fibre atlases, for mapping fibres onto an atrium through
-its universal atrial coordinates.
+The atrial fibre atlases, for mapping fibres onto an atrium (left or right)
+through its universal atrial coordinates.
 
 Two published fibre sets, each for the endocardium and the epicardium
 (Roney et al., the UAC fibre atlas):
@@ -10,7 +10,8 @@ Two published fibre sets, each for the endocardium and the epicardium
 * ``labarthe``: the rule-based bilayer fibres of Labarthe et al.; the
   epicardial file also carries Bachmann's bundle (``fibre_bb`` where
   ``bb`` is 1);
-* ``atlas``: the average of the ex vivo diffusion-tensor fibre sets.
+* ``atlas``: the average of the ex vivo diffusion-tensor fibre sets, as
+  published on Zenodo (record 3764917, CC BY 4.0).
 
 Each file is a surface in millimetres with ccdaf labels (``elemTag``),
 ccdaf's coordinates (``uac_alpha``, ``uac_beta``), the atlas' own original
@@ -45,14 +46,16 @@ import pyvista as pv
 UAC_METHOD = "ccdaf-uac-la-1"
 
 #: The GitHub release holding the files, and where to fetch them.
-RELEASE = "fibre-atlas-1"
+RELEASE = "fibre-atlas-2"
 URL = f"https://github.com/cesare-corrado/cardiac_ccdaf/releases/download/{RELEASE}/"
 
 #: SHA-256 of each file published in :data:`RELEASE`. A file not listed
 #: here (the Labarthe sets) is never downloaded, only read locally.
 FILES: Dict[str, str] = {
-    "la_atlas_endo.vtp": "4f4f52c07868626e2990b76615a6d8d4b470fbf267827be9b79031a39754fc8b",
-    "la_atlas_epi.vtp": "f11e459933b68e66b1fc3801be763a5ed4085b0160f6ffc89a62cebcf7cca5dd",
+    "la_atlas_endo.vtp": "c438742c2bd462a8f773cb6edc26b74fdab10f26820580632cc3b0dd8a9aab60",
+    "la_atlas_epi.vtp": "264536d03ef838ddb991c3e91e30cd19a1dd89b862db56b4bd9c4d5d572324e8",
+    "ra_atlas_endo.vtp": "a74d93c23e1d20200d1f19b727d1ec60888fefe1495553f1d0f4729eec5f65ac",
+    "ra_atlas_epi.vtp": "bd18b9e3dbf7828aa26bac49c700f5b008512032cecad59e67b3e734d7776011",
 }
 
 SETS: Tuple[str, ...] = ("labarthe", "atlas")
