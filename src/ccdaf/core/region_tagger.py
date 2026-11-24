@@ -677,13 +677,15 @@ class RegionTagger:
         return out
 
     def reduce_to_single_components(self, tri_label: np.ndarray) -> np.ndarray:
-        """Each PV label as one connected patch, seed-free.
+        """Each PV label, and the body, as one connected patch, seed-free.
 
-        For every label in :data:`LABELS`, keep its largest connected
-        component and reassign each smaller island to the majority label
-        bordering it — BODY when it borders nothing else, which is the usual
-        case (a stray triangle sitting in the body). Returns a new array;
-        ``tri_label`` is untouched.
+        For every label in :data:`LABELS` and for the body, keep its largest
+        connected component and reassign each smaller island to the majority
+        label bordering it — BODY when it borders nothing else, which is the
+        usual case (a stray triangle sitting in the body); a body island cut
+        off inside a vein becomes that vein. Returns a new array;
+        ``tri_label`` is untouched. The atrial coordinates need every label
+        to be one patch, and join the same islands the same way.
 
         :meth:`_enforce_contiguity` already does this during ``tag``, but it
         needs the seeds and runs only there. A manual edit paints picked
@@ -695,7 +697,7 @@ class RegionTagger:
         correction to keep an export from carrying one.
         """
         out = np.asarray(tri_label).copy()
-        for lbl in LABELS.values():
+        for lbl in (*LABELS.values(), BODY_LABEL):
             mask = out == lbl
             if not np.any(mask):
                 continue

@@ -125,6 +125,8 @@ from ccdaf.core import ventricular_fibres as vfibres
 from ccdaf.gui.fibre_dialog import FibreDialog, FibreWorker
 from ccdaf.core import uvc as uvc_core
 from ccdaf.gui.uvc_dialog import UvcDialog, UvcWorker
+from ccdaf.core import uac as uac_core
+from ccdaf.gui.uac_dialog import UacDialog, UacWorker
 from ccdaf.core.volume_clean import clean as clean_volume
 from ccdaf.core.volume_quality import improve_grid as improve_volume_quality
 from ccdaf.core.wall_report import check_wall
@@ -357,6 +359,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self._uvc_dialog = None                             # UVC, non-modal
         self._uvc_worker = None                             # its run, on a thread
         self._uvc_picking = False                           # the UVC dialog holds the picker
+        self._uac_dialog = None                             # UAC, non-modal
+        self._uac_worker = None                             # its run, on a thread
         self._seg_plane_widget = None                       # plane-relabel gizmo
         self._seg_plane_normal: Optional[tuple] = None
         self._seg_plane_point: Optional[tuple] = None
@@ -507,6 +511,13 @@ class CCDAF(QtWidgets.QMainWindow):
             "labelled ventricular volume with LV and RV element tags.")
         self.act_compute_uvc.triggered.connect(self._action_compute_uvc)
         actions_menu.addAction(self.act_compute_uvc)
+
+        self.act_compute_uac = QtWidgets.QAction("Compute UAC…", self)
+        self.act_compute_uac.setStatusTip(
+            "Compute universal atrial coordinates (alpha, beta) on a labelled "
+            "left-atrial surface.")
+        self.act_compute_uac.triggered.connect(self._action_compute_uac)
+        actions_menu.addAction(self.act_compute_uac)
 
         # --- Export menu: the working mesh in another tool's format -----
         export_menu = menubar.addMenu("E&xport")
@@ -1438,6 +1449,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # A fibre window measured the mesh that was here before.
         self._close_fibre_dialog()
         self._close_uvc_dialog()
+        self._close_uac_dialog()
         # Before anything asks what fields the mesh has: a labelling read
         # back from a file arrives as the node mask alone, and the faces
         # are rebuilt from it here. Done later — next to the editor setup,
@@ -1634,6 +1646,10 @@ class CCDAF(QtWidgets.QMainWindow):
     def closeEvent(self, event) -> None:
         """Quit — via File → Quit or the window's close button — asks first."""
         if self._confirm_discard("quitting"):
+            worker = getattr(self, "_uac_worker", None)
+            if worker is not None:               # a thread must not outlive the window
+                worker.stop()
+                worker.wait(10000)
             event.accept()
         else:
             event.ignore()
@@ -1651,6 +1667,7 @@ class CCDAF(QtWidgets.QMainWindow):
             self._close_segmentation()
         self._close_fibre_dialog()
         self._close_uvc_dialog()
+        self._close_uac_dialog()
 
         # EAM state.
         self._eam_directory = None
@@ -3475,6 +3492,9 @@ class CCDAF(QtWidgets.QMainWindow):
         # would then write the stale tetrahedra.
         self.loader.set_surface(new_mesh)
         self._mark_dirty()
+        uac_dlg = getattr(self, "_uac_dialog", None)
+        if uac_dlg is not None and not uac_dlg.matches(new_mesh):
+            uac_dlg.reject()
         # Post-processing can add or drop arrays, so re-offer what the new
         # mesh actually has — keeping the user on their field if it survived.
         self._populate_fields(keep_selection=True)
@@ -3743,6 +3763,18 @@ class CCDAF(QtWidgets.QMainWindow):
             can_uvc, uvc_why = uvc_core.availability(self.loader.grid)
         self.act_compute_uvc.setEnabled(can_uvc)
         self.act_compute_uvc.setToolTip(uvc_why)
+
+        # UAC need a labelled atrial surface.
+        if self._seg_array is not None:
+            can_uac, uac_why = False, "Close the segmentation first."
+        elif self._uac_worker is not None:
+            can_uac, uac_why = False, "UAC are being computed."
+        elif self.loader.kind == VOLUME:
+            can_uac, uac_why = False, "UAC are computed on an atrial surface, not a volume."
+        else:
+            can_uac, uac_why = uac_core.availability(self.loader.mesh)
+        self.act_compute_uac.setEnabled(can_uac)
+        self.act_compute_uac.setToolTip(uac_why)
 
         # Exporting reads the mesh and changes nothing, so it needs only a
         # mesh — not a field to read, and not the segmentation closed.
@@ -4257,6 +4289,121 @@ class CCDAF(QtWidgets.QMainWindow):
         flight carries on and is discarded on arrival if the mesh changed."""
         if self._uvc_dialog is not None:
             self._uvc_dialog.reject()
+
+    # ==================================================================
+    # Actions → Compute UAC
+    # ==================================================================
+    def _action_compute_uac(self) -> None:
+        """Open the UAC window (non-modal: the run takes minutes)."""
+        if self._uac_dialog is not None:
+            self._uac_dialog.raise_()
+            self._uac_dialog.activateWindow()
+            return
+        mesh = self.loader.mesh
+        ok, why = uac_core.availability(mesh if self.loader.kind != VOLUME else None)
+        if not ok:
+            QtWidgets.QMessageBox.warning(self, "Compute UAC", why)
+            return
+        try:
+            dlg = UacDialog(mesh, parent=self)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Compute UAC", str(exc))
+            return
+        self._uac_dialog = dlg
+        dlg.run_requested.connect(self._uac_run)
+        dlg.stop_requested.connect(self._uac_stop)
+        dlg.undo_requested.connect(self._uac_undo)
+        dlg.finished.connect(self._uac_dialog_finished)
+        if self._uac_worker is not None:
+            dlg.set_running(True)
+            dlg.set_status("A run is still in progress…")
+        dlg.show()
+
+    def _uac_run(self) -> None:
+        dlg = self._uac_dialog
+        if self._uac_worker is not None or dlg is None or self.loader.mesh is None:
+            return
+        worker = UacWorker(*dlg.inputs(), parent=self)
+        worker.status.connect(self._uac_status)
+        worker.done.connect(self._uac_done)
+        worker.failed.connect(self._uac_failed)
+        worker.finished.connect(self._uac_worker_finished)
+        self._uac_worker = worker
+        dlg.set_running(True)
+        dlg.set_status("Starting…")
+        self._sync_menu_actions()
+        worker.start()
+
+    def _uac_stop(self) -> None:
+        if self._uac_worker is not None:
+            self._uac_worker.stop()
+            self._uac_status("Stopping…")
+
+    def _uac_status(self, text: str) -> None:
+        if self._uac_dialog is not None:
+            self._uac_dialog.set_status(text)
+        self.statusBar().showMessage(text)
+
+    def _uac_done(self, run) -> None:
+        """Write a finished run, unless the surface changed under it."""
+        mesh = self.loader.mesh
+        dlg = self._uac_dialog
+        if (dlg is None or mesh is None or self.loader.kind == VOLUME
+                or not dlg.matches(mesh)):
+            self._uac_status("The surface or its labels changed while the UAC were "
+                             "being computed, so the result was discarded.")
+            return
+        # The run repaired the surface; the repaired copy, with every field
+        # carried across and the coordinates added, replaces it. The window
+        # follows it first, so the replacement does not close it, and keeps
+        # the old surface for Undo.
+        new_mesh = uac_core.write(mesh, run)
+        dlg.adopt(new_mesh, before=mesh)
+        self._replace_mesh(new_mesh)
+        self.vis_widget.select_field(uac_core.ALPHA)
+        self._set_section_visible("visualisation", True)
+        self._render_field()
+        dlg.show_run(run)
+        self.statusBar().showMessage(run.summary(), 30000)
+
+    def _uac_undo(self) -> None:
+        """Put back the surface as it was before the last run."""
+        dlg = self._uac_dialog
+        old = dlg.before() if dlg is not None else None
+        if old is None or self._uac_worker is not None:
+            return
+        dlg.adopt(old, before=None)
+        self._replace_mesh(old)
+        self._render_field()
+        msg = "UAC undone: the surface is back as it was before Compute."
+        dlg.set_status(msg)
+        self.statusBar().showMessage(msg, 15000)
+
+    def _uac_failed(self, text: str) -> None:
+        self._uac_status(f"UAC not computed:\n{text}")
+        if text != "Stopped.":
+            QtWidgets.QMessageBox.warning(self, "Compute UAC", text)
+
+    def _uac_worker_finished(self) -> None:
+        worker = self._uac_worker
+        self._uac_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if self._uac_dialog is not None:
+            self._uac_dialog.set_running(False)
+        self._sync_menu_actions()
+
+    def _uac_dialog_finished(self, _result: int) -> None:
+        dlg = self._uac_dialog
+        self._uac_dialog = None
+        if dlg is not None:
+            dlg.deleteLater()
+
+    def _close_uac_dialog(self) -> None:
+        """Shut the UAC window: the surface it read is going away. A run in
+        flight carries on and is discarded on arrival."""
+        if self._uac_dialog is not None:
+            self._uac_dialog.reject()
 
     #: What each outcome of a mesh change did to the fibres, in words.
     FIBRE_NOTES = {

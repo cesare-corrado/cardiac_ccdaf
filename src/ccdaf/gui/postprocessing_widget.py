@@ -4,7 +4,8 @@ PostprocessingWidget
 
 Side-panel widget exposing ``mesh_postprocessor.apply`` to the user:
 
-* three checkboxes (decimate, refine, clean) with per-step parameters,
+* checkboxes (decimate, refine, clean, flip edges, fill holes, smooth)
+  with per-step parameters,
   the refine step offering an ``adaptive`` (split only) and a ``resample``
   (split and collapse) mode
 * an "Apply" button that runs the selected steps in the fixed order
@@ -145,8 +146,10 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         self.chk_clean = QtWidgets.QCheckBox("Clean")
         self.chk_clean.setToolTip(
             "Merge duplicate points, drop non-connected points, remove "
-            "non-manifold and degenerate cells, orient normals, and "
-            "repair low-quality triangles while preserving listed labels."
+            "duplicate, non-manifold and degenerate cells, orient normals, "
+            "repair low-quality triangles while preserving listed labels, "
+            "split pinched points, cut thin tunnels (under 15 mm round) and "
+            "flip edges."
         )
         v.addWidget(self.chk_clean)
         
@@ -220,6 +223,32 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         )
         grid.addWidget(self.txt_preserve, 1, 3)
         v.addLayout(grid)
+        _FLIP_TIP = (
+            "Re-cut long thin pairs of triangles along their other diagonal "
+            "(an edge whose two facing angles sum to more than 180 degrees). "
+            "Only pairs of the same label that are within 10 degrees of flat "
+            "are flipped, so the shape and the label borders stay. No point "
+            "moves.")
+        self.chk_clean_flip = QtWidgets.QCheckBox("Clean also flips edges")
+        self.chk_clean_flip.setChecked(True)
+        self.chk_clean_flip.setToolTip(
+            _FLIP_TIP + " Runs as Clean's last step; only active when Clean "
+            "is ticked.")
+        row = QtWidgets.QHBoxLayout()
+        row.addSpacing(20)                       # indented: a part of Clean
+        row.addWidget(self.chk_clean_flip)
+        row.addStretch(1)
+        v.addLayout(row)
+        self.chk_clean.toggled.connect(self.chk_clean_flip.setEnabled)
+        self.chk_clean_flip.setEnabled(self.chk_clean.isChecked())
+
+        # -- flip edges, on its own --------------------------------------
+        self.chk_flip = QtWidgets.QCheckBox("Flip edges only (without Clean)")
+        self.chk_flip.setToolTip(
+            _FLIP_TIP + " A step of its own: tick it, untick Clean, to flip "
+            "without cleaning. Labels listed under 'preserve labels' are not "
+            "flipped.")
+        v.addWidget(self.chk_flip)
 
         # -- fill holes -----------------------------------------------
         _HOLE_TIP = (
@@ -308,7 +337,7 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         self.btn_apply = QtWidgets.QPushButton("Apply post-processing")
         self.btn_apply.setToolTip(
             "Run the selected steps on the current mesh in the order "
-            "decimate → refine → clean → fill holes."
+            "decimate → refine → clean → flip edges → fill holes → smooth."
         )
         self.btn_apply.clicked.connect(self._on_apply)
         v.addWidget(self.btn_apply)
@@ -362,12 +391,14 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         if not (self.chk_decimate.isChecked()
                 or self.chk_refine.isChecked()
                 or self.chk_clean.isChecked()
+                or self.chk_flip.isChecked()
                 or self.chk_fill.isChecked()
                 or self.chk_smooth.isChecked()):
             QtWidgets.QMessageBox.information(
                 self, "Nothing to do",
-                "Select at least one of decimate / refine / clean / "
-                "fill holes / smooth.",
+                "Select at least one of Decimate / Refine / Clean / "
+                "Flip edges only / Fill holes / Smooth. ('Clean also flips "
+                "edges' is part of Clean and runs only with it.)",
             )
             return
 
@@ -381,6 +412,8 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
             do_decimate=self.chk_decimate.isChecked(),
             do_refine=self.chk_refine.isChecked(),
             do_clean=self.chk_clean.isChecked(),
+            do_flip_edges=self.chk_flip.isChecked(),
+            clean_flip_edges=self.chk_clean_flip.isChecked(),
             do_fill_holes=self.chk_fill.isChecked(),
             do_smooth=self.chk_smooth.isChecked(),
             smooth_method=self.cmb_smooth.currentData(),
@@ -435,6 +468,7 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         # sweeps barely touch a dense Carto map but round off a decimated
         # one. A number the user can read beats a threshold we guess at.
         moved: dict = {}
+        repaired: dict = {}
 
         def _surface_moved(old, new) -> None:
             d = np.linalg.norm(
@@ -451,6 +485,7 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
                 mesh, opts, on_decimate_progress=_decimate_progress,
                 on_surface_moved=_surface_moved,
                 on_progress=_stage_progress,
+                report=repaired,
             )
         except Exception as exc:
             self.progress.setVisible(False)
@@ -467,10 +502,28 @@ class PostprocessingWidget(QtWidgets.QGroupBox):
         self.mesh_changed.emit()
         msg = (f"Post-processing done: {new_mesh.n_points} points, "
                f"{new_mesh.n_cells} cells.")
+        did = _describe(repaired)
+        if did:
+            msg += f" Repairs: {did}."
         if moved:
             msg += (f" Smoothing moved the surface {moved['mean']:.3g} on "
                     f"average, {moved['max']:.3g} at most.")
         self._status(msg)
+
+
+def _describe(rep: dict) -> str:
+    """The connectivity repairs that did something, in words."""
+    tunnels = rep.get("tunnels") or []
+    parts = [
+        (rep.get("duplicates_removed", 0), "duplicate triangles removed"),
+        (rep.get("pinches_split", 0), "pinched points split"),
+        (len(tunnels), "thin tunnels cut and closed"),
+        (rep.get("flips", 0), "edges flipped"),
+    ]
+    out = [f"{n} {what}" for n, what in parts if n]
+    if rep.get("tunnels_left"):
+        out.append(f"{rep['tunnels_left']} tunnel(s) wider than 15 mm left")
+    return ", ".join(out)
 
 
 __all__ = ["PostprocessingWidget"]

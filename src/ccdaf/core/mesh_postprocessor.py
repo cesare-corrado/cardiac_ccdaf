@@ -10,9 +10,12 @@ Mesh quality post-processing routines usable at any stage of the pipeline:
 * ``remesh``    - isotropic resampling into an edge-length band (split and
                   collapse)
 * ``clean``     - merge duplicates, drop non-connected points, remove
-                  non-manifold / degenerate cells, orient normals, and
-                  repair low-quality triangles while preserving labelled
-                  surfaces
+                  duplicate, non-manifold and degenerate cells, orient
+                  normals, repair low-quality triangles while preserving
+                  labelled surfaces, split pinched points, cut thin
+                  tunnels and (by default) flip edges
+* ``flip_edges`` - the edge flips on their own: re-cut long thin pairs of
+                  triangles along their other diagonal; no point moves
 * ``improve_quality`` - the repair step on its own: relocate vertices to
                   fix badly-shaped triangles without touching topology
 * ``fill_holes``- close boundary loops below a radius threshold, leaving
@@ -36,6 +39,7 @@ import vtk
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist, pdist
 
+from ccdaf.core import surface_repair as sr
 from ccdaf.core.mesh_loader import INTERNAL_ARRAYS
 
 
@@ -1960,11 +1964,16 @@ def clean(mesh: pv.PolyData,
           smooth_iterations: int = 20,
           merge_tol: float = 0.0,
           min_component_fraction: float = MIN_COMPONENT_FRACTION,
-          on_progress: Optional[Callable[[int, int], None]] = None
+          on_progress: Optional[Callable[[int, int], None]] = None,
+          flip: bool = True,
+          report: Optional[dict] = None,
           ) -> pv.PolyData:
     """Apply the full cleaning pipeline.
 
     * merge duplicate points, drop unused / non-connected points
+    * remove duplicate triangles: a zero-area flap listed twice goes whole,
+      so the wall it hangs from keeps its triangle
+      (:func:`ccdaf.core.surface_repair.remove_duplicates`)
     * remove non-manifold and degenerate cells
     * drop connected components too small to be anatomy — see
       ``min_component_fraction``, and :func:`_keep_main_components` for why
@@ -1973,6 +1982,16 @@ def clean(mesh: pv.PolyData,
     * smooth low-quality triangles (``quality < quality_threshold``) while
       freezing vertices belonging to cells whose ``elemTag`` is listed in
       ``preserve_labels``
+    * split pinched points (a point the rim passes through twice) and cut
+      thin tunnels (a bridge of tissue whose shortest loop is under
+      :data:`ccdaf.core.surface_repair.TUNNEL_MAX_MM`), closing each cut
+      with a patch that takes the label round it; a wider tunnel is left
+    * ``flip``: Delaunay edge flips between nearly coplanar triangles of the
+      same label (:func:`flip_edges`)
+
+    These last steps never touch a protected cell's shape and never drop
+    one (see :mod:`ccdaf.core.surface_repair`). ``report``, when given, is
+    filled with what they did.
 
     ``on_progress(i, n)`` is forwarded to :func:`improve_quality`, the one
     step long enough to be worth reporting.
@@ -2052,6 +2071,12 @@ def clean(mesh: pv.PolyData,
     # mask used by non-manifold removal is correct.
     _transfer_arrays(src, cleaned)
 
+    # 3b. duplicate triangles: a flap listed twice goes whole, before the
+    #     non-manifold pass would take the wall triangle it hangs from too.
+    rep: dict = {}
+    cleaned, r = sr.run(cleaned, sr.remove_duplicates, frozen_labels=preserve_labels)
+    rep.update(r)
+
     # 4. remove non-manifold edges — protected cells survive.
     cleaned = _remove_non_manifold(cleaned, preserve_labels)
 
@@ -2091,6 +2116,15 @@ def clean(mesh: pv.PolyData,
     if protected_snapshot is not None:
         cleaned = _restore_protected(cleaned, protected_snapshot)
 
+    # 8b. connectivity repairs that keep every point where it is. After the
+    #     restoration, which merges coincident points and so would undo a
+    #     split pinch or a cut tunnel.
+    steps = [sr.split_pinches, sr.cut_tunnels] + ([sr.flip_edges] if flip else [])
+    cleaned, r = sr.run(cleaned, *steps, frozen_labels=preserve_labels)
+    rep.update(r)
+    if report is not None:
+        report.update(rep)
+
     # 9. drop bookkeeping arrays the intermediate filters attached. Arrays
     #    the input carried survive with the input's values: the
     #    _transfer_arrays passes above re-seeded them from ``src`` after
@@ -2098,6 +2132,26 @@ def clean(mesh: pv.PolyData,
     _strip_new_arrays(cleaned, input_point_arrays, input_cell_arrays)
 
     return cleaned
+
+
+def flip_edges(mesh: pv.PolyData, max_crease_deg: float = sr.MAX_CREASE_DEG,
+               preserve_labels: Optional[Iterable[int]] = None,
+               report: Optional[dict] = None) -> pv.PolyData:
+    """Re-cut long thin pairs of triangles along their other diagonal.
+
+    An edge is flipped when the two angles facing it sum to more than 180
+    degrees (it breaks the Delaunay condition) and the two triangles have
+    the same ``elemTag`` and lie within ``max_crease_deg`` of each other,
+    so the surface keeps its shape and its label borders. No point moves;
+    every field is kept. Repeated until no edge qualifies, so a second call
+    does nothing. Triangles with a label in ``preserve_labels`` are never
+    re-cut. ``report["flips"]`` gets the count.
+    """
+    out, r = sr.run(mesh, lambda e: sr.flip_edges(e, max_crease_deg),
+                    frozen_labels=tuple(preserve_labels or ()))
+    if report is not None:
+        report.update(r)
+    return out
 
 
 # ---------------------------------------------------------------------
@@ -2484,6 +2538,7 @@ class PostprocessOptions:
     do_clean: bool = False
     do_fill_holes: bool = False
     do_smooth: bool = False
+    do_flip_edges: bool = False     # the flips on their own (Clean also flips)
 
     # decimate
     decimate_target_points: int = 5000
@@ -2521,6 +2576,7 @@ class PostprocessOptions:
     # be kept. Keeps a cavity's endocardium, which is a component in its
     # own right; drops specks. See MIN_COMPONENT_FRACTION.
     clean_min_component_fraction: float = MIN_COMPONENT_FRACTION
+    clean_flip_edges: bool = True
 
     # smooth
     smooth_method: str = SMOOTH_TAUBIN
@@ -2534,11 +2590,13 @@ def apply(mesh: pv.PolyData,
           on_decimate_progress: Optional[Callable[[int, int], None]] = None,
           on_surface_moved: Optional[
               Callable[["pv.PolyData", "pv.PolyData"], None]] = None,
-          on_progress: Optional[Callable[[str, int, int], None]] = None
+          on_progress: Optional[Callable[[str, int, int], None]] = None,
+          report: Optional[dict] = None,
           ) -> pv.PolyData:
-    """Apply decimate -> refine -> clean -> fill_holes -> smooth in that
-    order, skipping any step whose flag is off. Returns a new
-    ``pv.PolyData``.
+    """Apply decimate -> refine -> clean -> flip edges -> fill_holes ->
+    smooth in that order, skipping any step whose flag is off. Returns a
+    new ``pv.PolyData``. ``report``, when given, gets the counts of the
+    connectivity repairs (see :func:`clean` and :func:`flip_edges`).
 
     The refine step runs :func:`refine` (``refine_mode=REFINE_ADAPTIVE``,
     the default) or :func:`remesh` (``REFINE_RESAMPLE``). In resample mode
@@ -2619,7 +2677,13 @@ def apply(mesh: pv.PolyData,
                     smooth_iterations=opts.clean_smooth_iterations,
                     merge_tol=opts.clean_merge_tol,
                     min_component_fraction=opts.clean_min_component_fraction,
-                    on_progress=_stage("quality repair"))
+                    on_progress=_stage("quality repair"),
+                    flip=opts.clean_flip_edges, report=report)
+    if opts.do_flip_edges:
+        r: dict = {}
+        out = flip_edges(out, preserve_labels=opts.clean_preserve_labels, report=r)
+        if report is not None:
+            report["flips"] = int(report.get("flips", 0)) + r["flips"]
     # max_hole_size == 0 means "no hole filling" (as it does for decimate),
     # so honour that rather than letting fill_holes reject it.
     if opts.do_fill_holes and opts.max_hole_size > 0.0:
@@ -2652,6 +2716,7 @@ __all__ = [
     "REFINE_ADAPTIVE",
     "REFINE_RESAMPLE",
     "clean",
+    "flip_edges",
     "improve_quality",
     "fill_holes",
 ]

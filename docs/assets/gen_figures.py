@@ -15,7 +15,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Circle, Ellipse, Rectangle
 
 OUT = Path(__file__).resolve().parent / "img"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -67,7 +67,47 @@ def electrode_convergence():
     plt.close(fig)
 
 
+def uac_template():
+    """The UAC square, drawn from ccdaf.core.uac.template."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from ccdaf.core.uac import template as tp
+    colour = {name: c for _, name, c in REGIONS}
+    fig, ax = plt.subplots(figsize=(5.4, 5.4), dpi=140)
+    ax.add_patch(Rectangle((0, 0), 1, 1, facecolor=colour["body"], edgecolor="#333333"))
+    ax.axhline(0.5, color="#333333", lw=0.8, ls="--")
+    for L, cen in ((tp.LIPV, tp.LIPV_C), (tp.RIPV, tp.RIPV_C)):
+        ax.add_patch(Circle(cen, tp.INF_R, facecolor=colour[tp.NAMES[L]], edgecolor="#333333"))
+    for L, cen in ((tp.LSPV, tp.LSPV_C), (tp.RSPV, tp.RSPV_C)):
+        half = Ellipse(cen, 2 * tp.SUP_RA, 2 * tp.SUP_RB, facecolor=colour[tp.NAMES[L]],
+                       edgecolor="#333333")
+        ax.add_patch(half)                       # superior veins stand on the roof
+        half.set_clip_path(Rectangle((0, 0.5), 1, 0.5, transform=ax.transData))
+    ax.add_patch(Ellipse(tp.LAA_C, 2 * tp.LAA_RA, 2 * tp.LAA_RB, facecolor=colour["LAA"],
+                         edgecolor="#333333"))
+    for L, cen in tp.END_C.items():
+        ax.add_patch(Circle(cen, tp.END_R, facecolor="white", edgecolor="#333333", lw=0.6))
+    labels = {tp.LSPV: (tp.LSPV_C[0], 0.63), tp.RSPV: (tp.RSPV_C[0], 0.63),
+              tp.LIPV: (tp.LIPV_C[0], 0.21), tp.RIPV: (tp.RIPV_C[0], 0.21),
+              tp.LAA: (tp.LAA_C[0], tp.LAA_C[1] + 0.1)}
+    for L, (x, y) in labels.items():
+        ax.text(x, y, tp.NAMES[L], ha="center", va="center", fontsize=10)
+    ax.text(0.5, 0.25, "posterior wall", ha="center", color="#555555")
+    ax.text(0.5, 0.75, "anterior wall", ha="center", color="#555555")
+    ax.text(0.5, 0.515, "roof", ha="center", va="bottom", fontsize=9, color="#555555")
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_aspect("equal")
+    ax.set_xlabel("uac_alpha  (0 septal, 1 lateral)")
+    ax.set_ylabel("uac_beta  (0 posterior MV, 0.5 roof, 1 anterior MV)")
+    ax.set_title("UAC template", fontsize=12, loc="left")
+    fig.tight_layout()
+    fig.savefig(OUT / "uac_template.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     region_legend()
     electrode_convergence()
+    uac_template()
     print("wrote:", *(p.name for p in sorted(OUT.glob("*.png"))))

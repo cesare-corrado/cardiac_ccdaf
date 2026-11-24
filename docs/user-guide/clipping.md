@@ -33,9 +33,10 @@ Clipping works on an accepted tagging, and the panel reaches that on its own:
 still the way to finish tagging deliberately.
 
 !!! note "Stray label cells are repaired without asking"
-    Both routes reduce each region to a single connected patch, reassigning
-    any cell of a label that got stranded away from its main patch — a label
-    split in two is rejected on export. This is a repair rather than a choice,
+    Both routes reduce each region, the body included, to a single connected
+    patch, reassigning any cell of a label that got stranded away from its
+    main patch to the label round it — a label split in two is rejected on
+    export, and the atrial coordinates need one patch per label. This is a repair rather than a choice,
     so it is not part of the question; the status bar reports how many cells
     it moved.
 
@@ -120,6 +121,14 @@ selected region — see the note below.
     which carries no tag of its own, clips the body it sits on. The red
     overlay shows exactly this, so what is highlighted is what will be
     removed.
+
+    One exception, at the very edge: after the clip, the new rim is tidied.
+    Ears (triangles with two sides on the opening) and slivers lying along it
+    are removed, with any point they leave unused, and a point the rim passes
+    through twice is split in two. A clip on a coarse label border can leave
+    such a saw-tooth rim, and these triangles would fold when the atrium is
+    flattened (see [Universal atrial coordinates](uac.md)). The status bar
+    says how many went.
 
     A region that is not in the current tagging has nothing to clip, and
     **Start** says so instead of falling back to a purely geometric cut.
