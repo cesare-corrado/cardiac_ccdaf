@@ -126,7 +126,9 @@ from ccdaf.gui.fibre_dialog import FibreDialog, FibreWorker
 from ccdaf.core import uvc as uvc_core
 from ccdaf.gui.uvc_dialog import UvcDialog, UvcWorker
 from ccdaf.core import uac as uac_core
+from ccdaf.core.uac import fibres as uac_fibres
 from ccdaf.gui.uac_dialog import UacDialog, UacWorker
+from ccdaf.gui.atrial_fibre_dialog import AtrialFibreDialog
 from ccdaf.core.volume_clean import clean as clean_volume
 from ccdaf.core.volume_quality import improve_grid as improve_volume_quality
 from ccdaf.core.wall_report import check_wall
@@ -518,6 +520,13 @@ class CCDAF(QtWidgets.QMainWindow):
             "left-atrial surface.")
         self.act_compute_uac.triggered.connect(self._action_compute_uac)
         actions_menu.addAction(self.act_compute_uac)
+
+        self.act_atrial_fibres = QtWidgets.QAction("Atrial fibres…", self)
+        self.act_atrial_fibres.setStatusTip(
+            "Map the average atlas fibres onto a left atrium through its UAC "
+            "(endocardium, epicardium or bilayer).")
+        self.act_atrial_fibres.triggered.connect(self._action_atrial_fibres)
+        actions_menu.addAction(self.act_atrial_fibres)
 
         # --- Export menu: the working mesh in another tool's format -----
         export_menu = menubar.addMenu("E&xport")
@@ -2366,11 +2375,7 @@ class CCDAF(QtWidgets.QMainWindow):
         # A mesh arriving or changing is what makes a field to read a
         # tissue property from appear or disappear.
         self._sync_menu_actions()
-        grid = self.loader.grid if self.loader.kind == VOLUME else None
-        self.vis_widget.set_fibre_directions(
-            [] if grid is None else
-            [n for n in (vfibres.FIBRE_FIELD, vfibres.SHEET_FIELD)
-             if n in grid.cell_data and np.asarray(grid.cell_data[n]).ndim == 2])
+        self.vis_widget.set_fibre_directions(self._fibre_fields())
         self._render_fibres()
 
     def _render_field(self, *_args) -> None:
@@ -3776,6 +3781,20 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_compute_uac.setEnabled(can_uac)
         self.act_compute_uac.setToolTip(uac_why)
 
+        # Atrial fibres follow the UAC stored on the surface.
+        if self._seg_array is not None:
+            can_af, af_why = False, "Close the segmentation first."
+        elif self._uac_worker is not None:
+            can_af, af_why = False, "UAC are being computed."
+        elif self.loader.kind == VOLUME or self.loader.mesh is None:
+            can_af, af_why = False, "Atrial fibres are mapped on an atrial surface."
+        elif not uac_core.has_coordinates(self.loader.mesh):
+            can_af, af_why = False, "Compute UAC first (Actions > Compute UAC)."
+        else:
+            can_af, af_why = True, "Map the average atlas fibres through the UAC."
+        self.act_atrial_fibres.setEnabled(can_af)
+        self.act_atrial_fibres.setToolTip(af_why)
+
         # Exporting reads the mesh and changes nothing, so it needs only a
         # mesh — not a field to read, and not the segmentation closed.
         can_export, why_export = carp_availability(self.loader.dataset)
@@ -4432,13 +4451,29 @@ class CCDAF(QtWidgets.QMainWindow):
         # its own result right after this returns.
         QtCore.QTimer.singleShot(0, _show)
 
+    def _fibre_dataset(self):
+        """The mesh whose fibres can be drawn: the volume, or a surface
+        with mapped atrial fibres."""
+        if self.loader.kind == VOLUME:
+            return self.loader.grid
+        return self.loader.mesh
+
+    def _fibre_fields(self) -> list:
+        ds = self._fibre_dataset()
+        if ds is None:
+            return []
+        names = ((vfibres.FIBRE_FIELD, vfibres.SHEET_FIELD) if self.loader.kind == VOLUME
+                 else tuple(uac_fibres.FIELDS.values()))
+        return [n for n in names if n in ds.cell_data
+                and np.asarray(ds.cell_data[n]).ndim == 2]
+
     def _render_fibres(self, *_args) -> None:
         """Draw (or clear) the fibre segments over a see-through surface."""
         try:
             self.plotter.remove_actor("fibre_glyphs", reset_camera=False)
         except Exception:
             pass
-        grid = self.loader.grid if self.loader.kind == VOLUME else None
+        grid = self._fibre_dataset()
         name = self.vis_widget.fibre_direction()
         if (grid is not None and self.vis_widget.show_fibres()
                 and name is not None and name in grid.cell_data):
@@ -4459,6 +4494,31 @@ class CCDAF(QtWidgets.QMainWindow):
         so the fibres and the Opacity slider never overwrite each other.
         """
         self._apply_surface_opacity()
+
+    # ------------------------------------------------------------------
+    # Actions → Atrial fibres
+    # ------------------------------------------------------------------
+    def _action_atrial_fibres(self) -> None:
+        """Map the average atlas fibres onto the atrium through its UAC."""
+        mesh = self.loader.mesh
+        if mesh is None or self.loader.kind == VOLUME or not uac_core.has_coordinates(mesh):
+            return
+        dlg = AtrialFibreDialog(mesh, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted or dlg.result() is None:
+            return
+        layer, thickness = dlg.result()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            new_mesh, reports = uac_fibres.apply(mesh, layer, thickness)
+        except (uac_fibres.fibre_atlas.AtlasError, ValueError) as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(self, "Atrial fibres", str(exc))
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self._replace_mesh(new_mesh)
+        lines = [ln for r in reports for ln in r.lines()]
+        self.statusBar().showMessage(" ".join(lines), 30000)
+        QtWidgets.QMessageBox.information(self, "Atrial fibres", "\n".join(lines))
 
     def _action_export_carp(self) -> None:
         """Export → Carp: write the working mesh as CARP files."""

@@ -153,6 +153,7 @@ point gets the mean of its neighbours. That value is filled in, not measured.
 |---|---|---|
 | Labels missing | One of the six labels is absent | Tag the atrium |
 | No mitral valve opening | No opening borders body tissue | Clip the mitral valve |
+| Left and right veins look swapped | A "left" vein is farther from the LAA than the "right" vein at the same level. The LAA lies next to the left veins (on 226 labelled atria the right vein was always at least 1.18 times as far), so the labels are reversed | Swap the left and right vein labels |
 | The surface has N tunnel(s) … longer than 15 mm | A wide tunnel, not a thin bridge | Fix the segmentation |
 | No valid cut. The left and right vein labels touch … | No body tissue between the left and right veins for the roof | Shrink the vein labels |
 | No valid cut. … The vein layout may be twisted, or vein labels swapped | No cut can put both inferior veins on the posterior half | Check which vein is which |
@@ -180,3 +181,58 @@ solver installed is used, without asking:
 3. SciPy's built-in solver, always present and slowest.
 
 The report says which one ran. All three give the same coordinates.
+
+## Atrial fibres
+
+**Actions > Atrial fibres** maps fibres onto an atrium that has UAC. The
+fibres come from the average fibre atlas of Roney et al. (2021), built from
+ex vivo diffusion-tensor data and published under CC BY 4.0.
+
+**The choices in the window**
+
+| Choice | What it writes |
+|---|---|
+| Layer: endocardium | Cell field `fibre_endo` |
+| Layer: epicardium | Cell field `fibre_epi` |
+| Layer: bilayer | Both fields, and point field `thickness` (mm) |
+
+For a bilayer, the thickness is the distance between the two layers:
+
+- **Fixed:** one value for every point. The default is 0.1 mm, the
+  separation of the published bilayer models.
+- **Point field:** a point field of the mesh. Only fields with a finite value
+  of 0 or more at every point are offered.
+- **File:** one value per point, as text (`.txt`, `.dat`, `.csv`; an optional
+  first line with the point count) or `.npy`. The file must hold exactly one
+  value per point, or the window says what is wrong.
+
+**How a fibre is mapped.** Each triangle of the atrium is placed on the flat
+map by its coordinates, and the atlas triangle at the same place gives the
+fibre. The atlas fibre is written as a direction on the flat map, then turned
+back into 3D through the atrium's own triangle. So a fibre keeps its course
+relative to the anatomy (round a vein, along the roof) whatever the shape.
+The fibres are unit vectors in the plane of each triangle.
+
+**Beyond the atlas.** The atlas veins are short, so the outer part of a long
+vein has no atlas tissue at the same place on the map. Those triangles take
+the nearest atlas fibre on the map, which lies further in along the same vein
+at the same position round it. The report gives that area per vein. A
+triangle squeezed to nothing on the map (a collapsed spike) takes the mean
+fibre of its neighbours.
+
+**The atlas files.** The first use downloads the two atlas files (about
+12 MB) from the ccdaf release `fibre-atlas-1` into `~/.cache/ccdaf/fibre_atlas`
+(on Windows, under `%LOCALAPPDATA%`) and checks their checksums. To work
+offline, copy the files into a folder and set the environment variable
+`CCDAF_FIBRE_ATLAS` to it.
+
+**Exporting.** Export > Carp offers `fibre_endo` and `fibre_epi` as the fibre
+direction for `.lon`.
+
+**Checks.** Mapping an atlas onto its own mesh gives back its fibres (median
+0.00°). On seven atria with fibres from the original pipeline, the same
+mapping with the original coordinates gives back those fibres exactly; with
+ccdaf's coordinates they differ by a median of about 25° to 30°. That is what a
+shift of about 5 mm gives, because the atlas fibres change fast along the wall
+(points 5 mm apart differ by a median of 26°), and ccdaf's coordinates differ
+from the original ones by about 5 mm.

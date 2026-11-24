@@ -88,6 +88,28 @@ def label_rings(P: np.ndarray, t: np.ndarray, tag: np.ndarray,
     return out
 
 
+def check_sides(P: np.ndarray, t: np.ndarray, tag: np.ndarray) -> None:
+    """Refuse veins labelled on the wrong side.
+
+    The LAA lies next to the left veins, so each left vein is nearer the
+    LAA than the right vein of the same level (superior, inferior). On 226
+    labelled atria the right vein was always at least 1.18 times as far
+    from the LAA as the farthest left vein; a swapped pair turns this
+    round. Left and right swapped would put the LAA next to the right veins
+    on the map, which no later step can notice."""
+    if not all((tag == L).any() for L in VEINS + (LAA,)):
+        return                                        # anatomy() names what is missing
+    c = P[t].mean(1)
+    laa = c[tag == LAA].mean(0)
+    d = {L: float(np.linalg.norm(c[tag == L].mean(0) - laa)) for L in VEINS}
+    wrong = [(a, b) for a, b in ((LSPV, RSPV), (LIPV, RIPV)) if d[a] > d[b]]
+    if wrong:
+        pairs = "; ".join(f"{NAMES[a]} {d[a]:.0f} mm, {NAMES[b]} {d[b]:.0f} mm" for a, b in wrong)
+        raise CutError("Left and right veins look swapped: the LAA lies next to the left "
+                       f"veins, but here it is nearer the right one ({pairs} from the LAA). "
+                       "Check the vein labels (left 11/13, right 15/17).")
+
+
 def anatomy(P: np.ndarray, t: np.ndarray, tag: np.ndarray) -> Anatomy:
     missing = [NAMES[L] for L in (BODY,) + VEINS + (LAA,) if not (tag == L).any()]
     if missing:
@@ -419,5 +441,5 @@ def diagnose(P, t, tag, anat: Anatomy, attempts) -> str:
     return "No valid cut. " + " ".join(msgs)
 
 
-__all__ = ["CutError", "Anatomy", "anatomy", "label_rings", "Cut", "find_cut", "diagnose",
+__all__ = ["CutError", "Anatomy", "anatomy", "check_sides", "label_rings", "Cut", "find_cut", "diagnose",
            "shortcut", "close_pockets"]

@@ -315,6 +315,19 @@ def test_a_closed_valve_is_refused():
         uac.compute(P, t, tag, uac.Options(iterations=5))
 
 
+def test_left_and_right_veins_swapped_are_refused():
+    from ccdaf.core.uac.cut import CutError, check_sides
+    P, t, tag = uac.inputs(_atrium())
+    check_sides(P, t, tag)                                   # the right way round: fine
+    swapped = tag.copy()
+    for a, b in ((tpl.LSPV, tpl.RSPV), (tpl.LIPV, tpl.RIPV)):
+        swapped[tag == a], swapped[tag == b] = b, a
+    with pytest.raises(CutError, match="swapped"):
+        check_sides(P, t, swapped)
+    with pytest.raises(uac.UacError, match="LSPV .* mm, RSPV"):
+        uac.compute(P, t, swapped, uac.Options(iterations=5))
+
+
 def test_the_diagnosis_names_the_problem():
     from ccdaf.core.uac.cut import anatomy, diagnose
     dirs = dict(DIRS)
