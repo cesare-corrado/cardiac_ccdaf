@@ -228,13 +228,13 @@ The window, the report, Undo and **Save flat map…** work as for the left
 atrium. A right atrium whose superior vena cava and inferior vena cava are
 labelled the wrong way round is refused: the appendage lies nearer the SVC.
 
-Atrial fibres are not yet mapped on a right atrium.
-
 ## Atrial fibres
 
-**Actions > Atrial fibres** maps fibres onto an atrium that has UAC. The
-fibres come from the average fibre atlas of Roney et al. (2021), built from
-ex vivo diffusion-tensor data and published under CC BY 4.0.
+**Actions > Atrial fibres** maps fibres onto an atrium that has UAC, left or
+right. The fibres come from the average fibre atlas of Roney et al. (2021),
+built from ex vivo diffusion-tensor data and published under CC BY 4.0, which
+has a left-atrial and a right-atrial average for each layer. The atlas of the
+atrium the labels describe is used; a surface holding both atria is refused.
 
 **The choices in the window**
 
@@ -261,15 +261,17 @@ back into 3D through the atrium's own triangle. So a fibre keeps its course
 relative to the anatomy (round a vein, along the roof) whatever the shape.
 The fibres are unit vectors in the plane of each triangle.
 
-**Beyond the atlas.** The atlas veins are short, so the outer part of a long
-vein has no atlas tissue at the same place on the map. Those triangles take
-the nearest atlas fibre on the map, which lies further in along the same vein
-at the same position round it. The report gives that area per vein. A
+**Beyond the atlas.** The atlas vessels are short, so the outer part of a long
+vein, or of a long vena cava, has no atlas tissue at the same place on the
+map. Those triangles take the nearest atlas fibre on the map, which lies
+further in along the same vessel at the same position round it. The report
+gives that area per vessel. A
 triangle squeezed to nothing on the map (a collapsed spike) takes the mean
 fibre of its neighbours.
 
-**The atlas files.** The first use downloads the two atlas files (about
-12 MB) from the ccdaf release `fibre-atlas-1` into `~/.cache/ccdaf/fibre_atlas`
+**The atlas files.** The first use on each atrium downloads its two atlas files
+(about 13 MB for each atrium) from the ccdaf release `fibre-atlas-2` into
+`~/.cache/ccdaf/fibre_atlas`
 (on Windows, under `%LOCALAPPDATA%`) and checks their checksums. To work
 offline, copy the files into a folder and set the environment variable
 `CCDAF_FIBRE_ATLAS` to it.
@@ -277,10 +279,21 @@ offline, copy the files into a folder and set the environment variable
 **Exporting.** Export > Carp offers `fibre_endo` and `fibre_epi` as the fibre
 direction for `.lon`.
 
-**Checks.** Mapping an atlas onto its own mesh gives back its fibres (median
-0.00°). On seven atria with fibres from the original pipeline, the same
-mapping with the original coordinates gives back those fibres exactly; with
-ccdaf's coordinates they differ by a median of about 25° to 30°. That is what a
-shift of about 5 mm gives, because the atlas fibres change fast along the wall
-(points 5 mm apart differ by a median of 26°), and ccdaf's coordinates differ
-from the original ones by about 5 mm.
+**Checks.** Mapping each of the four atlases onto its own mesh gives back its
+fibres (median 0.00°). Mapped onto the individual hearts of the atlas (six of
+the seven, endocardium), the average differs from each heart's own fibres by a
+median of 35° to 41° on the right atrium and 30° to 39° on the left: that is
+how far one heart is from the average, not an error of the mapping. On seven
+left atria with fibres from the original pipeline, the same
+mapping, given the original coordinates and the average fibre field that
+pipeline used, gives back those fibres exactly. So the method is the same;
+the fibres still differ in two ways:
+
+- **The coordinates.** With ccdaf's coordinates the fibres differ by a median
+  of about 25° to 30°. That is what a shift of about 5 mm gives: the atlas
+  fibres change fast along the wall (points 5 mm apart differ by a median of
+  26°), and ccdaf's coordinates differ from the original ones by about 5 mm.
+- **The average.** ccdaf uses the average published on Zenodo. The original
+  pipeline used another version of the average on the same anatomy; the two
+  differ by a median of about 28°, so with the original coordinates and the
+  Zenodo average the fibres differ from that pipeline's by 24° to 31°.

@@ -1,8 +1,10 @@
 """
 fibres.py
 =========
-Fibres for a left atrium from a fibre atlas, through the universal atrial
-coordinates (UAC).
+Fibres for an atrium, left or right, from a fibre atlas, through the
+universal atrial coordinates (UAC). The atlas of the atrium the labels
+describe is used (``la_atlas_*`` or ``ra_atlas_*``, see
+:mod:`ccdaf.core.uac.fibre_atlas`).
 
 Every triangle of the atrium is placed on the flat map by its stored
 coordinates, and the atlas triangle at the same place gives its fibre:
@@ -34,7 +36,7 @@ import scipy.sparse as sp
 
 from ccdaf.core.uac import fibre_atlas
 from ccdaf.core.uac.pipeline import flat_from_values
-from ccdaf.core.uac.template import NAMES
+from ccdaf.core.atrial_labels import NAMES
 
 ALPHA, BETA = "uac_alpha", "uac_beta"
 FIELDS = {"endo": "fibre_endo", "epi": "fibre_epi"}
@@ -47,12 +49,15 @@ class FibreReport:
     triangles: int
     extrapolated: Dict[str, float] = field(default_factory=dict)   # % of each label's area
     filled: int = 0                                                  # took the neighbours' mean
+    chamber: str = "la"
 
     def lines(self):
-        out = [f"{self.layer}: {self.triangles} triangles mapped from the average atlas."]
+        which = "right" if self.chamber == "ra" else "left"
+        out = [f"{self.layer}: {self.triangles} triangles mapped from the average "
+               f"{which}-atrial atlas."]
         ext = {k: v for k, v in self.extrapolated.items() if v >= 0.05}
         if ext:
-            out.append("Beyond the atlas veins (nearest atlas fibre used): "
+            out.append("Beyond the atlas vessels (nearest atlas fibre used): "
                        + ", ".join(f"{k} {v:.1f}%" for k, v in ext.items()) + " of the area.")
         if self.filled:
             out.append(f"{self.filled} triangles squeezed on the flat map took their "
@@ -64,9 +69,22 @@ def _faces(m: pv.PolyData) -> np.ndarray:
     return m.faces.reshape(-1, 4)[:, 1:].astype(np.int64)
 
 
+def _side(m: pv.PolyData) -> str:
+    """``"LA"``, ``"RA"`` or ``"both"`` from the labels (``"LA"`` without any)."""
+    if LABEL not in m.cell_data:
+        return "LA"
+    from ccdaf.core.uac import which_atrium
+    return which_atrium(m.cell_data[LABEL])
+
+
 def _flat(m: pv.PolyData):
+    """The flat map of *m* from its stored values, with its atrium's cut
+    rules (the right atrium's copies on the cut differ from the left's)."""
     a = np.asarray(m.point_data[ALPHA], float)
     b = np.asarray(m.point_data[BETA], float)
+    if _side(m) == "RA":
+        from ccdaf.core.uac import right
+        return right.flat_from_values(a, b, _faces(m))
     return flat_from_values(a, b, _faces(m))       # uv, flat triangles, 3D cell, 3D point
 
 
@@ -141,7 +159,8 @@ def _fill(t: np.ndarray, f: np.ndarray, max_pass: int = 50) -> int:
 def map_layer(mesh: pv.PolyData, layer: str, atlas: Optional[pv.PolyData] = None):
     """``(fibres (n_cells, 3), FibreReport)`` for *layer* (``endo`` or
     ``epi``) on an atrium that carries ``uac_alpha`` and ``uac_beta``."""
-    A = atlas if atlas is not None else fibre_atlas.load("atlas", layer)
+    chamber = "ra" if _side(mesh) == "RA" else "la"
+    A = atlas if atlas is not None else fibre_atlas.load("atlas", layer, chamber)
     # atlas: one flat direction per atlas flat triangle
     auv, atri, acell, asrc = _flat(A)
     AX = np.asarray(A.points, float)
@@ -171,7 +190,7 @@ def map_layer(mesh: pv.PolyData, layer: str, atlas: Optional[pv.PolyData] = None
         s = tag == L
         ext[NAMES.get(int(L), str(int(L)))] = float(100 * area[s & beyond].sum() / max(area[s].sum(), 1e-300))
     filled = _fill(_faces(mesh), fib)
-    return fib, FibreReport(layer, mesh.n_cells, ext, filled)
+    return fib, FibreReport(layer, mesh.n_cells, ext, filled, chamber)
 
 
 def read_thickness(path: str, n_points: int) -> np.ndarray:
@@ -216,10 +235,9 @@ def apply(mesh: pv.PolyData, layer: str, thickness=None):
         raise ValueError(f"unknown layer {layer!r}")
     if ALPHA not in mesh.point_data or BETA not in mesh.point_data:
         raise ValueError("The atrium has no UAC: compute UAC first.")
-    if LABEL in mesh.cell_data:
-        from ccdaf.core.uac import which_atrium
-        if which_atrium(mesh.cell_data[LABEL]) != "LA":
-            raise ValueError("Atrial fibres are mapped on a left atrium only, for now.")
+    if _side(mesh) == "both":
+        raise ValueError("This surface holds labels of both atria: fibres are mapped "
+                         "on one atrium at a time.")
     out = mesh.copy()
     reports = []
     for lay in (("endo", "epi") if layer == "bilayer" else (layer,)):

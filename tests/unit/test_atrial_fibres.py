@@ -78,7 +78,7 @@ def test_fibres_follow_the_coordinates_onto_another_shape(atlas):
     assert np.isfinite(f).all() and np.allclose(np.linalg.norm(f, axis=1), 1)
     assert np.percentile(_angle(f, _expected(m)), 99) < 1.0
     # the part beyond alpha 0.8 had no atlas: extrapolated, and still right
-    assert 15 < rep.extrapolated["body"] < 25
+    assert 15 < rep.extrapolated["LA body"] < 25
     assert any("Beyond the atlas" in s for s in rep.lines())
 
 
@@ -94,7 +94,7 @@ def test_a_squeezed_triangle_takes_its_neighbours_fibre(atlas):
 
 
 def test_apply_writes_the_layers_and_the_thickness(atlas, monkeypatch):
-    monkeypatch.setattr(fb.fibre_atlas, "load", lambda s, layer: atlas)
+    monkeypatch.setattr(fb.fibre_atlas, "load", lambda s, layer, chamber="la": atlas)
     uv, t = _square()
     m = _mesh(_bent(uv), t, uv)
     out, reps = fb.apply(m, "endo")

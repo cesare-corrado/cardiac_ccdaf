@@ -107,11 +107,11 @@ def test_an_offline_folder_is_used_and_another_method_refused(tmp_path, monkeypa
 # ---------------------------------------------------------------------
 # The published files, when this machine has them (never downloaded here)
 # ---------------------------------------------------------------------
-def _local(set_name, layer):
-    p = fa.path(set_name, layer)
+def _local(set_name, layer, chamber="la"):
+    p = fa.path(set_name, layer, chamber)
     if not os.path.exists(p):
         pytest.skip(f"{p} not on this machine")
-    return fa.load(set_name, layer)
+    return fa.load(set_name, layer, chamber)
 
 
 @pytest.mark.parametrize("set_name", fa.SETS)
@@ -138,3 +138,20 @@ def test_each_published_atlas_has_what_mapping_needs(set_name, layer):
     if (set_name, layer) == ("labarthe", "epi"):
         bb = np.asarray(m.cell_data["bb"]) == 1
         assert bb.any() and np.isfinite(np.asarray(m.cell_data["fibre_bb"])[bb]).all()
+
+
+@pytest.mark.parametrize("layer", fa.LAYERS)
+def test_each_right_atrial_atlas_has_what_mapping_needs(layer):
+    from ccdaf.core import atrial_labels as al
+    m = _local("atlas", layer, "ra")
+    for name in ("uac_alpha", "uac_beta", "uac_v2_alpha", "uac_v2_beta"):
+        v = np.asarray(m.point_data[name])
+        assert np.isfinite(v).all() and v.min() >= -1e-6 and v.max() <= 1 + 1e-6
+    f = np.asarray(m.cell_data["fibre"], float)
+    assert np.allclose(np.linalg.norm(f, axis=1), 1.0, atol=1e-3)
+    tag = np.asarray(m.cell_data["elemTag"])
+    assert set(np.unique(tag)) == set(al.RA.values)
+    # the appendage on the lateral half (alpha below 0.5), as in the template
+    t = m.faces.reshape(-1, 4)[:, 1:]
+    assert m.point_data["uac_alpha"][np.unique(t[tag == 27])].mean() < 0.5
+    assert fa.file_name("atlas", layer, "ra") in fa.FILES
