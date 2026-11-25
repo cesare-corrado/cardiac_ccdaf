@@ -21,6 +21,7 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.volume_quality
 ::: ccdaf.core.wall_report
 ::: ccdaf.core.surface_labels
+::: ccdaf.core.tag_map
 ::: ccdaf.core.orifice_labels
 ::: ccdaf.core.laplace
 ::: ccdaf.core.ldrb

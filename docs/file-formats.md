@@ -16,6 +16,33 @@ Tags live in the mesh's `elemTag` **cell** array:
 | 1  | body (background) |
 | −1 | unassigned (internal; becomes body on *Accept tagging*) |
 
+## Tag names (`tagMap`)
+
+What each `elemTag` number means ("LV", "LA body", "LSPV", …), as set in
+**Actions → Tag names…** (see [Tag names](user-guide/tag-names.md)). A `.vtk`
+file stores it as **field data** named `tagMap`: one string holding a JSON
+object from tag number to the tag's name, chamber and role, for example
+`{"21": {"name": "LSPV ring", "chamber": "LA", "role": "vein"}}`. It is
+written only when names have been confirmed, and a file without it loads as
+before.
+
+### Tag names file (`.json`)
+
+**Save…** in the Tag names dialog writes the same JSON object to a file of
+its own. **Load…** reads three forms:
+
+| Form | Example | Chamber and role |
+|---|---|---|
+| ccdaf's own | `{"21": {"name": "LSPV ring", "chamber": "LA", "role": "vein"}}` | as written |
+| names only | `{"21": "LSPV ring"}` | from the name |
+| name to number | `{"LSPV_ring": 21, "LSPV": 11}` | from the name |
+
+The name-to-number form is how four-chamber cohorts ship their tags
+(`tags_lvrv.json`). Its names are translated: `LA` becomes "LA body",
+`PV` "Pulmonary valve", and a bare vein name such as `LSPV` is the cap that
+closes the vein ("LSPV cap"), since the vein tissue is the ring
+(`LSPV_ring`, "LSPV ring"). When two names share a number, the first wins.
+
 ## Material regions (`tissueTag`)
 
 **Actions → Assign tissue property** writes `tissueTag`, an integer **cell**
@@ -96,6 +123,10 @@ is stored under one `cell_fields` key: a dictionary from name to one value per
 triangle. `elemTag` keeps its own key and is never read from `cell_fields`.
 Bundles written before the key existed load exactly as before, and an older
 version of CCDAF opens a new bundle and simply leaves those fields out.
+
+**Tag names.** Confirmed tag names are stored under a `tag_map` key, a
+dictionary from tag number to the tag's name, chamber and role. Bundles
+without it load as before.
 
 ### Electrograms
 

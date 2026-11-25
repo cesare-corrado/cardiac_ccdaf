@@ -43,6 +43,7 @@ from typing import Mapping, Optional
 import numpy as np
 import pyvista as pv
 
+from ccdaf.core import tag_map as tag_names
 from ccdaf.io.carto_egm import pack_egm
 
 
@@ -117,7 +118,8 @@ def electrodes_at(electrodes: Optional[dict],
 #: Payload keys ``export_binary`` writes itself. A point set may not
 #: claim one of them: the collision would silently replace the surface
 #: or the electrodes with a name → xyz mapping.
-_RESERVED_KEYS = frozenset(("surface", "electrodes", "elemTag", "cell_fields", "egm"))
+_RESERVED_KEYS = frozenset(("surface", "electrodes", "elemTag", "cell_fields", "egm",
+                            "tag_map"))
 
 
 def _plain_seeds(seeds) -> dict:
@@ -137,7 +139,8 @@ def export_binary(path: str, mesh: pv.PolyData,
                   point_sets: Optional[Mapping[str, dict]] = None,
                   include_elem_tag: bool = False,
                   cell_fields: Optional[Mapping[str, np.ndarray]] = None,
-                  egm: Optional[dict] = None) -> None:
+                  egm: Optional[dict] = None,
+                  tag_map: Optional[Mapping[int, object]] = None) -> None:
     """Pickle ``{'surface': <reader dict>, 'electrodes': <record>}``.
 
     ``cell_fields`` maps a cell field's name to its values — ``tissueTag``
@@ -161,8 +164,14 @@ def export_binary(path: str, mesh: pv.PolyData,
     is written under an ``"egm"`` key, traces zlib-compressed, only when
     given, so a bundle without electrograms is exactly as before.
 
+    ``tag_map`` is what each ``elemTag`` number means (see
+    :mod:`ccdaf.core.tag_map`). It is written under a ``"tag_map"`` key,
+    as ``{tag: {"name", "chamber", "role"}}`` (plain dictionaries, so the
+    bundle does not depend on ccdaf's classes), only when given and
+    non-empty.
+
     A key colliding with the payload's own (``surface``, ``electrodes``,
-    ``elemTag``, ``cell_fields``, ``egm``) is rejected rather than allowed
+    ``elemTag``, ``cell_fields``, ``egm``, ``tag_map``) is rejected rather than allowed
     to overwrite it.
     """
     payload = {
@@ -191,6 +200,9 @@ def export_binary(path: str, mesh: pv.PolyData,
         payload["cell_fields"] = extra
     if egm is not None:
         payload["egm"] = pack_egm(egm)
+    if tag_map:
+        payload["tag_map"] = {k: dict(e._asdict()) for k, e in
+                              tag_names.normalise(tag_map).items()}
     with open(path, "wb") as fh:
         pickle.dump(payload, fh)
 

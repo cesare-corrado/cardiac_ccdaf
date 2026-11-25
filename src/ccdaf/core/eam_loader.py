@@ -33,6 +33,7 @@ import pyvista as pv
 from ccdaf.io.carto_egm import unpack_egm
 from ccdaf.io.carto_functions import read_carto_mesh_file, load_carto_electrodes
 from ccdaf.core.seed_profiles import SEED_PROFILE_ORDER
+from ccdaf.core import tag_map
 
 
 # Carto vertex-colour sentinel magnitude: |value| >= this ⇒ no data.
@@ -170,6 +171,14 @@ def read_bundle(path: str
         if str(name) != "elemTag" and values.ndim >= 1 \
                 and values.shape[0] == mesh.n_cells:
             mesh.cell_data[str(name)] = values
+    # What each elemTag means, when the bundle was saved with a tag map.
+    names = payload.get("tag_map")
+    if isinstance(names, dict) and names:
+        try:
+            tag_map.write(mesh, tag_map.normalise(
+                {int(k): v for k, v in names.items()}))
+        except (TypeError, ValueError):
+            pass
 
     point_sets: Dict[str, Dict[str, np.ndarray]] = {}
     for profile in SEED_PROFILE_ORDER:

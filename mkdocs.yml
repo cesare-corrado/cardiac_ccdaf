@@ -72,6 +72,7 @@ nav:
   - User guide:
       - Overview: user-guide/index.md
       - Loading & mesh info: user-guide/loading.md
+      - Tag names: user-guide/tag-names.md
       - Segmentation: user-guide/segmentation.md
       - Seeds & tagging: user-guide/seeds-tagging.md
       - Manual correction: user-guide/manual-correction.md

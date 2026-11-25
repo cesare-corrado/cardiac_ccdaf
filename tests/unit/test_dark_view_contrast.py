@@ -50,6 +50,7 @@ class _RenderHost:
         self._focus_3d = MagicMock()
         self._clear_scalar_bars = MagicMock()
         self._enable_bar_interaction = MagicMock()
+        self._tag_map_in_use = lambda: {}
 
 
 def test_the_regions_bar_names_a_font_colour():
