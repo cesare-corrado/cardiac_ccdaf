@@ -61,7 +61,7 @@ than guessed, and the caller is expected to ask.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pyvista as pv
@@ -78,6 +78,14 @@ BASE: int = 1
 EPI: int = 2
 LV_ENDO: int = 3
 RV_ENDO: int = 4
+#: The atrial endocardia (see :mod:`ccdaf.core.atrial_surfaces`). On an
+#: atrial volume :data:`BASE` is the rim: the crown where the endocardium
+#: meets the epicardium at a valve or a clipped vein.
+LA_ENDO: int = 5
+RA_ENDO: int = 6
+#: The labels of each kind of labelling, in display order.
+VENTRICULAR_KEYS: Tuple[int, ...] = (BASE, EPI, LV_ENDO, RV_ENDO)
+ATRIAL_KEYS: Tuple[int, ...] = (BASE, EPI, LA_ENDO, RA_ENDO)
 
 #: The array written to the mesh, on faces for display and on nodes for
 #: the solve. One name for both so a user colouring by it sees the thing
@@ -100,7 +108,8 @@ LABEL_FIELD: str = "surfaceLabel"
 LABEL_MASK_FIELD: str = "surfaceLabelMask"
 
 #: The bit each surface owns in :data:`LABEL_MASK_FIELD`.
-MASK_BITS: Dict[int, int] = {BASE: 1, EPI: 2, LV_ENDO: 4, RV_ENDO: 8}
+MASK_BITS: Dict[int, int] = {BASE: 1, EPI: 2, LV_ENDO: 4, RV_ENDO: 8,
+                             LA_ENDO: 16, RA_ENDO: 32}
 
 NAMES: Dict[int, str] = {
     UNLABELLED: "unlabelled",
@@ -108,7 +117,25 @@ NAMES: Dict[int, str] = {
     EPI: "epicardium",
     LV_ENDO: "LV endocardium",
     RV_ENDO: "RV endocardium",
+    LA_ENDO: "LA endocardium",
+    RA_ENDO: "RA endocardium",
 }
+
+#: What :data:`BASE` is called on an atrial volume.
+RIM_NAME: str = "rim"
+
+
+def is_atrial(labels: Iterable[int]) -> bool:
+    """Whether a set of labels is an atrial labelling (it has an atrial
+    endocardium), so that :data:`BASE` reads as the rim."""
+    return bool({LA_ENDO, RA_ENDO} & {int(v) for v in labels})
+
+
+def label_name(key: int, atrial: bool = False) -> str:
+    """The display name of *key*; :data:`BASE` is "rim" on an atrium."""
+    if atrial and key == BASE:
+        return RIM_NAME
+    return NAMES.get(key, str(key))
 
 #: How much of the best coplanar area a face must hold to count as a real
 #: cut when snapping. It exists to keep a sliver from winning on proximity
@@ -223,10 +250,20 @@ class SurfaceLabels:
     #: belong to the epicardium and to a cavity at once.
     cuts: List[Any] = field(default_factory=list)
 
+    @property
+    def atrial(self) -> bool:
+        return is_atrial(k for k, v in self.areas.items() if v > 0)
+
+    def _shown(self) -> List[int]:
+        """The labels to report: an absent atrium is left out."""
+        return [k for k in self.areas
+                if not (k in (LA_ENDO, RA_ENDO) and self.areas[k] <= 0)]
+
     def summary(self) -> str:
         total = sum(self.areas.values()) or 1.0
-        parts = [f"{NAMES[k]} {100 * self.areas.get(k, 0.0) / total:.1f}%"
-                 for k in (BASE, EPI, LV_ENDO, RV_ENDO)]
+        parts = [f"{label_name(k, self.atrial)} "
+                 f"{100 * self.areas.get(k, 0.0) / total:.1f}%"
+                 for k in self._shown()]
         text = "; ".join(parts)
         if not self.naming_confident:
             text += " (naming uncertain)"
@@ -235,16 +272,22 @@ class SurfaceLabels:
     def details(self) -> str:
         if self.plane is not None:
             lines = [f"Plane: {self.plane.describe()}", ""]
+        elif self.method == "tags":
+            lines = ["Rim: the faces the tissue shared with its caps and "
+                     "valves, recorded when the chambers were extracted.", ""]
         else:
-            lines = [f"Base: rings at {len(self.openings)} valve opening(s)", ""]
+            what = ("Rim: rings at {} opening(s)" if self.atrial
+                    else "Base: rings at {} valve opening(s)")
+            lines = [what.format(len(self.openings)), ""]
             for i, opening in enumerate(self.openings, 1):
                 lines.append(f"  opening {i}: {opening.describe()}")
             lines.append("")
         total = sum(self.areas.values()) or 1.0
-        for key in (BASE, EPI, LV_ENDO, RV_ENDO):
+        for key in self._shown():
             faces = int((self.face_labels == key).sum())
             nodes = len(self.node_sets.get(key, ()))
-            lines.append(f"{NAMES[key]:>15}: {faces:6d} faces, {nodes:6d} nodes, "
+            lines.append(f"{label_name(key, self.atrial):>15}: {faces:6d} "
+                         f"faces, {nodes:6d} nodes, "
                          f"{100 * self.areas.get(key, 0.0) / total:5.1f}% of area")
         if self.dropped_patches:
             lines.append("")
@@ -565,14 +608,15 @@ def _close_ring(tri: np.ndarray, base: np.ndarray) -> np.ndarray:
 
 
 def _assemble(surface: pv.PolyData, tri: np.ndarray, face_labels: np.ndarray,
-              area: np.ndarray, **extra) -> SurfaceLabels:
+              area: np.ndarray, keys: Tuple[int, ...] = VENTRICULAR_KEYS,
+              **extra) -> SurfaceLabels:
     """Node sets and areas from per-face labels, packed as the result."""
     # Node sets are returned in the caller's own numbering, so a volume's
     # sets index the volume and not its derived boundary.
     origin = _origin_ids(surface)
     node_sets: Dict[int, np.ndarray] = {}
     areas: Dict[int, float] = {}
-    for key in (BASE, EPI, LV_ENDO, RV_ENDO):
+    for key in keys:
         owned = np.where(face_labels == key)[0]
         nodes = np.unique(tri[owned]) if len(owned) else np.zeros(
             0, dtype=np.int64)
@@ -775,5 +819,6 @@ __all__ = ["Plane", "LabelOptions", "SurfaceLabels", "detect_base_plane",
            "node_labels", "node_label_mask", "face_labels_from_nodes",
            "face_labels_from_mask", "mean_edge_length", "LABEL_MASK_FIELD",
            "MASK_BITS",
-           "UNLABELLED", "BASE", "EPI", "LV_ENDO", "RV_ENDO", "LABEL_FIELD",
-           "NAMES"]
+           "UNLABELLED", "BASE", "EPI", "LV_ENDO", "RV_ENDO", "LA_ENDO",
+           "RA_ENDO", "VENTRICULAR_KEYS", "ATRIAL_KEYS", "LABEL_FIELD",
+           "NAMES", "RIM_NAME", "is_atrial", "label_name"]

@@ -26,6 +26,15 @@ object from tag number to the tag's name, chamber and role, for example
 written only when names have been confirmed, and a file without it loads as
 before.
 
+### Opening rims (`openingTag`)
+
+**Actions → Extract chambers…** removes the caps and valves of a tagged
+mesh and writes a **point** array `openingTag` on the kept volume: each node
+of a face the tissue shared with a removed cap or valve carries that cap's
+tag, and every other node 0. **Label atrial surfaces** reads it to find the
+rims (see [Atrial surfaces](user-guide/atrial-surfaces.md)). It is saved
+with the volume.
+
 ### Tag names file (`.json`)
 
 **Save…** in the Tag names dialog writes the same JSON object to a file of
