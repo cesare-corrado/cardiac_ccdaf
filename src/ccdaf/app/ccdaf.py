@@ -131,6 +131,8 @@ from ccdaf.gui.atrial_labels_dialog import AtrialLabelsDialog
 from ccdaf.gui.chamber_extract_dialog import ChamberExtractDialog
 from ccdaf.core.chamber_extract import available_chambers, extract_chambers
 from ccdaf.core import volume_tags
+from ccdaf.core.uac import volume as volume_uac
+from ccdaf.gui.volume_uac_dialog import VolumeUacDialog
 from ccdaf.core.orifice_labels import UNITS, guess_unit
 from ccdaf.gui.tag_map_dialog import TagMapDialog
 from ccdaf.core import ventricular_fibres as vfibres
@@ -586,7 +588,8 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_compute_uac = QtWidgets.QAction("Compute UAC…", self)
         self.act_compute_uac.setStatusTip(
             "Compute universal atrial coordinates (alpha, beta) on a labelled "
-            "left-atrial surface.")
+            "atrial surface, or (alpha, beta, depth) through the wall of a "
+            "labelled and tagged atrial volume.")
         self.act_compute_uac.triggered.connect(self._action_compute_uac)
         actions_menu.addAction(self.act_compute_uac)
 
@@ -3933,7 +3936,7 @@ class CCDAF(QtWidgets.QMainWindow):
         elif self._uac_worker is not None:
             can_uac, uac_why = False, "UAC are being computed."
         elif self.loader.kind == VOLUME:
-            can_uac, uac_why = False, "UAC are computed on an atrial surface, not a volume."
+            can_uac, uac_why = volume_uac.availability(self.loader.grid)
         else:
             can_uac, uac_why = uac_core.availability(self.loader.mesh)
         self.act_compute_uac.setEnabled(can_uac)
@@ -4723,6 +4726,9 @@ class CCDAF(QtWidgets.QMainWindow):
     # ==================================================================
     def _action_compute_uac(self) -> None:
         """Open the UAC window (non-modal: the run takes minutes)."""
+        if self.loader.kind == VOLUME:
+            self._action_compute_volume_uac()
+            return
         if self._uac_dialog is not None:
             self._uac_dialog.raise_()
             self._uac_dialog.activateWindow()
@@ -4746,6 +4752,39 @@ class CCDAF(QtWidgets.QMainWindow):
             dlg.set_running(True)
             dlg.set_status("A run is still in progress…")
         dlg.show()
+
+    def _action_compute_volume_uac(self) -> None:
+        """Actions → Compute UAC… on an atrial volume (see volume_uac)."""
+        grid = self.loader.grid
+        dlg = getattr(self, "_vuac_dialog", None)
+        if dlg is not None:
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        ok, why = volume_uac.availability(grid)
+        if not ok:
+            QtWidgets.QMessageBox.warning(self, "Compute UAC", why)
+            return
+        dlg = VolumeUacDialog(grid, parent=self)
+        self._vuac_dialog = dlg
+        dlg.finished.connect(self._volume_uac_finished)
+        dlg.show()
+
+    def _volume_uac_finished(self, result: int) -> None:
+        dlg = getattr(self, "_vuac_dialog", None)
+        self._vuac_dialog = None
+        if dlg is None:
+            return
+        dlg.deleteLater()
+        run = dlg.result()
+        if (result != QtWidgets.QDialog.Accepted or run is None
+                or not dlg.matches(self.loader.grid)):
+            return
+        grid = volume_uac.write(self.loader.grid, run)
+        self._replace_volume(grid)
+        if self.vis_widget.select_field(volume_uac.ALPHA):
+            self._render_field()
+        self.statusBar().showMessage(run.summary())
 
     def _uac_run(self) -> None:
         dlg = self._uac_dialog

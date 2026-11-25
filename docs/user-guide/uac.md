@@ -228,6 +228,63 @@ The window, the report, Undo and **Save flat map…** work as for the left
 atrium. A right atrium whose superior vena cava and inferior vena cava are
 labelled the wrong way round is refused: the appendage lies nearer the SVC.
 
+## Volumes
+
+On an atrial volume, **Actions → Compute UAC…** gives α and β through the
+wall, and a third coordinate, the **depth**: 0 on the endocardium, 1 on the
+epicardium. It follows Roney et al. (*Interface Focus* 2023), for one atrium
+at a time.
+
+**What it needs:** a volume holding one atrium, with its surfaces labelled
+([Atrial surfaces](atrial-surfaces.md)) and its regions tagged in the
+tetrahedra ([Tagging the regions of the volume](atrial-surfaces.md#tagging-the-regions-of-the-volume)).
+For a volume holding both atria, extract each with **Actions → Extract
+chambers…** first.
+
+**How it works:**
+
+1. The surface UAC are computed on the endocardium, exactly as on a surface.
+2. The cut opens the atrium into a posterior and an anterior half, and on
+   the lateral and septal lines β jumps from b to 1 − b. Each tetrahedron
+   takes the half of the endocardium behind it, and the two halves are
+   solved separately, so the jump is kept through the wall instead of being
+   averaged.
+3. In each half, one Laplace problem per coordinate carries α and β from the
+   endocardium into the wall, with no condition on the rims or between the
+   halves.
+4. The depth is one Laplace problem: 0 on the endocardium, 1 on the
+   epicardium.
+
+**Where the epicardium's α and β come from** is the one choice in the
+window:
+
+| Choice | What it does | Trade-off |
+|---|---|---|
+| From the endocardium (default) | α and β run straight out through the wall | The epicardium fits the template approximately; no folds of its own |
+| Its own surface UAC | The epicardium gets its own surface UAC, also held fixed | The epicardium fits the template exactly, but folds of its surface map are carried into the wall; about twice as long |
+
+Measured on one four-chamber left atrium (wall 2.35 mm): the epicardium's
+own cut lies a median 2.5 mm from the endocardium's, so the jump runs almost
+straight through the wall, and the two choices differ by a median 0.004 in α
+and 0.002 in β. The epicardium's own map had 122 folded triangles, the
+endocardium's none.
+
+**Folded tetrahedra.** The report counts the tetrahedra the three
+coordinates turn inside out (0.24% on that atrium from the endocardium,
+0.62% with the epicardium's own UAC). Most lie along the cut: each
+tetrahedron belongs wholly to one half, so the face between the halves
+follows tetrahedron faces in steps rather than the cut itself.
+
+**What is written:**
+
+| Field | On | Meaning |
+|---|---|---|
+| `uac_alpha`, `uac_beta` | nodes | the coordinates; on the face between the halves, the posterior value |
+| `uac_depth` | nodes | 0 endocardium, 1 epicardium |
+| `uac_alpha_tet`, `uac_beta_tet` | tetrahedra | each tetrahedron's mean in its own half: exact on both sides of the cut |
+| `uac_half` | tetrahedra | 0 posterior, 1 anterior |
+| `uac_folded` | tetrahedra | 1 where the coordinates turn the tetrahedron inside out |
+
 ## Atrial fibres
 
 **Actions > Atrial fibres** maps fibres onto an atrium that has UAC, left or
