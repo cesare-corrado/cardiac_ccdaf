@@ -57,6 +57,43 @@ Vectors that are not unit length are normalised **in the file**, never in the
 mesh, and the count is reported. A vector of zero length has no direction to
 normalise, and stops the export.
 
+### Bilayer
+
+An atrial surface with bilayer fibres (**Actions > Atrial fibres**, layer
+bilayer: `fibre_endo`, `fibre_epi` and `thickness`) can be written as a
+**bilayer**, the format of the published bilayer atrial models (Roney et al.
+2023; Labarthe et al.). Choose **fibre_bilayer** as the fibres in the window:
+its two tags (epicardial offset and line tag) then appear below.
+
+**What a bilayer holds**
+
+| Part | Elements | Tag | Fibre |
+|---|---|---|---|
+| Endocardial layer | the surface's triangles (`Tr`) | the chosen region tag | `fibre_endo` |
+| Epicardial layer | a copy of every triangle, moved outwards along the point normals by the thickness | region tag + the epicardial offset (100 by default) | `fibre_epi` |
+| Lines | one `Ln` per node, joining it to its copy | the line tag (32 by default) | the line's own direction |
+
+- **Points:** the endocardial nodes, then their copies in the same order, so
+  node *i* is joined to node *i* + *n*.
+- **Thickness:** taken from the point field `thickness` (mm), which
+  Atrial fibres writes for a bilayer; a surface without it gets 0.1 mm
+  everywhere. A simulation reads wall thickness from the lines'
+  conductivity, so the distance is nominal: 0.1 mm in the published models.
+- **Tags:** the published files tag the epicardium with the endocardial tag
+  + 1. ccdaf adds 100 by default, because + 1 would turn ccdaf's LA body (1)
+  into its RA body (2). Clashing tags are reported before writing.
+- **Line fibres:** each line's own direction. With the usual finite-element
+  conductivity, a line then conducts at the longitudinal conductivity of the
+  line region whichever way it points. The published files write (1, 0, 0)
+  on every line, which gives the same result only when the line region is
+  isotropic; otherwise their coupling depends on how each line lies relative
+  to the x axis.
+- **Points are written with 8 significant digits**, so the 0.1 mm lines keep
+  their length to about 0.01 µm (with 6 digits it would vary by ±0.6%).
+
+The published bilayer models can also carry a third layer for Bachmann's
+bundle; ccdaf does not write it yet.
+
 ## Checks before writing
 
 The export refuses, with a message, when:
