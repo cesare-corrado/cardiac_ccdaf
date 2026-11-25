@@ -130,6 +130,8 @@ from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
 from ccdaf.gui.atrial_labels_dialog import AtrialLabelsDialog
 from ccdaf.gui.chamber_extract_dialog import ChamberExtractDialog
 from ccdaf.core.chamber_extract import available_chambers, extract_chambers
+from ccdaf.core import volume_tags
+from ccdaf.core.orifice_labels import UNITS, guess_unit
 from ccdaf.gui.tag_map_dialog import TagMapDialog
 from ccdaf.core import ventricular_fibres as vfibres
 from ccdaf.gui.fibre_dialog import FibreDialog, FibreWorker
@@ -203,7 +205,12 @@ _PV_LABELS = atrial_labels.REGION_LABELS
 # over these would be meaningless, so the visualisation widget hands them
 # to the region path (discrete colours + names) instead. Further label
 # fields belong here rather than in a paradigm of their own.
-CATEGORICAL_FIELDS = ("elemTag", TISSUE_TAG, LABEL_FIELD, LABEL_MASK_FIELD)
+#: Tags a volume had before Apply to volume, and their names (see
+#: _action_apply_to_volume).
+SOURCE_TAG = "sourceTag"
+SOURCE_TAG_MAP = "sourceTagMap"
+CATEGORICAL_FIELDS = ("elemTag", TISSUE_TAG, LABEL_FIELD, LABEL_MASK_FIELD,
+                      SOURCE_TAG)
 
 # Fields that are real data — saved, exported, read back — but not worth
 # offering as something to colour by. The surface-label mask is the whole
@@ -213,7 +220,11 @@ CATEGORICAL_FIELDS = ("elemTag", TISSUE_TAG, LABEL_FIELD, LABEL_MASK_FIELD)
 #
 # Deliberately not INTERNAL_ARRAYS: those are bookkeeping and are dropped
 # on save, which for the mask would throw the labelling away.
-HIDDEN_COLOUR_FIELDS = (LABEL_MASK_FIELD,)
+# Bookkeeping, not something to look at: the surface-label mask, the links
+# from an endocardium back to its volume, and the openings' cap tags (an
+# integer per node, which draws as a meaningless smooth ramp).
+HIDDEN_COLOUR_FIELDS = (LABEL_MASK_FIELD, "volumeNode", "volumeCell",
+                        "openingTag")
 
 # EAM scalar bar: horizontal, along the bottom. Sizes are fractions of the
 # viewport, so the height giving a 20:1 bar on screen depends on the window's
@@ -374,6 +385,9 @@ class CCDAF(QtWidgets.QMainWindow):
         # What each elemTag number means, as confirmed by the user (or read
         # from the file). None: no confirmed map; the legend then uses the
         # proposal (see _tag_map_in_use).
+        # Tagging a volume's endocardium: the volume waits here while its
+        # endocardium is the working surface (see _action_tag_endocardium).
+        self._endo_session: Optional[dict] = None
         self._tag_map: "Optional[tag_map.TagMap]" = None
         self._tag_map_proposal_key = None
         self._tag_map_proposal: "tag_map.TagMap" = {}
@@ -540,6 +554,20 @@ class CCDAF(QtWidgets.QMainWindow):
             "endocardium of each atrium.")
         self.act_label_atria.triggered.connect(self._action_label_atria)
         actions_menu.addAction(self.act_label_atria)
+
+        self.act_tag_endo = QtWidgets.QAction("Tag the endocardium…", self)
+        self.act_tag_endo.setStatusTip(
+            "Make a labelled atrial volume's endocardium the working surface, "
+            "to tag it with seeds and correct it as usual.")
+        self.act_tag_endo.triggered.connect(self._action_tag_endocardium)
+        actions_menu.addAction(self.act_tag_endo)
+
+        self.act_apply_volume = QtWidgets.QAction("Apply to volume", self)
+        self.act_apply_volume.setStatusTip(
+            "Carry the endocardium's labels into the volume's tetrahedra "
+            "(harmonic extension) and go back to the volume.")
+        self.act_apply_volume.triggered.connect(self._action_apply_to_volume)
+        actions_menu.addAction(self.act_apply_volume)
 
         self.act_generate_fibres = QtWidgets.QAction("Generate fibres…", self)
         self.act_generate_fibres.setStatusTip(
@@ -727,6 +755,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self.manual_widget.snake_undo_point_requested.connect(self._action_snake_undo_point)
         self.manual_widget.snake_clear_requested.connect(self._action_snake_clear)
         self.manual_widget.snake_commit_requested.connect(self._action_snake_commit)
+        self.manual_widget.band_requested.connect(self._action_band_at_opening)
         self.manual_widget.accept_requested.connect(self._action_edit_accept)
         self.manual_widget.undo_requested.connect(self._action_undo_edit)
         body = self._register_section(v, "manual", "Manual correction")
@@ -1495,6 +1524,7 @@ class CCDAF(QtWidgets.QMainWindow):
         That is exactly what it did.
         """
         mesh = self.loader.mesh
+        self._endo_session = None
         self.setWindowTitle(window_title(display_name(source_name)))
         # The tag map the file carried, if any (VTK field data, or a
         # bundle's key, which read_bundle puts on the surface).
@@ -1723,6 +1753,7 @@ class CCDAF(QtWidgets.QMainWindow):
         self._close_fibre_dialog()
         self._close_uvc_dialog()
         self._close_uac_dialog()
+        self._endo_session = None
 
         # EAM state.
         self._eam_directory = None
@@ -3022,7 +3053,10 @@ class CCDAF(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Running geodesic tagging…")
         QtWidgets.QApplication.processEvents()
         try:
-            self.tagger.tag(seed_sel.seeds_for_tagging(), atrium=self._atrium())
+            sources = (self._endo_session["loops"] if self._on_endocardium()
+                       else None)
+            self.tagger.tag(seed_sel.seeds_for_tagging(), atrium=self._atrium(),
+                            sources=sources)
             self._mark_dirty()
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Tagging failed", str(exc))
@@ -3087,6 +3121,29 @@ class CCDAF(QtWidgets.QMainWindow):
         else:
             self.editor.stop_snake()
             self.plotter.render()
+
+    def _action_band_at_opening(self, width_mm: float) -> None:
+        """Tag the band round the opening nearest the picked triangles."""
+        if self.editor is None or self.loader.mesh is None:
+            return
+        if not self.editor.pending_count:
+            self.statusBar().showMessage(
+                "Band at opening: in selection mode, pick (X) a triangle near "
+                "the opening first.")
+            return
+        label = self.manual_widget.current_label()
+        if label is not None:
+            self.editor.set_active_label(int(label))
+        scale = UNITS[guess_unit(self.loader.mesh)]
+        try:
+            n = self.editor.band_at_pending(width_mm / scale)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Band at opening", str(exc))
+            return
+        self._mark_dirty()
+        self.manual_widget.set_undo_enabled(self.editor.can_undo)
+        self.statusBar().showMessage(
+            f"Band at opening: {n} triangle(s) tagged {label}.")
 
     def _action_snake_undo_point(self) -> None:
         if self.editor is None:
@@ -3815,6 +3872,23 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_label_atria.setEnabled(can_label)
         self.act_label_atria.setToolTip(label_why)
 
+        if self._seg_array is not None:
+            can_endo, endo_why = False, "Close the segmentation first."
+        elif self.loader.kind != VOLUME or self.loader.grid is None:
+            can_endo, endo_why = False, "Load a labelled atrial volume first."
+        elif not volume_tags.endocardium_present(self.loader.grid):
+            can_endo, endo_why = False, (
+                "Label the atrial surfaces first (Actions > Label atrial "
+                "surfaces…).")
+        else:
+            can_endo, endo_why = True, ""
+        self.act_tag_endo.setEnabled(can_endo)
+        self.act_tag_endo.setToolTip(endo_why)
+        on_endo = self._on_endocardium()
+        self.act_apply_volume.setEnabled(on_endo)
+        self.act_apply_volume.setToolTip(
+            "" if on_endo else "Start with Actions > Tag the endocardium…")
+
         # Extraction needs a tagged volume whose tags name chambers.
         if self._seg_array is not None:
             can_extract, extract_why = False, "Close the segmentation first."
@@ -4037,6 +4111,142 @@ class CCDAF(QtWidgets.QMainWindow):
         dlg.preview_requested.connect(self._action_label_preview)
         dlg.finished.connect(self._action_label_finished)
         dlg.show()
+
+    def _on_endocardium(self) -> bool:
+        """Whether the working surface is the endocardium being tagged."""
+        session = self._endo_session
+        mesh = self.loader.mesh
+        return (session is not None and mesh is not None
+                and self.loader.kind != VOLUME
+                and volume_tags.VOLUME_NODE in mesh.point_data
+                and mesh.n_points == session["n_points"])
+
+    def _action_tag_endocardium(self) -> None:
+        """Actions → Tag the endocardium…: the volume steps aside and its
+        endocardium becomes the working surface, so seeds, tagging and
+        every correction tool work on it unchanged."""
+        grid = self.loader.grid
+        if self.loader.kind != VOLUME or grid is None:
+            return
+        atria = volume_tags.endocardium_present(grid)
+        if not atria:
+            return
+        atrium = atria[0]
+        if len(atria) > 1:
+            choice, ok = QtWidgets.QInputDialog.getItem(
+                self, "Tag the endocardium", "Which atrium?", atria, 0, False)
+            if not ok:
+                return
+            atrium = choice
+        try:
+            endo = volume_tags.endocardium(grid, atrium)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Tag the endocardium", str(exc))
+            return
+        mapping = self._tag_map
+        # The endocardium carries ccdaf's atrial labels, not the volume's
+        # tags, so the volume's names do not describe it: 1 is the LA body
+        # here even where the tag names call 1 the LV. They come back with
+        # the volume if the session is left.
+        self._tag_map = None
+        self._tag_map_proposal_key = None
+        self._endo_session = {"grid": grid, "atrium": atrium,
+                              "n_points": endo.n_points, "tag_map": mapping,
+                              "title": self.windowTitle(),
+                              # Each known opening's edge: its vein grows
+                              # from the whole cut edge, not the seed alone.
+                              "loops": volume_tags.opening_loops(endo, mapping)}
+        self._replace_mesh(endo)
+        # The tools gated on a surface (tagging, correction, clipping) come
+        # back on: the working mesh is now one.
+        self._sync_profile_panels()
+        # Show the labels being drawn, not whichever field was on before.
+        self.vis_widget.select_field("elemTag")
+        # _replace_mesh leaves drawing to its caller: without this the old
+        # volume stays on screen while the seeds sit on the endocardium.
+        self._render_field()
+        self.plotter.render()
+        self.setWindowTitle(f"{self.windowTitle()} (tagging the {atrium} "
+                            "endocardium)")
+        # The seed set of this atrium, with every seed the recorded
+        # openings can tell placed already.
+        wanted = "seed_RA" if atrium == "RA" else "seed_LA"
+        idx = self.seed_widget.combo_type.findData(wanted)
+        if idx >= 0:
+            self.seed_widget.combo_type.setCurrentIndex(idx)
+        # Veins clipped at or near the ostium: a band at each known opening
+        # is more reliable than growing from a seed (see BAND_MM).
+        scale = UNITS[guess_unit(endo)]
+        bands = volume_tags.band_openings(endo, mapping, atrium,
+                                          volume_tags.BAND_MM / scale)
+        # Seeds only matter to Run tagging, so they are placed for you only
+        # when there are no bands. With bands, a short stub would fail the
+        # checks made on a seed picked by hand, which reads as an error.
+        seeds = ({} if bands
+                 else volume_tags.seeds_from_openings(endo, mapping))
+        if seeds:
+            self._apply_loaded_seeds(seeds, "the recorded openings")
+        self._sync_seed_panel()
+        if bands:
+            self.manual_widget.set_active(True)
+            self._render_field()
+            self.plotter.render()
+        done = self.selector is not None and self.selector.is_complete
+        if bands:
+            steps = (f"A {volume_tags.BAND_MM:g} mm band is tagged at each known "
+                     f"opening ({', '.join(sorted(bands))}). Correct it with "
+                     "the Manual correction tools if needed (Band at opening "
+                     "re-tags one opening at another width). For veins with a "
+                     "longer stub you can instead place seeds and Run tagging, "
+                     "which replaces the bands")
+        elif done:
+            steps = "All seeds are placed: press Run tagging in the Tagging panel"
+        else:
+            steps = ("Place the remaining seeds, then press Run tagging in the "
+                     "Tagging panel")
+        placed = len(self.selector.seeds) if (seeds and self.selector) else 0
+        text = (f"Tagging the {atrium} endocardium"
+                + (f": {placed} seed(s) placed from the openings." if placed
+                   else ".")
+                + f"\n\n{steps}. When the regions look right, press Accept "
+                "tagging, then choose Actions > Apply to volume to carry the "
+                "labels into the wall.")
+        self.statusBar().showMessage(text.replace("\n\n", " "))
+        QtWidgets.QMessageBox.information(self, "Tag the endocardium", text)
+
+    def _action_apply_to_volume(self) -> None:
+        """Actions → Apply to volume: extend the endocardium's labels into
+        the tetrahedra and make the volume the working mesh again."""
+        if not self._on_endocardium():
+            return
+        session = self._endo_session
+        grid = session["grid"]
+        endo = self.loader.mesh
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            result = volume_tags.apply_to_volume(grid, endo, session["atrium"])
+        except Exception as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.critical(self, "Apply to volume", str(exc))
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        new = grid.copy()
+        # The tags the volume came with are kept beside the new ones, with
+        # their names: they are what a re-merge into the source mesh needs.
+        old_map = session["tag_map"]
+        if old_map and SOURCE_TAG not in new.cell_data:
+            new.cell_data[SOURCE_TAG] = np.asarray(new.cell_data["elemTag"])
+            new.field_data[SOURCE_TAG_MAP] = np.array([tag_map.encode(old_map)])
+        new.cell_data["elemTag"] = result.tags
+        tag_map.write(new, None)
+        self._endo_session = None
+        self._tag_map = None
+        self._replace_volume(new)
+        self._sync_profile_panels()
+        self.setWindowTitle(session["title"])
+        self.statusBar().showMessage(result.summary())
+        QtWidgets.QMessageBox.information(self, "Apply to volume",
+                                          result.summary())
 
     def _action_extract_chambers(self) -> None:
         """Actions → Extract chambers…: keep some chambers' tissue."""
@@ -4891,6 +5101,18 @@ class CCDAF(QtWidgets.QMainWindow):
             return
         if field == LABEL_FIELD:
             all_tags, all_colors, annotations = _surface_label_legend(tags)
+        elif field == SOURCE_TAG:
+            # The previous tags, named by the names they had.
+            data = self.loader.dataset
+            names = None
+            if data is not None and SOURCE_TAG_MAP in data.field_data:
+                try:
+                    names = tag_map.decode(str(np.asarray(
+                        data.field_data[SOURCE_TAG_MAP]).ravel()[0]))
+                except ValueError:
+                    names = None
+            all_tags, all_colors, annotations = _region_legend(
+                tags, anatomical=names is not None, mapping=names)
         else:
             all_tags, all_colors, annotations = _region_legend(
                 tags, anatomical=(field == "elemTag"),
@@ -6532,15 +6754,23 @@ def _region_legend(tags: np.ndarray, anatomical: bool = True,
     present = {int(t) for t in np.unique(tags)}
     if not anatomical:
         mapping = None
-    atria = (atrial_labels.legend_atria(present)
-             if anatomical and present
-             and tag_map.follows_atrial_scheme(mapping, present) else None)
+    # Triangles left unassigned by tagging (until it is accepted) do not
+    # make a tagging stop being atrial: they get an entry of their own.
+    labelled = present - {UNASSIGNED}
+    atria = (atrial_labels.legend_atria(labelled)
+             if anatomical and labelled
+             and tag_map.follows_atrial_scheme(mapping, labelled) else None)
     if atria:
         # Every label of each atrium tagged (a fresh mesh, body 1 only, is
         # the left atrium); both legends when the mesh holds both.
         ordered = sorted(v for a in atria for v in a.values)
         colours = [LABEL_COLORS[t] for t in ordered]
         names = {j: _label_name(t) for j, t in enumerate(ordered)}
+        if UNASSIGNED in present:
+            ordered = [UNASSIGNED] + ordered
+            colours = [UNASSIGNED_COLOUR] + colours
+            names = {0: "unassigned",
+                     **{j + 1: n for j, n in names.items()}}
         return ordered, colours, names
 
     ordered = sorted(present) or [BODY_LABEL]
@@ -6552,6 +6782,10 @@ def _region_legend(tags: np.ndarray, anatomical: bool = True,
             colours[j] = known
     names = {j: tag_map.name_of(t, mapping) for j, t in enumerate(ordered)}
     return ordered, colours, names
+
+
+#: Legend colour of triangles tagging could not decide (UNASSIGNED).
+UNASSIGNED_COLOUR: str = "#404040"
 
 
 #: Legend colour of each surface label. Fixed, so a surface keeps its

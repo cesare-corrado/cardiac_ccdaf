@@ -49,6 +49,20 @@ Tag a strip of triangles along a geodesic curve:
   <figcaption>Snake mode — the open geodesic drawn live through the dropped points.</figcaption>
 </figure>
 
+## Band at an opening
+
+For a vein clipped right at its ostium. Such a vein leaves no stub, so
+region growing from a seed has nothing to grow into. Anatomy says a ring of
+vein tissue lies along the opening's edge, so this tool tags that ring:
+
+1. In selection mode, pick (**`X`**) any triangle near the opening.
+2. Choose the vein's label and the band width (3 mm by default).
+3. Press **Band at opening**.
+
+Every triangle within the width of that opening's edge, measured along the
+surface, takes the label. The pick only says which opening: it need not lie
+on the edge. Undo works as for any other edit.
+
 ## Cleanup & smoothing
 
 Both act on the whole mesh rather than on a picked batch, so they are available

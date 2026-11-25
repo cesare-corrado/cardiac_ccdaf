@@ -111,6 +111,66 @@ The rim shares value 1 with the ventricular base: both are where an
 endocardium meets the epicardium. The legend calls it "rim" on an atrial
 volume and "base" on a ventricular one.
 
+## Tagging the regions of the volume
+
+Volume UAC need each tetrahedron's region: the body, each vein, the
+appendage. The tagging tools all work on triangles, so the regions are drawn
+on the endocardium and then carried into the wall.
+
+1. **Actions → Tag the endocardium…** (after Label atrial surfaces). The
+   volume steps aside and its endocardium becomes the working surface. With
+   both atria, you choose which one.
+2. On a volume from **Extract chambers**, the seeds the openings can tell
+   are placed for you: each vein and appendage seed just inside the opening
+   its cap closed, and the MV or TV seed at the valve. Seeds with no cap
+   (the CS and the RAA) are left for you to place.
+3. Each vein and appendage opening the tag names explain gets a **3 mm
+   band** along its edge at once, as **Band at opening** would give. In the
+   four-chamber cohorts the veins are clipped at or near the ostium, so
+   there is too little stub to grow a region from a seed, and the band is
+   the reliable answer: on one Zenodo mesh every tetrahedron of the
+   segmentation's own vein rings took its vein's label. For veins with a
+   longer stub, **Run tagging** grows them from their seeds instead (it
+   replaces the bands); each such vein whose opening is known grows from
+   its whole cut edge too, so it wraps round its circumference and cannot
+   take the next vein's edge. On a clipped vein that growth reaches too far
+   into the body, which is why the band comes first.
+4. Correct as usual (see [Manual correction](manual-correction.md)): every
+   tool works, including **Band at opening** for a vein clipped at its
+   ostium. Press **Accept tagging** when done; it gives any triangle left
+   unassigned the body label.
+5. **Actions → Apply to volume** carries the labels into the tetrahedra and
+   makes the volume the working mesh again. To change something, tag the
+   endocardium again and apply again.
+
+**How the labels cross the wall.** Copying the nearest endocardial label
+fails when the wall is several tetrahedra thick: the border between two
+regions can zig-zag inside the wall even when it is clean on the
+endocardium. Instead, for each label one Laplace problem is solved in the
+volume: 1 on the endocardium with that label, 0 on the rest of the
+endocardium, and no condition on the epicardium and the rims. Each
+tetrahedron takes the label with the highest value. Borders between regions
+are then smooth surfaces through the wall, and a vein on the endocardium is
+the same vein on the epicardium, which takes its labels from the
+tetrahedra. Small islands join the neighbouring region they touch most. The
+report gives how well the tetrahedra behind the endocardium agree with it
+(99% on the two four-chamber meshes measured).
+
+**What is kept.** The new regions are written as `elemTag` in ccdaf's
+atrial labels (1 LA body, 11 LSPV, …). When the volume had tag names (from
+a four-chamber mesh), its previous tags are kept as the cell array
+`sourceTag`, with their names in the field `sourceTagMap`, for a later
+merge back into the four-chamber mesh. Colour by `sourceTag` to see them
+with their names.
+
+!!! note "Rings in the four-chamber cohorts"
+
+    The vein rings of both four-chamber cohorts lie on the outside of each
+    vein end, with no endocardium of their own: the veins on the
+    endocardium are tagged as LA body. That is why a volume from Extract
+    chambers still needs tagging, and why the seeds come from the caps
+    rather than from the rings.
+
 ## Measured accuracy
 
 On a four-chamber mesh from each of two cohorts, the recorded rims gave one

@@ -250,6 +250,37 @@ class ManualEditor:
             self.on_commit()
         return changed
 
+    def band_at_pending(self, width: float) -> int:
+        """Tag the band round the opening nearest the picked triangles.
+
+        The picked triangles only say which opening (their centre); the band
+        is every face within *width* (mesh units, along the surface) of that
+        opening's edge, given the active label. Undoable. Returns the number
+        of cells changed; ``0`` with nothing picked. Raises ``ValueError``
+        on a surface with no openings.
+        """
+        if not self._pending or self._active_label not in ALLOWED_LABELS:
+            return 0
+        from ccdaf.core.opening_band import band_faces
+
+        idx = np.fromiter(self._pending, dtype=np.int64)
+        tri = np.asarray(self.mesh.faces).reshape(-1, 4)[:, 1:]
+        point = np.asarray(self.mesh.points)[tri[idx]].mean((0, 1))
+        cells, _loop = band_faces(self.mesh, point, width)
+        before = np.asarray(self.mesh.cell_data["elemTag"]).copy()
+        tags = before.copy()
+        tags[cells] = self._active_label
+        self._clear_pending()
+        changed = int(np.count_nonzero(tags != before))
+        if changed:
+            self._undo_stack.append(before)
+            self.mesh.cell_data["elemTag"] = tags
+        if self.on_render is not None:
+            self.on_render()
+        if changed and self.on_commit is not None:
+            self.on_commit()
+        return changed
+
     # ------------------------------------------------------------------
     # Snake (geodesic tag) sub-mode
     # ------------------------------------------------------------------
