@@ -72,6 +72,7 @@ from ccdaf.core.seed_profiles import (
 )
 from ccdaf.core.region_tagger import RegionTagger
 from ccdaf.core import atrial_labels
+from ccdaf.core import tag_map
 from ccdaf.interaction.manual_editor import ManualEditor, EditState
 from ccdaf.interaction.clipping_tool import ClippingTool, ClipMode
 from ccdaf.gui.postprocessing_widget import PostprocessingWidget
@@ -113,15 +114,18 @@ from ccdaf.core.segmentation import (
     sync_sitk_from_array, voxelise_polydata,
 )
 from ccdaf.core.seed_io import load_point_set, save_seeds
-from ccdaf.core.volume_mesh import VOLUME
+from ccdaf.core.volume_mesh import VOLUME, tetrahedra
 from ccdaf.core.surface_labels import (
-    BASE as SURFACE_BASE, LABEL_FIELD, LABEL_MASK_FIELD,
+    BASE as SURFACE_BASE, EPI as SURFACE_EPI, LABEL_FIELD, LABEL_MASK_FIELD,
+    LV_ENDO as SURFACE_LV_ENDO, NAMES as SURFACE_LABEL_NAMES,
+    RV_ENDO as SURFACE_RV_ENDO, UNLABELLED as SURFACE_UNLABELLED,
     Plane as SurfaceLabelPlane,
     face_labels_from_mask as surface_faces_from_mask,
     face_labels_from_nodes as surface_face_labels,
     node_label_mask as surface_node_mask,
 )
 from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
+from ccdaf.gui.tag_map_dialog import TagMapDialog
 from ccdaf.core import ventricular_fibres as vfibres
 from ccdaf.gui.fibre_dialog import FibreDialog, FibreWorker
 from ccdaf.core import uvc as uvc_core
@@ -163,6 +167,10 @@ LABEL_COLORS: Dict[int, str] = dict(atrial_labels.COLORS)
 FALLBACK_TAG_COLORS: Tuple[str, ...] = (
     "#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3",
     "#937860", "#da8bc3", "#8c8c8c", "#ccb974", "#64b5cd",
+    "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+    "#c49c94", "#f7b6d2", "#dbdb8d", "#9edae5", "#393b79",
+    "#637939", "#8c6d31", "#843c39", "#7b4173", "#5254a3",
+    "#8ca252", "#bd9e39", "#ad494a", "#a55194", "#e7cb94",
 )
 
 
@@ -358,6 +366,12 @@ class CCDAF(QtWidgets.QMainWindow):
         self._uvc_worker = None                             # its run, on a thread
         self._uvc_picking = False                           # the UVC dialog holds the picker
         self._uac_dialog = None                             # UAC, non-modal
+        # What each elemTag number means, as confirmed by the user (or read
+        # from the file). None: no confirmed map; the legend then uses the
+        # proposal (see _tag_map_in_use).
+        self._tag_map: "Optional[tag_map.TagMap]" = None
+        self._tag_map_proposal_key = None
+        self._tag_map_proposal: "tag_map.TagMap" = {}
         self._uac_worker = None                             # its run, on a thread
         self._seg_plane_widget = None                       # plane-relabel gizmo
         self._seg_plane_normal: Optional[tuple] = None
@@ -487,6 +501,14 @@ class CCDAF(QtWidgets.QMainWindow):
         actions_menu.aboutToShow.connect(self._sync_menu_actions)
         # A disabled item says why through its tooltip.
         actions_menu.setToolTipsVisible(True)
+        self.act_tag_names = QtWidgets.QAction("Tag names…", self)
+        self.act_tag_names.setStatusTip(
+            "Say what each element tag means (LV, LA body, LSPV, …). Actions "
+            "and the legend read these names instead of the numbers.")
+        self.act_tag_names.triggered.connect(self._action_tag_names)
+        actions_menu.addAction(self.act_tag_names)
+        actions_menu.addSeparator()
+
         self.act_assign_tissue = QtWidgets.QAction("Assign tissue property…", self)
         self.act_assign_tissue.setStatusTip(
             "Mark elements with material regions (tissueTag) read off a scalar field.")
@@ -1456,6 +1478,11 @@ class CCDAF(QtWidgets.QMainWindow):
         """
         mesh = self.loader.mesh
         self.setWindowTitle(window_title(display_name(source_name)))
+        # The tag map the file carried, if any (VTK field data, or a
+        # bundle's key, which read_bundle puts on the surface).
+        self._tag_map = (tag_map.read(self.loader.dataset)
+                         or tag_map.read(self.loader.mesh))
+        self._tag_map_proposal_key = None
         # A fibre window measured the mesh that was here before.
         self._close_fibre_dialog()
         self._close_uvc_dialog()
@@ -1695,6 +1722,8 @@ class CCDAF(QtWidgets.QMainWindow):
         # Mesh state and the tools bound to it.
         self._teardown_mesh_tools(rebuild_clipper=False)
         self.tagger = None
+        self._tag_map = None
+        self._tag_map_proposal_key = None
         self.loader.set_surface(None)
         self.loader.path = None
         self.setWindowTitle(window_title())
@@ -1760,6 +1789,7 @@ class CCDAF(QtWidgets.QMainWindow):
                 self._save_bundle(fn, fields)
             else:
                 binary = dlg.selected_binary()
+                self._store_tag_map()
                 self.loader.save(fn, fields=fields, binary=binary)
                 written = ", ".join(fields) if fields else "no fields"
                 self.statusBar().showMessage(
@@ -1822,6 +1852,7 @@ class CCDAF(QtWidgets.QMainWindow):
             egm=egm,
             point_sets=point_sets,
             include_elem_tag=("elemTag" in keep),
+            tag_map=self._tag_map,
             cell_fields={name: np.asarray(surface.cell_data[name])
                          for name in keep
                          if name in surface.cell_data and name != "elemTag"
@@ -3744,6 +3775,16 @@ class CCDAF(QtWidgets.QMainWindow):
         self.act_assign_tissue.setEnabled(enabled)
         self.act_assign_tissue.setToolTip(why)
 
+        tags = self._element_tag_values()
+        if self._seg_array is not None:
+            can_name, name_why = False, "Close the segmentation first."
+        elif tags is None:
+            can_name, name_why = False, "Load a mesh with element tags (elemTag) first."
+        else:
+            can_name, name_why = True, ""
+        self.act_tag_names.setEnabled(can_name)
+        self.act_tag_names.setToolTip(name_why)
+
         # Labelling splits a boundary, so it needs a volume to have one.
         if self._seg_array is not None:
             can_label, label_why = False, "Close the segmentation first."
@@ -3812,6 +3853,79 @@ class CCDAF(QtWidgets.QMainWindow):
         can_export, why_export = carp_availability(self.loader.dataset)
         self.act_export_carp.setEnabled(can_export)
         self.act_export_carp.setToolTip(why_export)
+
+    # ------------------------------------------------------------------
+    # Tag map: what each elemTag number means
+    # ------------------------------------------------------------------
+    def _element_tag_values(self) -> "Optional[np.ndarray]":
+        """The working mesh's ``elemTag`` as integers, or ``None``."""
+        data = self.loader.dataset
+        if data is None or "elemTag" not in data.cell_data:
+            return None
+        return np.asarray(data.cell_data["elemTag"]).astype(int)
+
+    def _proposed_tag_map(self) -> "tag_map.TagMap":
+        """:func:`tag_map.propose` for the working mesh, cached per tag set.
+
+        On a labelled ventricular volume with two tags the LV is told from
+        the RV as UVC does it; that reads every tetrahedron, so the answer
+        is kept until the tags or the labels change.
+        """
+        tags = self._element_tag_values()
+        if tags is None:
+            return {}
+        present = tuple(int(t) for t in np.unique(tags))
+        grid = self.loader.grid if self.loader.kind == VOLUME else None
+        has_mask = grid is not None and LABEL_MASK_FIELD in grid.point_data
+        key = (id(self.loader.dataset), present, has_mask)
+        if key != self._tag_map_proposal_key:
+            ventricles = None
+            if has_mask and len(present) == 2:
+                try:
+                    ventricles = uvc_core.lv_rv_tags(
+                        tetrahedra(grid), tags, grid.point_data[LABEL_MASK_FIELD])
+                except ValueError:
+                    ventricles = None
+            self._tag_map_proposal = tag_map.propose(present, ventricles)
+            self._tag_map_proposal_key = key
+        return self._tag_map_proposal
+
+    def _tag_map_in_use(self) -> "tag_map.TagMap":
+        """The confirmed map, or the proposal when there is none."""
+        if self._tag_map:
+            return self._tag_map
+        return self._proposed_tag_map()
+
+    def _store_tag_map(self) -> None:
+        """Put the confirmed map on the working mesh, so a save writes it."""
+        for data in {id(d): d for d in (self.loader.dataset, self.loader.mesh)
+                     if d is not None}.values():
+            tag_map.write(data, self._tag_map)
+
+    def _action_tag_names(self) -> None:
+        """Actions → Tag names…: confirm or edit what each tag means."""
+        tags = self._element_tag_values()
+        if tags is None:
+            return
+        values, counts = np.unique(tags, return_counts=True)
+        mapping = self._tag_map_in_use()
+        ordered, colours, _ = _region_legend(values, mapping=mapping)
+        dlg = TagMapDialog(
+            counts={int(v): int(c) for v, c in zip(values, counts)},
+            current=self._tag_map, proposed=self._proposed_tag_map(),
+            colors=dict(zip(ordered, colours)),
+            start_dir=str(self.recent_folder), parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        new = dlg.mapping() or None
+        if new == self._tag_map:
+            return
+        self._tag_map = new
+        self._store_tag_map()
+        self._mark_dirty()
+        self._render_field()
+        self.statusBar().showMessage(
+            "Tag names saved with the mesh." if new else "Tag names cleared.")
 
     def _action_assign_tissue_property(self) -> None:
         """Write ``tissueTag`` from the dialog's choices, then show it."""
@@ -4702,8 +4816,12 @@ class CCDAF(QtWidgets.QMainWindow):
             if field != "elemTag":
                 self._render_mesh()
             return
-        all_tags, all_colors, annotations = _region_legend(
-            tags, anatomical=(field == "elemTag"))
+        if field == LABEL_FIELD:
+            all_tags, all_colors, annotations = _surface_label_legend(tags)
+        else:
+            all_tags, all_colors, annotations = _region_legend(
+                tags, anatomical=(field == "elemTag"),
+                mapping=self._tag_map_in_use())
         tag_to_idx = {tag: i for i, tag in enumerate(all_tags)}
         indexed_tags = np.array([tag_to_idx.get(t, 0) for t in tags])
         mesh.cell_data["render_idx"] = indexed_tags
@@ -6307,7 +6425,8 @@ def _eam_lookup_table(cmap_name: str, lo: float, hi: float,
     return lut
 
 
-def _region_legend(tags: np.ndarray, anatomical: bool = True):
+def _region_legend(tags: np.ndarray, anatomical: bool = True,
+                   mapping: "Optional[Dict[int, str]]" = None):
     """The colour table and names the Regions view should draw *tags* with.
 
     ``anatomical=False`` skips the atrial table outright: a material region
@@ -6329,10 +6448,20 @@ def _region_legend(tags: np.ndarray, anatomical: bool = True):
     fixed table does to a value it does not know) leaves the mesh a
     single flat grey with no hint that it carries a labelling at all.
 
+    A **tag map** (``mapping``, see :mod:`ccdaf.core.tag_map`) names the
+    values it covers instead of their numbers: a ventricular mesh shows
+    "LV" and "RV", a four-chamber mesh its chambers. A known meaning keeps
+    its own colour. A map that agrees with the atrial scheme changes
+    nothing, so a confirmed atrial map keeps the full atrial legend.
+
     Returns ``(tags_in_order, colours, {index: name})``.
     """
     present = {int(t) for t in np.unique(tags)}
-    atria = atrial_labels.legend_atria(present) if anatomical and present else None
+    if not anatomical:
+        mapping = None
+    atria = (atrial_labels.legend_atria(present)
+             if anatomical and present
+             and tag_map.follows_atrial_scheme(mapping, present) else None)
     if atria:
         # Every label of each atrium tagged (a fresh mesh, body 1 only, is
         # the left atrium); both legends when the mesh holds both.
@@ -6344,7 +6473,37 @@ def _region_legend(tags: np.ndarray, anatomical: bool = True):
     ordered = sorted(present) or [BODY_LABEL]
     colours = [FALLBACK_TAG_COLORS[i % len(FALLBACK_TAG_COLORS)]
                for i in range(len(ordered))]
-    names = {j: str(t) for j, t in enumerate(ordered)}
+    for j, t in enumerate(ordered):
+        known = tag_map.color_of(tag_map.name_of(t, mapping))
+        if known is not None:
+            colours[j] = known
+    names = {j: tag_map.name_of(t, mapping) for j, t in enumerate(ordered)}
+    return ordered, colours, names
+
+
+#: Legend colour of each surface label. Fixed, so a surface keeps its
+#: colour whichever others are present.
+SURFACE_LABEL_COLORS: Dict[int, str] = {
+    SURFACE_UNLABELLED: "#bdbdbd",
+    SURFACE_BASE: "#ffd92f",
+    SURFACE_EPI: "#66c2a5",
+    SURFACE_LV_ENDO: "#fc8d62",
+    SURFACE_RV_ENDO: "#8da0cb",
+}
+
+
+def _surface_label_legend(labels: np.ndarray):
+    """Colours and names for a ``surfaceLabel`` view: base, epicardium, ….
+
+    Built from the labels present, each in its fixed colour and named, so
+    the legend says "epicardium" rather than 2. Returns the same triple as
+    :func:`_region_legend`.
+    """
+    ordered = sorted({int(t) for t in np.unique(labels)}) or [SURFACE_UNLABELLED]
+    colours = [SURFACE_LABEL_COLORS.get(
+        t, FALLBACK_TAG_COLORS[i % len(FALLBACK_TAG_COLORS)])
+        for i, t in enumerate(ordered)]
+    names = {j: SURFACE_LABEL_NAMES.get(t, str(t)) for j, t in enumerate(ordered)}
     return ordered, colours, names
 
 

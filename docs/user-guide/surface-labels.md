@@ -316,7 +316,8 @@ exported but not offered as something to colour by; `surfaceLabel` is.
 
 Values are `0` unlabelled, `1` base, `2` epicardium, `3` LV endocardium,
 `4` RV endocardium. The field is categorical, so the visualisation panel draws
-it with discrete colours rather than a ramp.
+it with discrete colours rather than a ramp, and the legend names each surface
+(base, epicardium, LV endocardium, RV endocardium) rather than numbering it.
 
 Saving the volume keeps both node arrays; the per-face form is rebuilt from
 them, because the boundary itself is rebuilt whenever the volume changes.
