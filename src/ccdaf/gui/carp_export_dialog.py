@@ -18,13 +18,18 @@ from PyQt5 import QtCore, QtWidgets
 
 from ccdaf.core.carp_export import (
     CarpExportOptions, CarpExportResult, DEFAULT_SCALE, DEFAULT_TAG,
-    FIBRE_FIELDS, PLACEHOLDER_FIBRE, SHEET_FIELDS, SUFFIXES, direction_fields,
-    region_fields, write_carp,
+    FIBRE_FIELDS, PLACEHOLDER_FIBRE, SHEET_FIELDS, SUFFIXES,
+    bilayer_availability, direction_fields, region_fields, write_carp,
 )
+from ccdaf.core.orifice_labels import UNITS, guess_unit
 from ccdaf.core.tissue_property import TISSUE_TAG
 
 #: What the "no array" entry of a drop-down carries.
 NONE_ENTRY = None
+#: What the fibre box's bilayer entry carries.
+BILAYER_ENTRY = "__bilayer__"
+#: The point field a bilayer takes its layer distance from.
+THICKNESS_FIELD = "thickness"
 
 
 class _ScaleSpin(QtWidgets.QDoubleSpinBox):
@@ -128,6 +133,50 @@ class CarpExportDialog(QtWidgets.QDialog):
         form.setColumnStretch(1, 1)
         layout.addLayout(form)
 
+        # --- bilayer ----------------------------------------------------
+        # A choice of the fibre box: the bilayer writes fibre_endo on the
+        # endocardial layer and fibre_epi on the epicardial one, so it is a
+        # way of writing fibres, not a separate switch. Its two tags show
+        # only when it is chosen.
+        can_bilayer, bilayer_why = bilayer_availability(dataset)
+        if can_bilayer:
+            self.cmb_fibre.addItem("fibre_bilayer (fibre_endo + fibre_epi)",
+                                   BILAYER_ENTRY)
+        self.cmb_fibre.setToolTip(
+            self.cmb_fibre.toolTip() + "\n\nfibre_bilayer writes the surface as "
+            "an endocardial layer (fibre_endo) and a copy moved outwards by the "
+            "point field 'thickness' (or 0.1 mm without it) as the epicardial "
+            "layer (fibre_epi), with a line element joining each node to its "
+            "copy." + ("" if can_bilayer else f"\n({bilayer_why})"))
+        self.box_bilayer = QtWidgets.QWidget()
+        bl = QtWidgets.QGridLayout(self.box_bilayer)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.addWidget(QtWidgets.QLabel("epicardial tag offset"), 0, 0)
+        self.spn_epi_offset = QtWidgets.QSpinBox()
+        self.spn_epi_offset.setRange(0, 255)
+        self.spn_epi_offset.setValue(100)
+        self.spn_epi_offset.setToolTip(
+            "An epicardial triangle's tag is its endocardial tag plus this, "
+            "so each layer can take its own properties.")
+        bl.addWidget(self.spn_epi_offset, 0, 1)
+        bl.addWidget(QtWidgets.QLabel("line tag"), 1, 0)
+        self.spn_line_tag = QtWidgets.QSpinBox()
+        self.spn_line_tag.setRange(0, 255)
+        self.spn_line_tag.setValue(32)
+        self.spn_line_tag.setToolTip(
+            "Tag of every line element: its conductivity sets the coupling "
+            "between the layers.")
+        bl.addWidget(self.spn_line_tag, 1, 1)
+        bl.setColumnStretch(2, 1)
+        self.lbl_thickness = QtWidgets.QLabel()
+        self.lbl_thickness.setWordWrap(True)
+        has_field = (dataset is not None and THICKNESS_FIELD in dataset.point_data)
+        self.lbl_thickness.setText(
+            "Layers apart by the point field 'thickness'." if has_field else
+            "No 'thickness' point field: layers 0.1 mm apart.")
+        bl.addWidget(self.lbl_thickness, 2, 0, 1, 3)
+        layout.addWidget(self.box_bilayer)
+
         self.lbl_preview = QtWidgets.QLabel()
         self.lbl_preview.setWordWrap(True)
         self.lbl_preview.setToolTip("The files this writes.")
@@ -146,6 +195,8 @@ class CarpExportDialog(QtWidgets.QDialog):
         self.txt_name.textChanged.connect(self._refresh_preview)
         self.cmb_fibre.currentIndexChanged.connect(self._sync_sheets)
         self._sync_sheets()
+        self.cmb_fibre.currentIndexChanged.connect(self._sync_bilayer)
+        self._sync_bilayer()
         self._refresh_preview()
 
     # -- internals --------------------------------------------------------
@@ -155,9 +206,19 @@ class CarpExportDialog(QtWidgets.QDialog):
         if chosen:
             self.txt_dir.setText(chosen)
 
+    def _bilayer(self) -> bool:
+        # Qt hands back a copy of the string, so compare by value.
+        return self.cmb_fibre.currentData() == BILAYER_ENTRY
+
+    def _sync_bilayer(self, *_args) -> None:
+        """The bilayer's tags show only when it is the fibre choice."""
+        self.box_bilayer.setVisible(self._bilayer())
+        self.adjustSize()
+
     def _sync_sheets(self, *_args) -> None:
-        """A sheet direction means nothing without a fibre to go with it."""
-        has_fibre = self.cmb_fibre.currentData() is not NONE_ENTRY
+        """A sheet direction means nothing without a fibre to go with it,
+        and a bilayer's surfaces carry none."""
+        has_fibre = self.cmb_fibre.currentData() not in (NONE_ENTRY, BILAYER_ENTRY)
         self.cmb_sheet.setEnabled(has_fibre and self.cmb_sheet.count() > 1)
         if not has_fibre:
             self.cmb_sheet.setCurrentIndex(0)
@@ -176,13 +237,24 @@ class CarpExportDialog(QtWidgets.QDialog):
     # -- queries ----------------------------------------------------------
     def options(self) -> CarpExportOptions:
         """The dialog's current inputs."""
+        bilayer = self._bilayer()
+        mm = (UNITS[guess_unit(self._dataset)]
+              if bilayer and self._dataset is not None else 1.0)
+        thickness = (THICKNESS_FIELD if bilayer and self._dataset is not None
+                     and THICKNESS_FIELD in self._dataset.point_data else None)
         return CarpExportOptions(
             directory=self.txt_dir.text().strip(),
             name=self.txt_name.text().strip(),
             scale=self.spn_scale.value(),
             region_field=self.cmb_region.currentData(),
-            fibre_field=self.cmb_fibre.currentData(),
-            sheet_field=self.cmb_sheet.currentData() if self.cmb_sheet.isEnabled() else None,
+            fibre_field=None if bilayer else self.cmb_fibre.currentData(),
+            sheet_field=(self.cmb_sheet.currentData()
+                         if self.cmb_sheet.isEnabled() and not bilayer else None),
+            bilayer=bilayer,
+            thickness_field=thickness,
+            mm_per_unit=mm,
+            epi_tag_offset=self.spn_epi_offset.value(),
+            line_tag=self.spn_line_tag.value(),
         )
 
     def result(self) -> Optional[CarpExportResult]:

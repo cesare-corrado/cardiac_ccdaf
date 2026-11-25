@@ -217,6 +217,11 @@ A mesh with no fibre field is written with the fibre-only form and `(1, 0, 0)`
 everywhere, which is valid only for isotropic conductivity. Vectors that are
 not unit length are normalised in the file, never in the mesh.
 
+A **bilayer** (see [Export](user-guide/export.md#bilayer)) writes twice the
+nodes (the endocardial layer, then its copy), the triangles of both layers,
+then one `Ln` line element per node (`Ln i i+n tag`), with a fibre-only
+`.lon` in the same element order.
+
 ## Segmentation images — `.nii` / `.nii.gz`
 
 Label images are read/written with SimpleITK. Surfaces are reconstructed with
