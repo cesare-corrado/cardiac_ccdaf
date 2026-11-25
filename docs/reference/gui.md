@@ -32,5 +32,6 @@ Qt panels and dialogs. Widgets expose signals and hold no business logic.
 ::: ccdaf.gui.fibre_dialog
 ::: ccdaf.gui.uvc_dialog
 ::: ccdaf.gui.uac_dialog
+::: ccdaf.gui.volume_uac_dialog
 ::: ccdaf.gui.atrial_fibre_dialog
 ::: ccdaf.gui.help_dialogs
