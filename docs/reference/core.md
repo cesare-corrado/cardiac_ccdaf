@@ -25,6 +25,8 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.orifice_labels
 ::: ccdaf.core.chamber_extract
 ::: ccdaf.core.atrial_surfaces
+::: ccdaf.core.volume_tags
+::: ccdaf.core.opening_band
 ::: ccdaf.core.laplace
 ::: ccdaf.core.ldrb
 ::: ccdaf.core.ventricular_fibres

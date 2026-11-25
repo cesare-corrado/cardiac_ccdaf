@@ -197,6 +197,7 @@ class RegionTagger:
         self,
         seeds: Mapping[str, int | Sequence[float]],
         atrium: Optional[al.Atrium] = None,
+        sources: Optional[Mapping[str, Sequence[int]]] = None,
     ) -> np.ndarray:
         """Segment the mesh and write labels into ``mesh.cell_data['elemTag']``.
 
@@ -207,6 +208,13 @@ class RegionTagger:
             A seed may be either a vertex index (int) or an (x,y,z) coordinate.
         atrium
             Which atrium's labels to write (default: the left atrium).
+        sources
+            Optional ``{name -> vertex ids}`` the region also grows from,
+            besides its seed: the edge loop of a vein's opening, when it is
+            known. A vein clipped short then fills evenly round its whole
+            circumference from the cut edge, the wavefront rings are the
+            vein's own cross-sections (what the ostium detector reads), and
+            the next vein's edge belongs to that vein from the start.
 
         Returns
         -------
@@ -217,6 +225,8 @@ class RegionTagger:
         # GUI slider pushed a factor <= 0 after init, reject before work.
         self.config._validate()
         self.atrium = atrium or al.LA
+        self._sources = {k: np.asarray(v, dtype=np.int64)
+                         for k, v in (sources or {}).items() if len(v)}
 
         seed_vertices = self._resolve_seeds(seeds)
 
@@ -397,12 +407,22 @@ class RegionTagger:
             # Run an uncapped Dijkstra first up to a generous working radius so
             # we can refine ``r`` via the bottleneck detector, then re-cap.
             working_limit = r * 2.0
-            d = dijkstra(
-                self._graph,
-                indices=seed_vertices[name],
-                directed=False,
-                limit=working_limit,
-            )
+            extra = getattr(self, "_sources", {}).get(name)
+            if extra is not None:
+                d = dijkstra(
+                    self._graph,
+                    indices=np.unique(np.r_[seed_vertices[name], extra]),
+                    directed=False,
+                    limit=working_limit,
+                    min_only=True,
+                )
+            else:
+                d = dijkstra(
+                    self._graph,
+                    indices=seed_vertices[name],
+                    directed=False,
+                    limit=working_limit,
+                )
             r_eff = self._bottleneck_radius(d, r)
             d = np.where(d <= r_eff, d, np.inf)
 
@@ -683,7 +703,9 @@ class RegionTagger:
             n_comp, comp = connected_components(sub, directed=False)
 
             seed_v = seed_vertices[name]
-            incident = np.any(tri == seed_v, axis=1) & mask
+            anchors = np.r_[seed_v, getattr(self, "_sources", {}).get(
+                name, np.zeros(0, dtype=np.int64))]
+            incident = np.any(np.isin(tri, anchors), axis=1) & mask
 
             local_idx = np.cumsum(mask) - 1  # global -> local index inside mask
             if np.any(incident):
@@ -896,11 +918,18 @@ class RegionTagger:
         # 1. Group background triangles into connected components
         sub = self._tri_adj[is_background][:, is_background]
         n_comp, comp = connected_components(sub, directed=False)
+        # The largest background piece is the body itself, never a hole:
+        # filling it (when one region happens to be its only labelled
+        # neighbour, as after a misplaced seed) turns the whole atrium into
+        # that region.
+        largest = int(np.argmax(np.bincount(comp))) if n_comp else -1
         
         # Map from local (background-only) index to global triangle index
         bg_global_indices = np.where(is_background)[0]
         
         for c_idx in range(n_comp):
+            if c_idx == largest:
+                continue
             # Triangles belonging to this specific background cluster
             cluster_mask_local = (comp == c_idx)
             cluster_global_indices = bg_global_indices[cluster_mask_local]

@@ -32,6 +32,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
     snake_undo_point_requested = QtCore.pyqtSignal()
     snake_clear_requested  = QtCore.pyqtSignal()
     snake_commit_requested = QtCore.pyqtSignal()
+    band_requested     = QtCore.pyqtSignal(float)   # width, mm
     accept_requested   = QtCore.pyqtSignal()
     undo_requested     = QtCore.pyqtSignal()
 
@@ -175,6 +176,31 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         snake_row.addWidget(self.btn_snake_commit, 1)
         layout.addLayout(snake_row)
 
+        # Band at an opening: for a vein clipped at its ostium, which has no
+        # stub to grow into. Pick (X) any triangle near the opening, then
+        # press the button: the band along that opening's edge takes the
+        # active label. The pick only says which opening.
+        band_row = QtWidgets.QHBoxLayout()
+        self.btn_band = QtWidgets.QPushButton("Band at opening")
+        self.btn_band.setToolTip(
+            "For a vein clipped at its ostium. In selection mode, pick (X) a "
+            "triangle near the opening, then press this: every triangle within "
+            "the width of that opening's edge takes the label selected above."
+        )
+        self.spn_band = QtWidgets.QDoubleSpinBox()
+        self.spn_band.setRange(0.5, 20.0)
+        self.spn_band.setSingleStep(0.5)
+        self.spn_band.setValue(3.0)
+        self.spn_band.setSuffix(" mm")
+        self.spn_band.setToolTip("How far from the opening's edge the band "
+                                 "reaches, along the surface.")
+        self.btn_band.clicked.connect(
+            lambda: self.band_requested.emit(float(self.spn_band.value())))
+        self.btn_band.setEnabled(False)
+        band_row.addWidget(self.btn_band, 1)
+        band_row.addWidget(self.spn_band)
+        layout.addLayout(band_row)
+
         self.btn_accept = QtWidgets.QPushButton("Accept tagging")
         self.btn_accept.setToolTip(
             "Finish manual correction: commit any pending batch and assign the "
@@ -311,6 +337,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_fill_holes.setEnabled(enabled)
         self.btn_smooth.setEnabled(enabled)
         self.btn_snake.setEnabled(enabled)
+        self.btn_band.setEnabled(enabled)
         self.btn_accept.setEnabled(enabled)
         if not enabled:
             self.uncheck_snake()
@@ -329,6 +356,7 @@ class ManualCorrectionWidget(QtWidgets.QGroupBox):
         self.btn_smooth.setEnabled(False)
         self.uncheck_snake()
         self.btn_snake.setEnabled(False)
+        self.btn_band.setEnabled(False)
         self.btn_accept.setEnabled(False)
         self.btn_undo.setEnabled(False)
 

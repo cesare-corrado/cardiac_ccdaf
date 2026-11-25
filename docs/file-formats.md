@@ -35,6 +35,13 @@ tag, and every other node 0. **Label atrial surfaces** reads it to find the
 rims (see [Atrial surfaces](user-guide/atrial-surfaces.md)). It is saved
 with the volume.
 
+### Previous tags (`sourceTag`, `sourceTagMap`)
+
+**Actions → Apply to volume** rewrites `elemTag` in ccdaf's atrial labels.
+When the volume had tag names, the tags it had before are kept as the cell
+array `sourceTag`, and their names as the field `sourceTagMap` (the same
+JSON as `tagMap`).
+
 ### Tag names file (`.json`)
 
 **Save…** in the Tag names dialog writes the same JSON object to a file of
