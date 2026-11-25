@@ -80,6 +80,7 @@ nav:
       - Post-processing: user-guide/post-processing.md
       - Tissue properties: user-guide/tissue-properties.md
       - Surface labels: user-guide/surface-labels.md
+      - Atrial surfaces: user-guide/atrial-surfaces.md
       - Fibres: user-guide/fibres.md
       - Universal ventricular coordinates: user-guide/uvc.md
       - Universal atrial coordinates: user-guide/uac.md

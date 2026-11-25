@@ -315,7 +315,9 @@ can describe a node lying on a seam. `surfaceLabelMask` is therefore saved and
 exported but not offered as something to colour by; `surfaceLabel` is.
 
 Values are `0` unlabelled, `1` base, `2` epicardium, `3` LV endocardium,
-`4` RV endocardium. The field is categorical, so the visualisation panel draws
+`4` RV endocardium. An atrial volume uses `5` LA endocardium and
+`6` RA endocardium, and its `1` is the rim (see
+[Atrial surfaces](atrial-surfaces.md)). The field is categorical, so the visualisation panel draws
 it with discrete colours rather than a ramp, and the legend names each surface
 (base, epicardium, LV endocardium, RV endocardium) rather than numbering it.
 
@@ -323,7 +325,8 @@ Saving the volume keeps both node arrays; the per-face form is rebuilt from
 them, because the boundary itself is rebuilt whenever the volume changes.
 
 `surfaceLabelMask` is what makes that rebuild exact. Each surface owns one bit
-(1 base, 2 epicardium, 4 LV endocardium, 8 RV endocardium), so a node on the
+(1 base, 2 epicardium, 4 LV endocardium, 8 RV endocardium, 16 LA
+endocardium, 32 RA endocardium), so a node on the
 rim between base and epicardium reads **3**: it belongs to both. A face is then
 whichever surface all three of its nodes belong to.
 

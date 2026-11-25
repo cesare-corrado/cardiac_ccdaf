@@ -117,7 +117,9 @@ from ccdaf.core.seed_io import load_point_set, save_seeds
 from ccdaf.core.volume_mesh import VOLUME, tetrahedra
 from ccdaf.core.surface_labels import (
     BASE as SURFACE_BASE, EPI as SURFACE_EPI, LABEL_FIELD, LABEL_MASK_FIELD,
-    LV_ENDO as SURFACE_LV_ENDO, NAMES as SURFACE_LABEL_NAMES,
+    LA_ENDO as SURFACE_LA_ENDO, RA_ENDO as SURFACE_RA_ENDO,
+    LV_ENDO as SURFACE_LV_ENDO, is_atrial as surface_is_atrial,
+    label_name as surface_label_name,
     RV_ENDO as SURFACE_RV_ENDO, UNLABELLED as SURFACE_UNLABELLED,
     Plane as SurfaceLabelPlane,
     face_labels_from_mask as surface_faces_from_mask,
@@ -125,6 +127,9 @@ from ccdaf.core.surface_labels import (
     node_label_mask as surface_node_mask,
 )
 from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
+from ccdaf.gui.atrial_labels_dialog import AtrialLabelsDialog
+from ccdaf.gui.chamber_extract_dialog import ChamberExtractDialog
+from ccdaf.core.chamber_extract import available_chambers, extract_chambers
 from ccdaf.gui.tag_map_dialog import TagMapDialog
 from ccdaf.core import ventricular_fibres as vfibres
 from ccdaf.gui.fibre_dialog import FibreDialog, FibreWorker
@@ -507,6 +512,12 @@ class CCDAF(QtWidgets.QMainWindow):
             "and the legend read these names instead of the numbers.")
         self.act_tag_names.triggered.connect(self._action_tag_names)
         actions_menu.addAction(self.act_tag_names)
+        self.act_extract_chambers = QtWidgets.QAction("Extract chambers…", self)
+        self.act_extract_chambers.setStatusTip(
+            "Keep the tissue of some chambers (for example both atria) and "
+            "remember where their caps and valves were.")
+        self.act_extract_chambers.triggered.connect(self._action_extract_chambers)
+        actions_menu.addAction(self.act_extract_chambers)
         actions_menu.addSeparator()
 
         self.act_assign_tissue = QtWidgets.QAction("Assign tissue property…", self)
@@ -522,6 +533,13 @@ class CCDAF(QtWidgets.QMainWindow):
             "endocardium and RV endocardium.")
         self.act_label_surfaces.triggered.connect(self._action_label_surfaces)
         actions_menu.addAction(self.act_label_surfaces)
+
+        self.act_label_atria = QtWidgets.QAction("Label atrial surfaces…", self)
+        self.act_label_atria.setStatusTip(
+            "Split an atrial volume's boundary into rim, epicardium and the "
+            "endocardium of each atrium.")
+        self.act_label_atria.triggered.connect(self._action_label_atria)
+        actions_menu.addAction(self.act_label_atria)
 
         self.act_generate_fibres = QtWidgets.QAction("Generate fibres…", self)
         self.act_generate_fibres.setStatusTip(
@@ -3794,6 +3812,22 @@ class CCDAF(QtWidgets.QMainWindow):
             can_label, label_why = True, ""
         self.act_label_surfaces.setEnabled(can_label)
         self.act_label_surfaces.setToolTip(label_why)
+        self.act_label_atria.setEnabled(can_label)
+        self.act_label_atria.setToolTip(label_why)
+
+        # Extraction needs a tagged volume whose tags name chambers.
+        if self._seg_array is not None:
+            can_extract, extract_why = False, "Close the segmentation first."
+        elif self.loader.kind != VOLUME or self.loader.grid is None:
+            can_extract, extract_why = False, "Load a tetrahedral volume first."
+        elif tags is None or not available_chambers(
+                self._tag_map_in_use(), np.unique(tags)):
+            can_extract, extract_why = False, (
+                "Give the tags a chamber first (Actions > Tag names…).")
+        else:
+            can_extract, extract_why = True, ""
+        self.act_extract_chambers.setEnabled(can_extract)
+        self.act_extract_chambers.setToolTip(extract_why)
 
         # Fibres need the labels as well as the volume.
         if self._seg_array is not None:
@@ -3987,6 +4021,45 @@ class CCDAF(QtWidgets.QMainWindow):
         dlg.preview_requested.connect(self._action_label_preview)
         dlg.finished.connect(self._action_label_finished)
         dlg.show()
+
+    def _action_label_atria(self) -> None:
+        """Open the atrial labelling window (non-modal, like the ventricular)."""
+        if self.loader.kind != VOLUME or self.loader.grid is None:
+            return
+        if self._labels_dialog is not None:
+            self._labels_dialog.raise_()
+            self._labels_dialog.activateWindow()
+            return
+        # Only names the user confirmed: a proposal made from a default tag
+        # would name the atrium with no evidence.
+        dlg = AtrialLabelsDialog(self.loader.grid, self._tag_map, parent=self)
+        self._labels_dialog = dlg
+        dlg.preview_requested.connect(self._action_label_preview)
+        dlg.finished.connect(self._action_label_finished)
+        dlg.show()
+
+    def _action_extract_chambers(self) -> None:
+        """Actions → Extract chambers…: keep some chambers' tissue."""
+        grid = self.loader.grid
+        tags = self._element_tag_values()
+        if self.loader.kind != VOLUME or grid is None or tags is None:
+            return
+        mapping = self._tag_map_in_use()
+        present = np.unique(tags)
+        dlg = ChamberExtractDialog(available_chambers(mapping, present),
+                                   mapping, present, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            result = extract_chambers(grid, mapping, dlg.chambers())
+        except ValueError as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(self, "Extract chambers", str(exc))
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self._replace_volume(result.grid)
+        self.statusBar().showMessage(result.summary())
 
     def _action_label_plane_edit(self, on: bool) -> None:
         """Show or remove the draggable plane for the labelling window.
@@ -6489,6 +6562,8 @@ SURFACE_LABEL_COLORS: Dict[int, str] = {
     SURFACE_EPI: "#66c2a5",
     SURFACE_LV_ENDO: "#fc8d62",
     SURFACE_RV_ENDO: "#8da0cb",
+    SURFACE_LA_ENDO: "#e78ac3",
+    SURFACE_RA_ENDO: "#a6d854",
 }
 
 
@@ -6503,7 +6578,8 @@ def _surface_label_legend(labels: np.ndarray):
     colours = [SURFACE_LABEL_COLORS.get(
         t, FALLBACK_TAG_COLORS[i % len(FALLBACK_TAG_COLORS)])
         for i, t in enumerate(ordered)]
-    names = {j: SURFACE_LABEL_NAMES.get(t, str(t)) for j, t in enumerate(ordered)}
+    atrial = surface_is_atrial(ordered)
+    names = {j: surface_label_name(t, atrial) for j, t in enumerate(ordered)}
     return ordered, colours, names
 
 
