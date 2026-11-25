@@ -354,3 +354,32 @@ the fibres still differ in two ways:
   pipeline used another version of the average on the same anatomy; the two
   differ by a median of about 28°, so with the original coordinates and the
   Zenodo average the fibres differ from that pipeline's by 24° to 31°.
+
+### Fibres in a volume
+
+On an atrial volume with volume UAC (see [Volumes](#volumes)), **Actions >
+Atrial fibres** gives every tetrahedron a fibre and a sheet. There is no
+window: the endocardial and the epicardial atlas are both used.
+
+1. The endocardial atlas is mapped onto the volume's endocardium and the
+   epicardial atlas onto its epicardium, exactly as on a surface.
+2. Each tetrahedron takes the fibre of the nearest endocardial triangle and
+   of the nearest epicardial triangle.
+3. Through the wall the fibre turns smoothly from the endocardial fibre
+   (depth 0) to the epicardial one (depth 1), by an angle that grows
+   linearly with the depth, in the plane of the wall. There is no switch at
+   half thickness.
+4. The sheet is the direction through the wall (the gradient of the depth),
+   and the fibre is perpendicular to it. A tetrahedron whose four nodes lie
+   on one surface has no direction through the wall of its own and takes
+   its neighbours' sheet.
+
+They are written as the cell fields `fiber` and `sheet`, the names of the
+ventricular fibres, so **Export > Carp** writes them as they are and the
+visualisation panel draws them.
+
+The report gives the turn from the endocardial to the epicardial fibre
+through the wall. On one four-chamber left atrium: median 29°, 90% 69°.
+Neighbouring tetrahedra differ by a median 7°, about as smooth as the
+atlas itself: on the two surfaces, neighbouring triangles differ by a
+median 10° and 12°.

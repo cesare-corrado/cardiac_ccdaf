@@ -132,6 +132,7 @@ from ccdaf.gui.chamber_extract_dialog import ChamberExtractDialog
 from ccdaf.core.chamber_extract import available_chambers, extract_chambers
 from ccdaf.core import volume_tags
 from ccdaf.core.uac import volume as volume_uac
+from ccdaf.core.uac import volume_fibres
 from ccdaf.gui.volume_uac_dialog import VolumeUacDialog
 from ccdaf.core.orifice_labels import UNITS, guess_unit
 from ccdaf.gui.tag_map_dialog import TagMapDialog
@@ -3947,8 +3948,13 @@ class CCDAF(QtWidgets.QMainWindow):
             can_af, af_why = False, "Close the segmentation first."
         elif self._uac_worker is not None:
             can_af, af_why = False, "UAC are being computed."
-        elif self.loader.kind == VOLUME or self.loader.mesh is None:
-            can_af, af_why = False, "Atrial fibres are mapped on an atrial surface."
+        elif self.loader.kind == VOLUME:
+            can_af, af_why = volume_fibres.availability(self.loader.grid)
+            if can_af:
+                af_why = ("Fibres through the wall, turning from the endocardial "
+                          "to the epicardial atlas with depth.")
+        elif self.loader.mesh is None:
+            can_af, af_why = False, "Load an atrium first."
         elif not uac_core.has_coordinates(self.loader.mesh):
             can_af, af_why = False, "Compute UAC first (Actions > Compute UAC)."
         elif ("elemTag" in self.loader.mesh.cell_data
@@ -4948,6 +4954,9 @@ class CCDAF(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     def _action_atrial_fibres(self) -> None:
         """Map the average atlas fibres onto the atrium through its UAC."""
+        if self.loader.kind == VOLUME:
+            self._action_volume_fibres()
+            return
         mesh = self.loader.mesh
         if mesh is None or self.loader.kind == VOLUME or not uac_core.has_coordinates(mesh):
             return
@@ -4965,6 +4974,26 @@ class CCDAF(QtWidgets.QMainWindow):
         QtWidgets.QApplication.restoreOverrideCursor()
         self._replace_mesh(new_mesh)
         lines = [ln for r in reports for ln in r.lines()]
+        self.statusBar().showMessage(" ".join(lines), 30000)
+        QtWidgets.QMessageBox.information(self, "Atrial fibres", "\n".join(lines))
+
+    def _action_volume_fibres(self) -> None:
+        """Atrial fibres on a volume with volume UAC (see volume_fibres)."""
+        grid = self.loader.grid
+        ok, why = volume_fibres.availability(grid)
+        if not ok:
+            QtWidgets.QMessageBox.warning(self, "Atrial fibres", why)
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            result = volume_fibres.compute(grid)
+        except (uac_fibres.fibre_atlas.AtlasError, ValueError) as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(self, "Atrial fibres", str(exc))
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self._replace_volume(volume_fibres.write(grid, result), fibre_note=False)
+        lines = result.lines()
         self.statusBar().showMessage(" ".join(lines), 30000)
         QtWidgets.QMessageBox.information(self, "Atrial fibres", "\n".join(lines))
 
