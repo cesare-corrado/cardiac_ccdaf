@@ -45,6 +45,7 @@ Pure algorithms and state — no Qt, no interactive VTK.
 ::: ccdaf.core.uac.fibre_atlas
 ::: ccdaf.core.uac.fibres
 ::: ccdaf.core.uac.volume
+::: ccdaf.core.uac.volume_fibres
 ::: ccdaf.core.volume_from_segmentation
 ::: ccdaf.core.tissue_property
 ::: ccdaf.core.carp_export
