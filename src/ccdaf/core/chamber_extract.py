@@ -45,6 +45,15 @@ endocardium and epicardium without any geometry (see
 of two cohorts, for each atrium alone and for both: the rims leave exactly
 one epicardium and one endocardium per atrium, plus at most three stray
 pieces of 4 faces.
+
+Finding the way back
+--------------------
+Each node and element keeps its id in the source mesh (:data:`SOURCE_POINT`,
+:data:`SOURCE_CELL`), each node shared with the tissue left behind is
+flagged (:data:`INTERFACE`), and the ids of all extracted elements are kept
+as field data (:data:`SOURCE_CELLS`). :func:`ccdaf.core.chamber_merge.merge_into`
+uses them to write results back, or, after a remesh that kept the
+interface, to put the remeshed tissue in place of the old.
 """
 from __future__ import annotations
 
@@ -64,6 +73,13 @@ OPENING_FIELD: str = "openingTag"
 #: Each point's and element's id in the mesh it was extracted from.
 SOURCE_POINT: str = "sourcePoint"
 SOURCE_CELL: str = "sourceCell"
+#: Point field: 1 on a node the kept tissue shares with tissue left in the
+#: source mesh (the interface), 0 elsewhere.
+INTERFACE: str = "sourceInterface"
+#: Field data: the ids, in the source mesh, of every element extracted.
+#: Kept through a remesh, which renumbers the elements, so that the merge
+#: knows which elements the remeshed tissue replaces.
+SOURCE_CELLS: str = "sourceCells"
 
 #: Chambers in the order the dialog lists them.
 CHAMBER_ORDER: Tuple[str, ...] = ("LV", "RV", "LA", "RA")
@@ -187,13 +203,20 @@ def extract_chambers(grid, mapping: Mapping[int, object],
     cells = local
     # Ids in *grid*, or, when *grid* was itself extracted, in the mesh it
     # came from: the ids always point at the first mesh.
+    shared = np.zeros(grid.n_points, dtype=bool)
+    shared[tets[~keep].ravel()] = True
+    interface = shared[origin]
     if SOURCE_POINT in grid.point_data and SOURCE_CELL in grid.cell_data:
         point_ids = np.asarray(grid.point_data[SOURCE_POINT], dtype=np.int64)[origin]
         cells = np.asarray(sub.cell_data[SOURCE_CELL], dtype=np.int64)
+        if INTERFACE in grid.point_data:
+            interface |= np.asarray(grid.point_data[INTERFACE])[origin] > 0
     else:
         point_ids = origin
     sub.point_data[SOURCE_POINT] = point_ids
     sub.cell_data[SOURCE_CELL] = cells
+    sub.point_data[INTERFACE] = interface.astype(np.int8)
+    sub.field_data[SOURCE_CELLS] = np.sort(cells)
     for name in _STALE_POINT_FIELDS:
         if name in sub.point_data:
             del sub.point_data[name]
@@ -278,5 +301,6 @@ def _split_shared(tag: int, named: tag_map.TagMap, tags: np.ndarray,
     return out
 
 
-__all__ = ["OPENING_FIELD", "SOURCE_POINT", "SOURCE_CELL", "CHAMBER_ORDER", "Extraction",
+__all__ = ["OPENING_FIELD", "SOURCE_POINT", "SOURCE_CELL", "INTERFACE",
+           "SOURCE_CELLS", "CHAMBER_ORDER", "Extraction",
            "available_chambers", "extract_chambers"]

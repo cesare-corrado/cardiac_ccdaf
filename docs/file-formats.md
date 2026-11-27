@@ -45,6 +45,15 @@ extracted from an extracted volume, the ids still refer to the first mesh.
 [Merging back](user-guide/atrial-surfaces.md#merging-back-into-the-four-chamber-mesh)).
 They are saved with the volume and not offered for colouring.
 
+Extraction also writes the **point** array `sourceInterface` (1 on a node
+the kept tissue shares with the rest of the source mesh, 0 elsewhere) and
+the **field data** `sourceCells` (the ids of every extracted element). A
+remesh that keeps the interface keeps both, and the ids of the nodes that
+stayed put; its new nodes have `sourcePoint` -1 and every element
+`sourceCell` -1. The merge then replaces the elements listed in
+`sourceCells` (see
+[Remeshing an extracted atrium](user-guide/atrial-surfaces.md#remeshing-an-extracted-atrium)).
+
 ### Not computed (`-32000`)
 
 A field the merge adds to the four-chamber mesh reads "not computed"

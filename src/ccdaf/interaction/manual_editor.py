@@ -255,13 +255,15 @@ class ManualEditor:
 
         The picked triangles only say which opening (their centre); the band
         is every face within *width* (mesh units, along the surface) of that
-        opening's edge, given the active label. Undoable. Returns the number
+        opening's edge, given the active label. Where the band touches
+        another vein, its faces at the shared vertices go back to the body,
+        leaving a corridor one face wide. Undoable. Returns the number
         of cells changed; ``0`` with nothing picked. Raises ``ValueError``
         on a surface with no openings.
         """
         if not self._pending or self._active_label not in ALLOWED_LABELS:
             return 0
-        from ccdaf.core.opening_band import band_faces
+        from ccdaf.core.opening_band import band_faces, keep_apart
 
         idx = np.fromiter(self._pending, dtype=np.int64)
         tri = np.asarray(self.mesh.faces).reshape(-1, 4)[:, 1:]
@@ -270,6 +272,11 @@ class ManualEditor:
         before = np.asarray(self.mesh.cell_data["elemTag"]).copy()
         tags = before.copy()
         tags[cells] = self._active_label
+        # The new band yields a corridor of body to any vein it touches.
+        atrium = al.atrium_of(int(self._active_label))
+        if atrium is not None and self._active_label != atrium.body:
+            keep_apart(tri, tags, atrium.regions.values(), atrium.body,
+                       only=int(self._active_label))
         self._clear_pending()
         changed = int(np.count_nonzero(tags != before))
         if changed:

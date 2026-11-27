@@ -213,3 +213,63 @@ def test_fill_holes_never_fills_the_body():
     tags[z > 0.3] = al.LA.regions["LAA"]          # one region, body below
     out = t._fill_holes(tags)
     assert (out == al.LA.body).sum() == (tags == al.LA.body).sum()
+
+
+def _shared_vertices(tri, tags, regions):
+    on = np.isin(tags, list(regions))
+    lo = np.full(tri.max() + 1, 10**9)
+    hi = np.full(tri.max() + 1, -1)
+    for k in range(3):
+        np.minimum.at(lo, tri[on, k], tags[on])
+        np.maximum.at(hi, tri[on, k], tags[on])
+    return int(np.sum(hi > lo))
+
+
+def test_two_close_bands_keep_a_corridor_of_body():
+    # Two slits 2 apart, bands 4 wide: they would meet halfway, on a line.
+    from ccdaf.core.opening_band import keep_apart
+    plane = pv.Plane(i_size=20, j_size=10, i_resolution=80, j_resolution=40
+                     ).triangulate()
+    c = np.asarray(plane.cell_centers().points)
+    hole = (np.abs(c[:, 1]) < 1.0) & ((np.abs(c[:, 0] + 2) < 1.0)
+                                     | (np.abs(c[:, 0] - 2) < 1.0))
+    strip = plane.extract_cells(np.where(~hole)[0]).extract_surface()
+    tri = np.asarray(strip.faces).reshape(-1, 4)[:, 1:]
+    a, b = al.LA.regions["LSPV"], al.LA.regions["LIPV"]
+    tags = np.full(strip.n_cells, al.LA.body)
+    tags[band_faces(strip, (-2.0, 0.0, 0.0), 4.0)[0]] = a
+    tags[band_faces(strip, (2.0, 0.0, 0.0), 4.0)[0]] = b
+    assert _shared_vertices(tri, tags, (a, b)) > 0
+    before = tags.copy()
+    n = keep_apart(tri, tags, al.LA.regions.values(), al.LA.body)
+    assert n > 0 and _shared_vertices(tri, tags, (a, b)) == 0
+    assert np.all((tags == before) | (tags == al.LA.body))
+    # Only the faces at the meeting line gave way.
+    assert n < 0.2 * np.isin(before, (a, b)).sum()
+    # With only=, just that region yields.
+    tags = before.copy()
+    keep_apart(tri, tags, al.LA.regions.values(), al.LA.body, only=b)
+    assert (tags == a).sum() == (before == a).sum()
+    assert _shared_vertices(tri, tags, (a, b)) == 0
+
+
+def test_band_at_opening_yields_to_a_vein_already_there():
+    from ccdaf.interaction.manual_editor import ManualEditor
+    plane = pv.Plane(i_size=20, j_size=10, i_resolution=80, j_resolution=40
+                     ).triangulate()
+    c = np.asarray(plane.cell_centers().points)
+    hole = (np.abs(c[:, 1]) < 1.0) & ((np.abs(c[:, 0] + 2) < 1.0)
+                                     | (np.abs(c[:, 0] - 2) < 1.0))
+    strip = plane.extract_cells(np.where(~hole)[0]).extract_surface()
+    tri = np.asarray(strip.faces).reshape(-1, 4)[:, 1:]
+    a, b = al.LA.regions["LSPV"], al.LA.regions["LIPV"]
+    tags = np.full(strip.n_cells, al.LA.body)
+    tags[band_faces(strip, (-2.0, 0.0, 0.0), 4.0)[0]] = a
+    strip.cell_data["elemTag"] = tags
+    editor = ManualEditor(mesh=strip, plotter=None, active_label=b)
+    editor._pending = {int(np.argmin(np.linalg.norm(
+        np.asarray(strip.cell_centers().points) - (2.0, 0.0, 0.0), axis=1)))}
+    assert editor.band_at_pending(4.0) > 0
+    out = np.asarray(strip.cell_data["elemTag"])
+    assert (out == a).sum() == (tags == a).sum()          # LSPV untouched
+    assert _shared_vertices(tri, out, (a, b)) == 0

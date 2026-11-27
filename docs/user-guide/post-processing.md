@@ -291,6 +291,17 @@ with a third as many boundary vertices. That is sometimes exactly what you
 want; it is never what you want by accident, which is why it is off by
 default.
 
+### Keep the interface with the source mesh
+
+Offered on chambers taken out with **Extract chambers**, and ticked by
+default there. The nodes and faces they share with the rest of the source
+mesh (the other chambers, the caps and valves) stay exactly where they are;
+with **Adapt the boundary too**, the rest of the surface is still remeshed.
+The remeshed chambers then fit back into the source mesh with
+[Merge into source mesh](atrial-surfaces.md#remeshing-an-extracted-atrium).
+On the left atrium of a four-chamber mesh, all 7,275 interface nodes came
+back where they were.
+
 ### What happens to the fields
 
 MMG carries an integer reference per element through the adaptation, so the

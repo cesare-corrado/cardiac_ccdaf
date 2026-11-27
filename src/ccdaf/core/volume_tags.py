@@ -50,7 +50,7 @@ from ccdaf.core import tag_map
 from ccdaf.core.atrial_surfaces import ENDO_OF
 from ccdaf.core.chamber_extract import OPENING_FIELD, _shared_faces
 from ccdaf.core.laplace import DirichletSystem, stiffness_matrix
-from ccdaf.core.opening_band import boundary_loops, loop_band
+from ccdaf.core.opening_band import boundary_loops, keep_apart, loop_band
 from ccdaf.core.surface_labels import (
     LABEL_MASK_FIELD, face_labels_from_mask,
 )
@@ -181,11 +181,12 @@ def band_openings(endo: pv.PolyData, mapping: Optional[Mapping[int, object]],
         dist[i, faces] = _face_distance(endo, tri, loops[name])[faces]
     near = dist.argmin(0)
     inside = np.isfinite(dist.min(0))
-    counts: Dict[str, int] = {}
     for i, name in enumerate(names):
-        mine = inside & (near == i)
-        tags[mine] = own.regions[name]
-        counts[name] = int(mine.sum())
+        tags[inside & (near == i)] = own.regions[name]
+    # Two openings closer than twice the width meet halfway: keep a
+    # corridor of body between them (see opening_band.keep_apart).
+    keep_apart(tri, tags, own.regions.values(), own.body)
+    counts = {name: int(np.sum(tags == own.regions[name])) for name in names}
     endo.cell_data["elemTag"] = tags
     return counts
 
