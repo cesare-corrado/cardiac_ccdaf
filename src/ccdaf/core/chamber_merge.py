@@ -41,6 +41,21 @@ tag that the tagging put in a vein takes the tag of that vein's tissue.
 Any other element keeps its tag, including a layer such as the
 interatrial bundle where it lies in a vein's region; so does a region
 with no tag in the source mesh.
+
+Remeshed chambers
+-----------------
+Chambers remeshed with their interface fixed
+(:class:`ccdaf.core.volume_postprocessor.RemeshOptions` ``fix_interface``)
+have new elements, so nothing is matched element by element. Instead the
+elements they were extracted from (the field data ``sourceCells``) are
+removed from the source mesh and the remeshed ones put in their place,
+joined at the interface nodes, which must all be where they were. Every
+face the removed elements shared with the rest of the mesh must be a
+boundary face of the remeshed chambers, so the result is conforming. Nodes
+no element uses any more are dropped, which renumbers the mesh: it is a
+new mesh, and chambers extracted from the old one no longer match it by
+their ids (they still match by coordinates where their elements survive).
+Fields and tags are written as above, on the new elements.
 """
 from __future__ import annotations
 
@@ -51,7 +66,9 @@ import numpy as np
 import pyvista as pv
 
 from ccdaf.core import atrial_labels, tag_map
-from ccdaf.core.chamber_extract import SOURCE_CELL, SOURCE_POINT
+from ccdaf.core.chamber_extract import (
+    INTERFACE, SOURCE_CELL, SOURCE_CELLS, SOURCE_POINT, _shared_faces,
+)
 from ccdaf.core.volume_mesh import tetrahedra
 
 #: Cell field and field-data entry the volume tagging keeps the source
@@ -63,7 +80,7 @@ NOT_COMPUTED: int = -32000
 
 #: Fields that describe the extracted chambers alone.
 _SKIP = frozenset({
-    SOURCE_POINT, SOURCE_CELL, SOURCE_TAG, "elemTag", "openingTag",
+    SOURCE_POINT, SOURCE_CELL, SOURCE_TAG, INTERFACE, "elemTag", "openingTag",
     "surfaceLabelMask", "surfaceLabel", "volumeNode", "volumeCell",
     "vtkOriginalPointIds", "vtkOriginalCellIds", "render_idx",
 })
@@ -94,12 +111,24 @@ class Merge:
     no_tag: Dict[str, int] = field(default_factory=dict)
     #: Elements whose source tag no longer matches the mesh's.
     tag_mismatch: int = 0
+    #: Replacing: elements removed, and the volume they and their
+    #: replacement enclose.
+    removed: int = 0
+    volume_removed: float = 0.0
+    volume_added: float = 0.0
 
     def summary(self) -> str:
-        how = ("their stored ids" if self.method == "ids"
-               else "their coordinates")
-        lines = [f"Merged {self.n_cells:,} elements and {self.n_points:,} "
-                 f"points, found by {how}."]
+        if self.method == "replaced":
+            change = (100.0 * (self.volume_added - self.volume_removed)
+                      / self.volume_removed if self.volume_removed else 0.0)
+            lines = [f"Replaced {self.removed:,} elements with the "
+                     f"{self.n_cells:,} remeshed ones, joined at the interface "
+                     f"(volume {change:+.2f}%)."]
+        else:
+            how = ("their stored ids" if self.method == "ids"
+                   else "their coordinates")
+            lines = [f"Merged {self.n_cells:,} elements and {self.n_points:,} "
+                     f"points, found by {how}."]
         names = self.point_fields + self.cell_fields
         lines.append("Fields written: " + (", ".join(names) or "none") + ".")
         if self.kept_nodes:
@@ -270,13 +299,17 @@ def merge_into(source, part) -> Merge:
         raise MergeError(str(exc)) from exc
     if len(src_tets) != source.n_cells or len(part_tets) != part.n_cells:
         raise MergeError("both meshes must hold tetrahedra only")
-    if len(part_tets) > len(src_tets):
-        raise MergeError("the chambers have more elements than the mesh")
-
     found = _by_ids(source, part, src_tets, part_tets)
     method = "ids"
     if found is None:
-        found = _by_coordinates(source, part, src_tets, part_tets)
+        try:
+            if len(part_tets) > len(src_tets):
+                raise MergeError("the chambers have more elements than the mesh")
+            found = _by_coordinates(source, part, src_tets, part_tets)
+        except MergeError:
+            if SOURCE_CELLS not in part.field_data:
+                raise
+            return _replace(source, part, src_tets, part_tets)
         method = "coordinates"
     pid, cid = found
     if len(np.unique(cid)) != len(cid):
@@ -334,6 +367,157 @@ def merge_into(source, part) -> Merge:
                 tag_map.write(grid, tag_map.read(part))
         grid.cell_data["elemTag"] = tags
         grid.set_active_scalars("elemTag", preference="cell")
+    return merge
+
+
+def _volumes(points: np.ndarray, tets: np.ndarray) -> np.ndarray:
+    a, b, c, d = (points[tets[:, i]] for i in range(4))
+    return np.abs(np.einsum("ij,ij->i", np.cross(b - a, c - a), d - a)) / 6.0
+
+
+def _fill(n: int, like: np.ndarray) -> np.ndarray:
+    shape = (n,) + like.shape[1:]
+    if like.dtype.kind == "f":
+        return np.full(shape, np.nan, dtype=like.dtype)
+    return np.full(shape, NOT_COMPUTED, dtype=np.result_type(like.dtype, np.int32))
+
+
+def _joined(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> Optional[np.dtype]:
+    arrays = [x for x in (a, b) if x is not None]
+    if not arrays or any(x.dtype.kind not in "biuf" for x in arrays):
+        return None
+    if len(arrays) == 2 and a.shape[1:] != b.shape[1:]:
+        return None
+    return np.result_type(*arrays)
+
+
+def _replace(source, part, src_tets: np.ndarray, part_tets: np.ndarray) -> Merge:
+    """Put remeshed *part* in place of the elements it was extracted from;
+    see the module docstring."""
+    from scipy.spatial import cKDTree
+
+    old = np.unique(np.asarray(part.field_data[SOURCE_CELLS]).astype(np.int64))
+    if len(old) == 0 or old.min() < 0 or old.max() >= len(src_tets):
+        raise MergeError("the chambers were not extracted from this mesh")
+    removed = np.zeros(len(src_tets), dtype=bool)
+    removed[old] = True
+    S = np.asarray(source.points, dtype=float)
+    P = np.asarray(part.points, dtype=float)
+
+    # The interface: nodes the removed elements share with the kept ones.
+    in_kept = np.zeros(source.n_points, dtype=bool)
+    in_kept[src_tets[~removed].ravel()] = True
+    in_old = np.zeros(source.n_points, dtype=bool)
+    in_old[src_tets[removed].ravel()] = True
+    iface = np.where(in_kept & in_old)[0]
+    to_src = np.full(len(P), -1, dtype=np.int64)
+    if len(iface):
+        dist, j = cKDTree(S[iface]).query(P)
+        hit = dist <= _tolerance(S)
+        to_src[hit] = iface[j[hit]]
+    found = np.zeros(source.n_points, dtype=bool)
+    found[to_src[to_src >= 0]] = True
+    lost = int(np.sum(~found[iface]))
+    if lost:
+        raise MergeError(f"{lost:,} of {len(iface):,} interface nodes are not "
+                         "where they were: remesh with the interface fixed, "
+                         "from chambers extracted from this mesh.")
+
+    # Each face between removed and kept elements must close the new tissue.
+    faces, a, b = _shared_faces(src_tets)
+    between = removed[a] != removed[b]
+    part_faces = np.sort(np.concatenate([part_tets[:, [0, 1, 2]], part_tets[:, [0, 1, 3]],
+                                         part_tets[:, [0, 2, 3]], part_tets[:, [1, 2, 3]]]), 1)
+    mapped = to_src[part_faces]
+    mapped = np.sort(mapped[(mapped >= 0).all(1)], 1)
+    need = faces[between]
+    if len(need):
+        both = np.concatenate([np.unique(mapped, axis=0), need])
+        _u, count = np.unique(both, axis=0, return_counts=True)
+        missing = len(need) - int(np.sum(count == 2))
+        if missing:
+            raise MergeError(f"{missing:,} faces between the chambers and the "
+                             "rest of the mesh are not on the remeshed "
+                             "chambers: the result would not be conforming.")
+
+    # Points: the source's, then the new ones; tets: kept, then new.
+    new = to_src < 0
+    index = to_src.copy()
+    index[new] = source.n_points + np.arange(int(new.sum()))
+    points = np.vstack([S, P[new]])
+    kept_tets = src_tets[~removed]
+    tets = np.vstack([kept_tets, index[part_tets]])
+    used = np.zeros(len(points), dtype=bool)
+    used[tets.ravel()] = True
+    remap = np.cumsum(used) - 1
+    grid = pv.UnstructuredGrid({pv.CellType.TETRA: remap[tets]}, points[used])
+
+    n_kept = len(kept_tets)
+    merge = Merge(grid=grid, method="replaced", n_points=len(P),
+                  n_cells=len(part_tets), removed=int(removed.sum()),
+                  volume_removed=float(_volumes(S, src_tets[removed]).sum()),
+                  volume_added=float(_volumes(P, part_tets).sum()))
+
+    # Point fields: source values on its nodes, the chambers' on theirs; an
+    # interface node keeps a value already there.
+    on_iface = ~new
+    kept_nodes = np.zeros(len(P), dtype=bool)
+    names = [n for n in dict.fromkeys(list(source.point_data.keys())
+                                      + list(part.point_data.keys()))
+             if n not in _SKIP]
+    for name in names:
+        a_src = np.asarray(source.point_data[name]) if name in source.point_data else None
+        a_part = np.asarray(part.point_data[name]) if name in part.point_data else None
+        dtype = _joined(a_src, a_part)
+        if dtype is None:
+            continue
+        out = _fill(len(points), (a_src if a_src is not None else a_part).astype(dtype))
+        if a_src is not None:
+            out[:source.n_points] = a_src
+        if a_part is not None:
+            keep = on_iface & ~_empty(out[index])
+            kept_nodes |= keep
+            out[index[~keep]] = a_part[~keep]
+            merge.point_fields.append(name)
+        grid.point_data[name] = out[used]
+    merge.kept_nodes = int(kept_nodes.sum())
+
+    names = [n for n in dict.fromkeys(list(source.cell_data.keys())
+                                      + list(part.cell_data.keys()))
+             if n not in _SKIP]
+    for name in names:
+        a_src = np.asarray(source.cell_data[name]) if name in source.cell_data else None
+        a_part = np.asarray(part.cell_data[name]) if name in part.cell_data else None
+        dtype = _joined(a_src, a_part)
+        if dtype is None:
+            continue
+        out = _fill(len(tets), (a_src if a_src is not None else a_part).astype(dtype))
+        if a_src is not None:
+            out[:n_kept] = a_src[~removed]
+        if a_part is not None:
+            out[n_kept:] = a_part
+            merge.cell_fields.append(name)
+        grid.cell_data[name] = out
+
+    if "elemTag" in source.cell_data:
+        base = np.asarray(source.cell_data["elemTag"])
+        named = _source_map(source, part)
+        if SOURCE_TAG in part.cell_data and named:
+            new_tags = np.asarray(part.cell_data[SOURCE_TAG]).astype(base.dtype)
+            _retag(merge, new_tags, np.arange(len(part_tets)),
+                   np.asarray(part.cell_data["elemTag"]).astype(int),
+                   new_tags.astype(int).copy(), named)
+            merge.tag_mismatch = 0
+        else:
+            new_tags = np.asarray(part.cell_data["elemTag"]).astype(base.dtype)
+        grid.cell_data["elemTag"] = np.concatenate([base[~removed], new_tags])
+        grid.set_active_scalars("elemTag", preference="cell")
+    for name in source.field_data.keys():
+        grid.field_data[name] = source.field_data[name]
+    if not tag_map.read(grid):
+        named = _source_map(source, part) or tag_map.read(part)
+        if named:
+            tag_map.write(grid, named)
     return merge
 
 

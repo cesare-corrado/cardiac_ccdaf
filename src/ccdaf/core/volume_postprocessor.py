@@ -53,6 +53,24 @@ back at machine zero and the surface area was unchanged. Letting the
 surface adapt is a genuinely different operation — the same mesh moved by
 up to 1.5 mm, half a millimetre on average, and lost a third of its
 boundary vertices — so it is opt-in, and the caller is expected to say so.
+
+Interface with a source mesh
+----------------------------
+Tissue extracted from a larger mesh (:mod:`ccdaf.core.chamber_extract`)
+touches the tissue left behind at its *interface*, recorded on its nodes.
+``fix_interface`` keeps that interface exactly: its nodes and the boundary
+faces on it are passed to MMG as required, and the rest of the boundary
+and the interior adapt. The remeshed tissue then fits back into the source
+mesh (:func:`ccdaf.core.chamber_merge.merge_into` replaces the old
+elements). Measured on the left atrium of a four-chamber mesh: all 7,275
+interface nodes came back at machine zero.
+
+The ids into the source mesh survive where they still mean something: a
+node that comes back where it was keeps its id, its interface flag and its
+rim tag; a new node has none. The element ids do not survive (every
+element is new), but the list of extracted elements does, so the merge
+knows what to replace. The source tags of a region-tagged volume ride with
+``elemTag`` as part of the MMG reference, so they come back exact too.
 """
 from __future__ import annotations
 
@@ -62,6 +80,10 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 import pyvista as pv
 
+from ccdaf.core import tag_map
+from ccdaf.core.chamber_extract import (
+    INTERFACE, OPENING_FIELD, SOURCE_CELL, SOURCE_CELLS, SOURCE_POINT,
+)
 from ccdaf.core.field_transfer import transfer_volume_fields
 from ccdaf.core.volume_mesh import (
     TETRA, boundary_surface, orient_positive, tetrahedra, validate_tetrahedral,
@@ -69,6 +91,16 @@ from ccdaf.core.volume_mesh import (
 
 #: The cell array carried across as MMG element references.
 TAG_FIELD = "elemTag"
+#: The previous tags of a region-tagged volume; carried with TAG_FIELD.
+SOURCE_TAG = "sourceTag"
+
+#: Field data that describes where the tissue came from, not its elements,
+#: and so stays true through a remesh.
+_KEPT_FIELD_DATA = (SOURCE_CELLS, tag_map.FIELD, "sourceTagMap")
+
+#: Point fields carried between coincident nodes only, with the value a
+#: new node takes.
+_ID_POINT_FIELDS = {SOURCE_POINT: -1, INTERFACE: 0, OPENING_FIELD: 0}
 
 #: Boundary tolerance, as a fraction of the element size, used when the
 #: caller adapts the boundary without naming one.
@@ -116,6 +148,10 @@ class RemeshOptions:
     #: Freeze the boundary, adapting only the interior. See the module
     #: docstring for why this is the default.
     freeze_boundary: bool = True
+    #: Keep the interface with the source mesh exactly (needs the
+    #: ``sourceInterface`` field extraction writes); the rest of the
+    #: boundary adapts unless ``freeze_boundary``.
+    fix_interface: bool = False
 
     def validate(self) -> None:
         if any(v < 0.0 for v in (self.target_edge, self.min_edge,
@@ -192,7 +228,7 @@ def _mean_edge(grid) -> float:
     return float(lengths.mean())
 
 
-def _to_mmg(grid):
+def _to_mmg(grid, fix_interface: bool = False):
     """Build an ``MmgMesh3D`` from *grid*; return it and the tag values.
 
     The boundary triangles are supplied explicitly. MMG needs them to
@@ -216,7 +252,16 @@ def _to_mmg(grid):
     triangles = origin_ids[faces].astype(np.int32)
 
     if TAG_FIELD in grid.cell_data:
-        refs, values = encode_tags(np.asarray(grid.cell_data[TAG_FIELD]))
+        tags = np.asarray(grid.cell_data[TAG_FIELD])
+        if SOURCE_TAG in grid.cell_data:
+            # Both labellings in one reference: each (tag, source tag) pair
+            # is one code, so both come back exact.
+            pairs = np.stack([tags, np.asarray(grid.cell_data[SOURCE_TAG])
+                              .astype(tags.dtype)], axis=1)
+            values, codes = np.unique(pairs, axis=0, return_inverse=True)
+            refs = (codes.ravel() + 1).astype(np.int32)
+        else:
+            refs, values = encode_tags(tags)
     else:
         refs = np.ones(len(tets), dtype=np.int32)
         values = None
@@ -226,6 +271,14 @@ def _to_mmg(grid):
     mesh.set_vertices(points, np.zeros(len(points), dtype=np.int32))
     mesh.set_tetrahedra(tets.astype(np.int32), refs)
     mesh.set_triangles(triangles, np.ones(len(triangles), dtype=np.int32))
+    if fix_interface:
+        if INTERFACE not in grid.point_data:
+            raise ValueError("this volume has no recorded interface: extract "
+                             "it from its source mesh first")
+        on = np.asarray(grid.point_data[INTERFACE]) > 0
+        mesh.set_required_vertices(np.where(on)[0].astype(np.int32))
+        mesh.set_required_triangles(
+            np.where(on[triangles].all(1))[0].astype(np.int32))
     return mesh, values
 
 
@@ -249,7 +302,12 @@ def _from_mmg(mesh, values: Optional[np.ndarray],
 
     out = pv.UnstructuredGrid({TETRA: tets}, points)
     if values is not None:
-        out.cell_data[TAG_FIELD] = decode_tags(np.asarray(refs), values)
+        decoded = decode_tags(np.asarray(refs), values)
+        if decoded.ndim == 2:
+            out.cell_data[TAG_FIELD] = decoded[:, 0]
+            out.cell_data[SOURCE_TAG] = decoded[:, 1]
+        else:
+            out.cell_data[TAG_FIELD] = decoded
     return out
 
 
@@ -304,7 +362,7 @@ def remesh(grid,
     if on_status is not None:
         on_status(f"Remeshing {source.n_cells} tetrahedra…")
 
-    mesh, values = _to_mmg(source)
+    mesh, values = _to_mmg(source, options.fix_interface)
     sent = options.as_mmg_options()
     if not options.freeze_boundary and "hausd" not in sent:
         # Never left to MMG — see HAUSDORFF_FRACTION.
@@ -328,8 +386,10 @@ def remesh(grid,
     # elemTag came back exactly, as references. Everything else has to be
     # carried, and re-deriving the labels by proximity would only make
     # them worse.
-    transfer_volume_fields(source, result, exclude={TAG_FIELD},
+    carried = {TAG_FIELD, SOURCE_TAG, SOURCE_CELL, *_ID_POINT_FIELDS}
+    transfer_volume_fields(source, result, exclude=carried,
                            on_status=on_status)
+    _carry_ids(source, result, on_status)
 
     if on_status is not None:
         quality = ""
@@ -340,6 +400,38 @@ def remesh(grid,
         on_status(f"Remeshed {source.n_cells} → {result.n_cells} "
                   f"tetrahedra{quality}.")
     return result
+
+
+def _carry_ids(source, result, on_status=None) -> None:
+    """The source-mesh ids and flags of the nodes that stayed put, and the
+    field data that stays true; see the module docstring. In place."""
+    for name in _KEPT_FIELD_DATA:
+        if name in source.field_data:
+            result.field_data[name] = source.field_data[name]
+    names = [n for n in _ID_POINT_FIELDS if n in source.point_data]
+    if not names and SOURCE_CELL not in source.cell_data:
+        return
+    from scipy.spatial import cKDTree
+
+    src_points = np.asarray(source.points, dtype=float)
+    tol = 1e-9 * max(float(np.linalg.norm(np.ptp(src_points, axis=0))), 1e-300)
+    distance, near = cKDTree(src_points).query(np.asarray(result.points),
+                                               k=1, workers=-1)
+    same = distance <= tol
+    for name in names:
+        values = np.asarray(source.point_data[name])
+        out = np.full(result.n_points, _ID_POINT_FIELDS[name], dtype=values.dtype)
+        out[same] = values[near[same]]
+        result.point_data[name] = out
+    if SOURCE_CELL in source.cell_data:
+        # Every element is new; the list of extracted ones is field data.
+        result.cell_data[SOURCE_CELL] = np.full(result.n_cells, -1, dtype=np.int64)
+    if INTERFACE in source.point_data and on_status is not None:
+        lost = (int(np.sum(np.asarray(source.point_data[INTERFACE]) > 0))
+                - int(np.sum(np.asarray(result.point_data[INTERFACE]) > 0)))
+        if lost:
+            on_status(f"{lost} interface nodes moved: this volume no longer "
+                      "fits its source mesh.")
 
 
 __all__ = ["RemeshOptions", "remesh", "encode_tags", "decode_tags",

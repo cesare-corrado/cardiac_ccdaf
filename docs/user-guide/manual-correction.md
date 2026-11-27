@@ -63,6 +63,11 @@ Every triangle within the width of that opening's edge, measured along the
 surface, takes the label. The pick only says which opening: it need not lie
 on the edge. Undo works as for any other edit.
 
+Where the band would touch another vein (two openings closer than twice the
+width), its triangles at the shared vertices go back to the body, as **Fill
+Holes** does: a corridor of body one triangle wide keeps the two veins
+apart, and the vein already there is left as it was.
+
 ## Cleanup & smoothing
 
 Both act on the whole mesh rather than on a picked batch, so they are available

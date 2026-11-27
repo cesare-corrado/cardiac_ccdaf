@@ -25,7 +25,9 @@ import pytest
 import pyvista as pv
 
 from ccdaf.core import tag_map
-from ccdaf.core.chamber_extract import SOURCE_CELL, SOURCE_POINT, extract_chambers
+from ccdaf.core.chamber_extract import (
+    SOURCE_CELL, SOURCE_CELLS, SOURCE_POINT, extract_chambers,
+)
 from ccdaf.core.chamber_merge import NOT_COMPUTED, MergeError, merge_into
 
 NAMES = tag_map.from_json({
@@ -128,14 +130,19 @@ def test_wrong_ids_fall_back_to_coordinates():
     assert merge_into(bar, la).method == "coordinates"
 
 
-def test_a_moved_point_is_refused():
+def test_a_moved_interface_point_is_refused():
     bar = _bar()
     la = _extract(["LA"])
     pts = np.asarray(la.points).copy()
     pts[0] += 0.3
     la.points = pts
-    with pytest.raises(MergeError, match="not in this mesh"):
+    # pts[0] is on the interface, so the remeshed reading fails as well.
+    with pytest.raises(MergeError, match="not where they were"):
         merge_into(bar, la)
+    bare = la.copy()
+    del bare.field_data[SOURCE_CELLS]
+    with pytest.raises(MergeError, match="not in this mesh"):
+        merge_into(bar, bare)
 
 
 def test_shared_nodes_keep_the_first_atriums_values():
@@ -200,3 +207,98 @@ def test_untagged_chambers_leave_the_tags_alone():
     m = merge_into(bar, la)
     assert np.array_equal(m.grid.cell_data["elemTag"], bar.cell_data["elemTag"])
     assert m.tag_mismatch == 0 and not m.retagged
+
+
+# ---------------------------------------------------------------------
+# Remeshed chambers: replaced, joined at the interface
+# ---------------------------------------------------------------------
+from ccdaf.core.chamber_extract import INTERFACE  # noqa: E402
+from ccdaf.core.volume_mesh import tetrahedra  # noqa: E402
+from ccdaf.core.volume_postprocessor import RemeshOptions, remesh  # noqa: E402
+
+
+def _faces(tets):
+    f = np.sort(np.concatenate([tets[:, [0, 1, 2]], tets[:, [0, 1, 3]],
+                                tets[:, [0, 2, 3]], tets[:, [1, 2, 3]]]), 1)
+    return np.unique(f, axis=0, return_counts=True)
+
+
+def _volume(grid):
+    return float(grid.compute_cell_sizes(length=False, area=False)
+                 .cell_data["Volume"].sum())
+
+
+def test_extraction_records_the_interface_and_the_elements():
+    bar = _bar()
+    la = _extract(["LA"])
+    on = np.asarray(la.point_data[INTERFACE]) > 0
+    x = np.asarray(la.points)[:, 0]
+    # The LA touches the LV at x = 5, and the RA where the bundle is split.
+    assert on.any() and set(np.round(x[on])) == {5, 20}
+    cells = np.asarray(la.field_data[SOURCE_CELLS])
+    assert np.array_equal(cells, np.sort(la.cell_data[SOURCE_CELL]))
+    assert len(cells) < bar.n_cells
+
+
+@pytest.fixture(scope="module")
+def remeshed():
+    la = _extract(["LA"])
+    la.cell_data["v"] = np.ones(la.n_cells)
+    out = remesh(la, RemeshOptions(target_edge=0.6, freeze_boundary=False,
+                                   fix_interface=True))
+    return la, out
+
+
+def test_a_remesh_keeps_the_interface_exactly(remeshed):
+    la, out = remeshed
+    assert out.n_cells > la.n_cells
+    on = np.asarray(la.point_data[INTERFACE]) > 0
+    back = np.asarray(out.point_data[INTERFACE]) > 0
+    assert back.sum() == on.sum()
+    assert np.array_equal(np.sort(np.asarray(out.point_data[SOURCE_POINT])[back]),
+                          np.sort(np.asarray(la.point_data[SOURCE_POINT])[on]))
+    assert (np.asarray(out.cell_data[SOURCE_CELL]) == -1).all()
+    assert np.array_equal(out.field_data[SOURCE_CELLS], la.field_data[SOURCE_CELLS])
+
+
+def test_remeshed_chambers_replace_their_elements(remeshed):
+    bar = _bar()
+    la, out = remeshed
+    m = merge_into(bar, out)
+    assert m.method == "replaced" and m.removed == la.n_cells
+    g = m.grid
+    _u, count = _faces(tetrahedra(g))
+    assert count.max() <= 2                                  # conforming
+    _u0, count0 = _faces(tetrahedra(bar))
+    assert np.isclose(_volume(g), _volume(bar), rtol=1e-6)
+    # The other chambers are untouched, element for element.
+    tags = np.asarray(g.cell_data["elemTag"])
+    for t in (1, 4):
+        assert (tags == t).sum() == (np.asarray(bar.cell_data["elemTag"]) == t).sum()
+    assert (tags == 3).sum() > (np.asarray(bar.cell_data["elemTag"]) == 3).sum()
+    # A field only the chambers had reads "not computed" elsewhere.
+    v = np.asarray(g.cell_data["v"])
+    assert (v[tags == 3] == 1).all() and np.isnan(v[tags == 1]).all()
+    assert "Replaced" in m.summary()
+    # Extracting again gives the remeshed LA back; the shared bundle is split
+    # afresh on the new elements, so a few of its may change side.
+    again = extract_chambers(g, NAMES, ["LA"]).grid
+    own = np.asarray(out.cell_data["elemTag"]) != 26
+    assert (np.asarray(again.cell_data["elemTag"]) != 26).sum() == own.sum()
+    assert abs(again.n_cells - out.n_cells) < 0.01 * out.n_cells
+
+
+def test_a_moved_interface_is_refused():
+    la = _extract(["LA"])
+    out = remesh(la, RemeshOptions(target_edge=0.6, freeze_boundary=False))
+    with pytest.raises(MergeError, match="interface nodes"):
+        merge_into(_bar(), out)
+
+
+def test_source_tags_ride_through_the_remesh_exactly():
+    la, src, _x0 = _tagged_la(_bar())
+    out = remesh(la, RemeshOptions(target_edge=0.6, fix_interface=True))
+    pairs_before = set(zip(np.asarray(la.cell_data["elemTag"]).tolist(), src.tolist()))
+    pairs_after = set(zip(np.asarray(out.cell_data["elemTag"]).tolist(),
+                          np.asarray(out.cell_data["sourceTag"]).tolist()))
+    assert pairs_after <= pairs_before

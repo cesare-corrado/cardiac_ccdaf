@@ -135,6 +135,14 @@ on the endocardium and then carried into the wall.
    its whole cut edge too, so it wraps round its circumference and cannot
    take the next vein's edge. On a clipped vein that growth reaches too far
    into the body, which is why the band comes first.
+   Two openings closer than twice the band width would meet halfway, on a
+   line of shared vertices; the band triangles at those vertices go back to
+   the body, which keeps a corridor one triangle wide between the veins (on
+   one four-chamber mesh, 40 of the LSPV and LIPV bands' 697 triangles).
+   Where the openings are only about two rim edges apart, the corridor
+   reaches the rim and a few of its triangles are body (9 of 287 there,
+   after a 0.7 mm remesh). The UAC are unaffected: on that mesh they had 0
+   folded triangles with and without the corridor.
 4. Correct as usual (see [Manual correction](manual-correction.md)): every
    tool works, including **Band at opening** for a vein clipped at its
    ostium. Press **Accept tagging** when done; it gives any triangle left
@@ -219,6 +227,42 @@ tag:
 The report gives each count. On a Zenodo mesh, the left atrium's merge
 retagged 11,539 body elements to the veins and the appendage, and left
 151,093 as body.
+
+## Remeshing an extracted atrium
+
+An atrium can be remeshed on its own and put back, for example to refine it
+where two veins are less than an element apart. On one four-chamber mesh
+the LSPV and LIPV openings are 1.5 mm apart on the wall, about one element,
+so only a one-triangle corridor of body fits between their bands; at
+0.5 mm the strip between them is three elements wide.
+
+1. **Extract chambers…**, choosing the atrium.
+2. **Remesh volume** (see [Post-processing](post-processing.md#keep-the-interface-with-the-source-mesh))
+   with **Adapt the boundary too** and **Keep the interface with the source
+   mesh** ticked. The faces the atrium shares with the rest of the heart
+   stay where they are; the endocardium and the rest of the epicardium are
+   remeshed.
+3. **Merge into source mesh…**, choosing the four-chamber file. The old
+   atrial elements are removed and the remeshed ones put in their place,
+   joined at the interface. The result is a new four-chamber mesh.
+4. Save it, and continue from there: **Extract chambers…** again, then
+   label, tag, and compute as usual.
+
+The merge refuses an atrium whose interface moved (remeshed without the
+option, or from another mesh), and checks that every face between the old
+atrium and the rest of the heart is on the remeshed atrium, so the result
+is conforming. The report gives the change in volume (+0.01% on the
+four-chamber mesh above, where the remesh took the atrium from 223,067 to
+785,158 elements).
+
+Two things to know:
+
+- **The mesh is renumbered.** Nodes only the old atrium used are dropped,
+  so atria extracted from the old four-chamber mesh no longer match the new
+  one by their ids. Extract again from the new mesh.
+- **A tag shared by both atria is split again** when you extract from the
+  new mesh, on its new elements, so a few of its elements can change side
+  (271 of 193,717 on the mesh above).
 
 ## Measured accuracy
 

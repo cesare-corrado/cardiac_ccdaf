@@ -130,7 +130,7 @@ from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
 from ccdaf.gui.atrial_labels_dialog import AtrialLabelsDialog
 from ccdaf.gui.chamber_extract_dialog import ChamberExtractDialog
 from ccdaf.core.chamber_extract import (
-    SOURCE_CELL, SOURCE_POINT, available_chambers, extract_chambers,
+    INTERFACE, SOURCE_CELL, SOURCE_POINT, available_chambers, extract_chambers,
 )
 from ccdaf.core.chamber_merge import MergeError, merge_into
 from ccdaf.core import volume_tags
@@ -230,7 +230,7 @@ CATEGORICAL_FIELDS = ("elemTag", TISSUE_TAG, LABEL_FIELD, LABEL_MASK_FIELD,
 # from an endocardium back to its volume, and the openings' cap tags (an
 # integer per node, which draws as a meaningless smooth ramp).
 HIDDEN_COLOUR_FIELDS = (LABEL_MASK_FIELD, "volumeNode", "volumeCell",
-                        "openingTag", SOURCE_POINT, SOURCE_CELL)
+                        "openingTag", SOURCE_POINT, SOURCE_CELL, INTERFACE)
 
 # EAM scalar bar: horizontal, along the bottom. Sizes are fractions of the
 # viewport, so the height giving a 20:1 bar on screen depends on the window's
@@ -3923,6 +3923,10 @@ class CCDAF(QtWidgets.QMainWindow):
             can_merge, merge_why = True, ""
         self.act_merge_chambers.setEnabled(can_merge)
         self.act_merge_chambers.setToolTip(merge_why)
+        if getattr(self, "volume_postproc", None) is not None:
+            self.volume_postproc.set_interface_available(
+                self.loader.kind == VOLUME and self.loader.grid is not None
+                and INTERFACE in self.loader.grid.point_data)
 
         # Fibres need the labels as well as the volume.
         if self._seg_array is not None:

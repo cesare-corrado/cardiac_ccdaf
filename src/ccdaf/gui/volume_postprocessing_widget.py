@@ -340,6 +340,19 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
         self.chk_adapt_boundary.toggled.connect(self._sync_boundary_gate)
         remesh.addWidget(self.chk_adapt_boundary)
 
+        self.chk_fix_interface = QtWidgets.QCheckBox(
+            "Keep the interface with the source mesh")
+        self.chk_fix_interface.setToolTip(_tip(
+            "For chambers taken out with Extract chambers: the nodes and "
+            "faces they share with the rest of the source mesh stay exactly "
+            "where they are, so the remeshed chambers fit back in "
+            "(Actions &gt; Merge into source mesh…).",
+            "With the boundary adapting, the rest of the surface (the "
+            "endocardium, the free epicardium) is still remeshed.",
+        ))
+        self.chk_fix_interface.setEnabled(False)
+        remesh.addWidget(self.chk_fix_interface)
+
         self.btn_apply = QtWidgets.QPushButton("Remesh volume")
         self.btn_apply.setToolTip(
             "Adapt the tetrahedra to the sizes above. The mesh is replaced; "
@@ -471,7 +484,17 @@ class VolumePostprocessingWidget(QtWidgets.QGroupBox):
             hausdorff=float(self.spn_hausdorff.value()) if adapting else 0.0,
             gradation=float(self.spn_gradation.value()) if adapting else 0.0,
             freeze_boundary=not adapting,
+            fix_interface=self.chk_fix_interface.isChecked(),
         )
+
+    def set_interface_available(self, available: bool) -> None:
+        """Offer the interface option only on extracted chambers; ticked
+        by default when it first becomes available."""
+        if available and not self.chk_fix_interface.isEnabled():
+            self.chk_fix_interface.setChecked(True)
+        if not available:
+            self.chk_fix_interface.setChecked(False)
+        self.chk_fix_interface.setEnabled(available)
 
     def clean_options(self) -> CleanOptions:
         # The weld limit is not sent while the repair is off: a value in
