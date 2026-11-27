@@ -171,6 +171,55 @@ with their names.
     chambers still needs tagging, and why the seeds come from the caps
     rather than from the rings.
 
+## Merging back into the four-chamber mesh
+
+**Actions → Merge into source mesh…** writes what was computed on the
+extracted atrium (its regions, UAC, depth, fibres, …) back onto the same
+elements of the four-chamber mesh. Load the atrium, choose the action, and
+pick the four-chamber file it was extracted from. The merged mesh opens as
+the working mesh; save it as usual. To merge both atria, merge the left
+atrium, then merge the right atrium into the result.
+
+The atrium's elements must be the four-chamber mesh's own: an atrium that
+was remeshed or cleaned after extraction is refused, and so is a different
+mesh. Extraction stores each point's and element's id in the four-chamber
+mesh (`sourcePoint`, `sourceCell`), and the merge uses them. An atrium
+extracted before these ids were stored is matched by its coordinates
+instead, with the same result.
+
+**The fields.** Each field of the atrium is written on its elements or
+nodes.
+
+- **Same name in the four-chamber mesh** (for example `fiber` and `sheet`,
+  which the ventricles have too): one array for the whole heart. The
+  atrium's rows are replaced and the rest is unchanged.
+- **New field:** outside the atrium it reads "not computed": NaN for
+  decimal fields such as `uac_alpha`, and -32000 for integer fields such as
+  `uac_half`.
+- **Nodes shared with other tissue:** a value already there is kept. So
+  after merging the left atrium and then the right, the nodes the two atria
+  share keep the left atrium's α and β. The report says how many.
+- **Not written:** `openingTag`, `surfaceLabelMask` and `sourceTag`, which
+  describe the extracted atrium alone.
+
+**The tags.** The regions of the tagged atrium are the same entities as the
+four-chamber tags (body, vein rings, appendage ring), numbered differently,
+and the tagging moves their borders into the body. They are written into
+the four-chamber `elemTag` in its own numbering, matched by name: an
+element of the atrium's body tag (LA body, RA body) that the tagging put in
+a vein takes the tag of that vein's ring. Every other element keeps its
+tag:
+
+- a ring element the tagging left in the body;
+- a tag shared by both atria, such as the interatrial bundle, where it lies
+  in a vein's region;
+- the elements of a region with no tag in the four-chamber mesh (for
+  example the CS).
+
+The report gives each count. On a Zenodo mesh, the left atrium's merge
+retagged 11,539 body elements to the veins and the appendage, and left
+151,093 as body.
+
 ## Measured accuracy
 
 On a four-chamber mesh from each of two cohorts, the recorded rims gave one
