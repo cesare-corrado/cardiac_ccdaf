@@ -129,7 +129,10 @@ from ccdaf.core.surface_labels import (
 from ccdaf.gui.surface_labels_dialog import SurfaceLabelsDialog
 from ccdaf.gui.atrial_labels_dialog import AtrialLabelsDialog
 from ccdaf.gui.chamber_extract_dialog import ChamberExtractDialog
-from ccdaf.core.chamber_extract import available_chambers, extract_chambers
+from ccdaf.core.chamber_extract import (
+    SOURCE_CELL, SOURCE_POINT, available_chambers, extract_chambers,
+)
+from ccdaf.core.chamber_merge import MergeError, merge_into
 from ccdaf.core import volume_tags
 from ccdaf.core.uac import volume as volume_uac
 from ccdaf.core.uac import volume_fibres
@@ -227,7 +230,7 @@ CATEGORICAL_FIELDS = ("elemTag", TISSUE_TAG, LABEL_FIELD, LABEL_MASK_FIELD,
 # from an endocardium back to its volume, and the openings' cap tags (an
 # integer per node, which draws as a meaningless smooth ramp).
 HIDDEN_COLOUR_FIELDS = (LABEL_MASK_FIELD, "volumeNode", "volumeCell",
-                        "openingTag")
+                        "openingTag", SOURCE_POINT, SOURCE_CELL)
 
 # EAM scalar bar: horizontal, along the bottom. Sizes are fractions of the
 # viewport, so the height giving a 20:1 bar on screen depends on the window's
@@ -535,6 +538,12 @@ class CCDAF(QtWidgets.QMainWindow):
             "remember where their caps and valves were.")
         self.act_extract_chambers.triggered.connect(self._action_extract_chambers)
         actions_menu.addAction(self.act_extract_chambers)
+        self.act_merge_chambers = QtWidgets.QAction("Merge into source mesh…", self)
+        self.act_merge_chambers.setStatusTip(
+            "Write the fields and regions computed on extracted chambers "
+            "back onto the mesh they came from.")
+        self.act_merge_chambers.triggered.connect(self._action_merge_chambers)
+        actions_menu.addAction(self.act_merge_chambers)
         actions_menu.addSeparator()
 
         self.act_assign_tissue = QtWidgets.QAction("Assign tissue property…", self)
@@ -3906,6 +3915,14 @@ class CCDAF(QtWidgets.QMainWindow):
             can_extract, extract_why = True, ""
         self.act_extract_chambers.setEnabled(can_extract)
         self.act_extract_chambers.setToolTip(extract_why)
+        if self._seg_array is not None:
+            can_merge, merge_why = False, "Close the segmentation first."
+        elif self.loader.kind != VOLUME or self.loader.grid is None:
+            can_merge, merge_why = False, "Load the extracted chambers first."
+        else:
+            can_merge, merge_why = True, ""
+        self.act_merge_chambers.setEnabled(can_merge)
+        self.act_merge_chambers.setToolTip(merge_why)
 
         # Fibres need the labels as well as the volume.
         if self._seg_array is not None:
@@ -4279,6 +4296,35 @@ class CCDAF(QtWidgets.QMainWindow):
         QtWidgets.QApplication.restoreOverrideCursor()
         self._replace_volume(result.grid)
         self.statusBar().showMessage(result.summary())
+
+    def _action_merge_chambers(self) -> None:
+        """Actions → Merge into source mesh…: put the extracted chambers'
+        results back onto the mesh they came from."""
+        part = self.loader.grid
+        if self.loader.kind != VOLUME or part is None:
+            return
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Mesh the chambers were extracted from",
+            str(self.recent_folder), "Meshes (*.vtk *.vtu);;All files (*)")
+        if not fn:
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            reader = MeshLoader()
+            reader.load(fn)
+            if reader.kind != VOLUME:
+                raise MergeError(f"{Path(fn).name} is not a tetrahedral volume")
+            result = merge_into(reader.grid, part)
+        except (MergeError, ValueError, OSError) as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(self, "Merge into source mesh", str(exc))
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self._replace_volume(result.grid)
+        self.setWindowTitle(window_title(display_name(fn) + " (merged)"))
+        self.statusBar().showMessage(result.summary().splitlines()[0])
+        QtWidgets.QMessageBox.information(self, "Merge into source mesh",
+                                          result.summary())
 
     def _action_label_plane_edit(self, on: bool) -> None:
         """Show or remove the draggable plane for the labelling window.

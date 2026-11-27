@@ -61,6 +61,9 @@ from ccdaf.core.volume_mesh import tetrahedra
 
 #: Node field holding, for each node on a dropped cap or valve, its tag.
 OPENING_FIELD: str = "openingTag"
+#: Each point's and element's id in the mesh it was extracted from.
+SOURCE_POINT: str = "sourcePoint"
+SOURCE_CELL: str = "sourceCell"
 
 #: Chambers in the order the dialog lists them.
 CHAMBER_ORDER: Tuple[str, ...] = ("LV", "RV", "LA", "RA")
@@ -86,6 +89,8 @@ class Extraction:
     total: int
     #: For each tag shared with a chamber not kept: (kept, dropped) tets.
     split: Dict[int, Tuple[int, int]] = None
+    #: Each kept element's id in the input mesh.
+    cell_ids: np.ndarray = None
 
     def __post_init__(self) -> None:
         if self.split is None:
@@ -122,13 +127,15 @@ def _shared_faces(tets: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
 
 
 def extract_chambers(grid, mapping: Mapping[int, object],
-                     chambers: Sequence[str], *,
-                     _keep_ids: bool = False) -> Extraction:
+                     chambers: Sequence[str]) -> Extraction:
     """The tissue of *chambers* in *grid*, with its rims recorded.
 
     *grid* is a tetrahedral volume with ``elemTag``; it is not modified.
     The result keeps every cell and point array of the kept tissue, and
-    the tag map. Raises ``ValueError`` when nothing would be kept.
+    the tag map, and stores each point's and element's id in *grid*
+    (``sourcePoint``, ``sourceCell``), which
+    :func:`ccdaf.core.chamber_merge.merge_into` uses to put results back.
+    Raises ``ValueError`` when nothing would be kept.
     """
     grid = pv.wrap(grid)
     if "elemTag" not in grid.cell_data:
@@ -174,12 +181,19 @@ def extract_chambers(grid, mapping: Mapping[int, object],
 
     sub = grid.extract_cells(np.where(keep)[0])
     origin = np.asarray(sub.point_data["vtkOriginalPointIds"], dtype=np.int64)
-    for name in ("vtkOriginalPointIds",):
-        del sub.point_data[name]
-    if "vtkOriginalCellIds" in sub.cell_data:
-        if _keep_ids:
-            sub.cell_data[_SOURCE_CELL] = sub.cell_data["vtkOriginalCellIds"]
-        del sub.cell_data["vtkOriginalCellIds"]
+    del sub.point_data["vtkOriginalPointIds"]
+    local = np.asarray(sub.cell_data["vtkOriginalCellIds"], dtype=np.int64)
+    del sub.cell_data["vtkOriginalCellIds"]
+    cells = local
+    # Ids in *grid*, or, when *grid* was itself extracted, in the mesh it
+    # came from: the ids always point at the first mesh.
+    if SOURCE_POINT in grid.point_data and SOURCE_CELL in grid.cell_data:
+        point_ids = np.asarray(grid.point_data[SOURCE_POINT], dtype=np.int64)[origin]
+        cells = np.asarray(sub.cell_data[SOURCE_CELL], dtype=np.int64)
+    else:
+        point_ids = origin
+    sub.point_data[SOURCE_POINT] = point_ids
+    sub.cell_data[SOURCE_CELL] = cells
     for name in _STALE_POINT_FIELDS:
         if name in sub.point_data:
             del sub.point_data[name]
@@ -187,10 +201,7 @@ def extract_chambers(grid, mapping: Mapping[int, object],
     tag_map.write(sub, named)
     return Extraction(grid=sub, chambers=chambers, tissue_tags=tissue,
                       opening_tags=left, kept=int(keep.sum()),
-                      total=int(len(tags)), split=split)
-
-
-_SOURCE_CELL = "_sourceCell"
+                      total=int(len(tags)), split=split, cell_ids=local)
 
 
 def _lining(grid, named: tag_map.TagMap, chambers: Sequence[str],
@@ -210,12 +221,12 @@ def _lining(grid, named: tag_map.TagMap, chambers: Sequence[str],
     if not set(union) <= set(ENDO_OF):
         return {}
     try:
-        whole = extract_chambers(grid, named, union, _keep_ids=True)
+        whole = extract_chambers(grid, named, union)
         labels = label_atria(whole.grid, named)
     except ValueError:
         return {}
     surface = _as_boundary(whole.grid)
-    source = np.asarray(whole.grid.cell_data[_SOURCE_CELL], dtype=np.int64)
+    source = whole.cell_ids
     owner = source[np.asarray(surface.cell_data["vtkOriginalCellIds"],
                               dtype=np.int64)]
     return {c: np.unique(owner[labels.face_labels == key])
@@ -267,5 +278,5 @@ def _split_shared(tag: int, named: tag_map.TagMap, tags: np.ndarray,
     return out
 
 
-__all__ = ["OPENING_FIELD", "CHAMBER_ORDER", "Extraction",
+__all__ = ["OPENING_FIELD", "SOURCE_POINT", "SOURCE_CELL", "CHAMBER_ORDER", "Extraction",
            "available_chambers", "extract_chambers"]

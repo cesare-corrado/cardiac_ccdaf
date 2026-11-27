@@ -35,6 +35,21 @@ tag, and every other node 0. **Label atrial surfaces** reads it to find the
 rims (see [Atrial surfaces](user-guide/atrial-surfaces.md)). It is saved
 with the volume.
 
+### Source ids (`sourcePoint`, `sourceCell`)
+
+**Actions → Extract chambers…** also writes, for each node and element of
+the kept volume, its id in the mesh it was extracted from: the **point**
+array `sourcePoint` and the **cell** array `sourceCell`. When a volume was
+extracted from an extracted volume, the ids still refer to the first mesh.
+**Merge into source mesh…** uses them to find the elements again (see
+[Merging back](user-guide/atrial-surfaces.md#merging-back-into-the-four-chamber-mesh)).
+They are saved with the volume and not offered for colouring.
+
+### Not computed (`-32000`)
+
+A field the merge adds to the four-chamber mesh reads "not computed"
+outside the atrium: NaN for decimal fields, and -32000 for integer fields.
+
 ### Previous tags (`sourceTag`, `sourceTagMap`)
 
 **Actions → Apply to volume** rewrites `elemTag` in ccdaf's atrial labels.
